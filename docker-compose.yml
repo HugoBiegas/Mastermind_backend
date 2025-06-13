@@ -1,0 +1,166 @@
+services:
+  # Base de données PostgreSQL 16
+  db:
+    image: postgres:16-alpine
+    container_name: quantum_mastermind_db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-quantum_mastermind}
+      POSTGRES_USER: ${DB_USER:-quantum_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-quantum_pass_2025_secure}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      # Volume persistant pour les données
+      - postgres_data:/var/lib/postgresql/data
+      # Script d'initialisation
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - quantum_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-quantum_user} -d ${DB_NAME:-quantum_mastermind}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis 7 pour cache et sessions
+  redis:
+    image: redis:7.4-alpine
+    container_name: quantum_mastermind_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - quantum_network
+    restart: unless-stopped
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # Application Python avec Quantum
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    container_name: quantum_mastermind_app
+    environment:
+      # Base de données
+      DATABASE_URL: postgresql://${DB_USER:-quantum_user}:${DB_PASSWORD:-quantum_pass_2025_secure}@db:5432/${DB_NAME:-quantum_mastermind}
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+
+      # Application
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      SECRET_KEY: ${SECRET_KEY:-quantum-secret-ultra-secure-2025-change-me}
+      DEBUG: ${DEBUG:-false}
+
+      # Quantum Computing
+      QISKIT_BACKEND: qasm_simulator
+      MAX_QUBITS: 30
+      QUANTUM_SHOTS: 1024
+
+      # Performance
+      WORKERS: ${WORKERS:-1}
+      MAX_REQUESTS: ${MAX_REQUESTS:-1000}
+      MAX_REQUESTS_JITTER: ${MAX_REQUESTS_JITTER:-100}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: json
+
+      # Security
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:4200","https://yourdomain.com"]'
+      TRUSTED_HOSTS: '["localhost","127.0.0.1","yourdomain.com"]'
+
+    ports:
+      - "8000:8000"
+    volumes:
+      # Code source pour développement (à retirer en production)
+      - ./app:/app/app:ro
+      - app_logs:/app/logs
+    networks:
+      - quantum_network
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Volumes persistants nommés
+volumes:
+  postgres_data:
+    driver: local
+    name: quantum_mastermind_postgres_data_v2
+  redis_data:
+    driver: local
+    name: quantum_mastermind_redis_data_v2
+  app_logs:
+    driver: local
+    name: quantum_mastermind_app_logs
+  nginx_logs:
+    driver: local
+    name: quantum_mastermind_nginx_logs
+
+# Réseau optimisé
+networks:
+  quantum_network:
+    driver: bridge
+    name: quantum_mastermind_network_v2
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16

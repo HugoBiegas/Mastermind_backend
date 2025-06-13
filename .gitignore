@@ -1,0 +1,403 @@
+# === QUANTUM MASTERMIND GITIGNORE ===
+# Optimisé pour Python, FastAPI, Docker, PostgreSQL, Redis, Qiskit
+
+# === PYTHON ===
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Virtual environments
+.env
+.env.local
+.env.*.local
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+pyvenv.cfg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# === FASTAPI / UVICORN ===
+# Logs
+*.log
+logs/
+*.out
+*.err
+
+# FastAPI session files
+.sessions/
+
+# Uvicorn PID files
+*.pid
+
+# === BASE DE DONNÉES ===
+# PostgreSQL
+*.sql.bak
+*.backup
+*.dump
+postgres_data/
+pg_log/
+postgresql.log
+
+# SQLite (si utilisé en dev)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Database migrations backup
+migrations/versions/*.pyc
+alembic.ini.bak
+
+# === CACHE & SESSIONS ===
+# Redis
+redis_data/
+dump.rdb
+redis.log
+redis.conf.bak
+
+# Application cache
+.cache/
+cache/
+tmp/
+
+# === DOCKER ===
+# Volumes Docker persistants
+app_logs/
+nginx_logs/
+
+# Docker override files
+docker-compose.override.yml
+docker-compose.*.override.yml
+.dockerignore.bak
+
+# Docker build cache
+.docker/
+
+# === ENVIRONMENT & CONFIG ===
+# Fichiers d'environnement sensibles
+.env.production
+.env.staging
+.env.development
+.env.test
+.env.backup
+*.env.backup
+
+# Configuration locale
+config.local.py
+settings.local.py
+local_settings.py
+
+# Fichiers secrets
+secrets/
+.secrets/
+*.key
+*.pem
+*.crt
+*.csr
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+
+# === QUANTUM COMPUTING (QISKIT) ===
+# Qiskit cache
+.qiskit/
+qiskit_cache/
+
+# Quantum circuits cache
+*.qasm.cache
+circuits_cache/
+
+# IBMQ credentials
+qiskit.cfg
+ibmq_credentials.json
+
+# Quantum simulation results
+quantum_results/
+simulation_output/
+*.qobj
+
+# Quantum backends cache
+backends_cache/
+
+# === IDEs & EDITORS ===
+# VS Code
+.vscode/
+*.code-workspace
+.history/
+
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.tmlanguage.cache
+*.tmPreferences.cache
+*.stTheme.cache
+*.sublime-workspace
+*.sublime-project
+
+# Vim
+*.swp
+*.swo
+*~
+.netrwhist
+
+# Emacs
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# === OS FILES ===
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# === MONITORING & LOGS ===
+# Application logs
+*.log.*
+log/
+application.log
+error.log
+access.log
+debug.log
+
+# Prometheus metrics
+prometheus_data/
+metrics/
+
+# Grafana
+grafana_data/
+
+# === DOCUMENTATION ===
+# Sphinx documentation
+docs/_build/
+docs/build/
+.doctrees/
+
+# MkDocs
+site/
+
+# === BACKUP & TEMPORARY ===
+# Backup files
+*.bak
+*.tmp
+*.temp
+*.old
+*.orig
+*.save
+*~.nib
+
+# Temporary directories
+temp/
+.tmp/
+
+# Dump files
+*.dmp
+
+# === SECURITY & CERTIFICATES ===
+# SSL certificates
+*.p12
+*.pfx
+*.der
+
+# JWT keys
+jwt_private.key
+jwt_public.key
+*.jwt
+
+# API keys
+api_keys.json
+.api_keys
+credentials.json
+
+# === NODE.JS (si frontend intégré) ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# === ASSETS & MEDIA ===
+# Uploaded files
+uploads/
+media/
+static/uploads/
+
+# Generated assets
+assets/generated/
+.webpack/
+
+# === TESTING ===
+# Test results
+test-results/
+test_output/
+coverage_html/
+
+# Test databases
+test.db
+test.sqlite
+*_test.db
+
+# Mock data
+mock_data/
+fixtures_generated/
+
+# === CI/CD ===
+# GitHub Actions
+.github/workflows/*.yml.bak
+
+# Jenkins
+.jenkins/
+
+# GitLab CI
+.gitlab-ci.yml.bak
+
+# === AUTRES ===
+# Jupyter Lab
+.jupyter/
+.ipython/
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm specific
+#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
+#  be added to the global gitignore or merged into this file.
+#  For PyCharm Community Edition, use 'PyCharm CE' instead of 'PyCharm'.
+
+# === CUSTOM PROJECT FILES ===
+# Configuration spécifique au projet
+local_config.py
+quantum_config.local.py
+
+# Données de développement
+dev_data/
+sample_data/
+seed_data/
+
+# Documentation générée
+api_docs/
+schema_docs/
+
+# Profiling
+*.prof
+profile_results/
+
+# Benchmarks
+benchmark_results/
+performance_logs/

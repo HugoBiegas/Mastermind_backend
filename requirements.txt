@@ -1,0 +1,30 @@
+# === FRAMEWORK WEB ===
+fastapi==0.115.12
+uvicorn[standard]==0.34.3
+websockets==15.0.1
+
+# === BASE DE DONNÉES ===
+sqlalchemy==2.0.41
+psycopg2-binary==2.9.10
+alembic==1.13.2
+
+# === UTILITAIRES ===
+python-dotenv==1.0.1
+pydantic==2.11.6
+python-multipart==0.0.9
+
+# === QUANTUM COMPUTING ===
+qiskit==2.0.2
+qiskit-aer==0.17.1
+numpy==2.3.0
+scipy==1.15.3
+
+# === SÉCURITÉ ET AUTHENTIFICATION ===
+python-jose[cryptography]==3.4.0
+passlib[bcrypt]==1.7.4
+
+# === CACHE ET SESSIONS ===
+redis==6.2.0
+
+# === HTTP CLIENT ET MONITORING ===
+httpx==0.28.1
