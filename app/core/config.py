@@ -4,7 +4,9 @@ Gestion sécurisée des variables d'environnement et paramètres
 """
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
-from pydantic import AnyHttpUrl, BaseSettings, PostgresDsn, validator
+from pydantic import AnyHttpUrl, field_validator
+from pydantic_settings import BaseSettings
+from pydantic_core import MultiHostUrl
 import secrets
 
 
@@ -32,20 +34,24 @@ class Settings(BaseSettings):
     DB_USER: str = "quantum_user"
     DB_PASSWORD: str = "quantum_pass"
     DB_NAME: str = "quantum_mastermind"
-    DATABASE_URL: Optional[PostgresDsn] = None
+    DATABASE_URL: Optional[str] = None
 
-    @validator("DATABASE_URL", pre=True)
-    def assemble_db_connection(cls, v: Optional[str], values: Dict[str, Any]) -> Any:
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def assemble_db_connection(cls, v: Optional[str], info) -> Any:
         if isinstance(v, str):
             return v
-        return PostgresDsn.build(
+
+        # Accès aux valeurs via info.data dans Pydantic v2
+        values = info.data
+        return str(MultiHostUrl.build(
             scheme="postgresql+asyncpg",
-            user=values.get("DB_USER"),
+            username=values.get("DB_USER"),
             password=values.get("DB_PASSWORD"),
             host=values.get("DB_HOST"),
-            port=str(values.get("DB_PORT")),
+            port=values.get("DB_PORT"),
             path=f"/{values.get('DB_NAME') or ''}",
-        )
+        ))
 
     # === REDIS ===
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -59,13 +65,10 @@ class Settings(BaseSettings):
     JWT_REFRESH_EXPIRE_DAYS: int = 7
 
     # === CORS ===
-    BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = [
-        "http://localhost:3000",
-        "http://localhost:4200",
-        "http://localhost:8080"
-    ]
+    BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
 
-    @validator("BACKEND_CORS_ORIGINS", pre=True)
+    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
+    @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
         if isinstance(v, str) and not v.startswith("["):
             return [i.strip() for i in v.split(",")]
@@ -113,18 +116,133 @@ class Settings(BaseSettings):
     DEFAULT_PAGE_SIZE: int = 20
     MAX_PAGE_SIZE: int = 100
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    # === CORS ET SÉCURITÉ AVANCÉE ===
+    ALLOWED_HOSTS: List[str] = ["*"]
+    CORS_ORIGINS: List[AnyHttpUrl] = []
+
+    # === CACHE ET SESSIONS ===
+    CACHE_TTL: int = 3600
+    SESSION_TTL: int = 7200
+
+    # === RATE LIMITING AVANCÉ ===
+    RATE_LIMIT_REQUESTS: int = 100
+    RATE_LIMIT_WINDOW: int = 60
+
+    # === EMAIL (pour les fonctionnalités futures) ===
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    EMAIL_FROM: Optional[str] = None
+
+    # === LIMITES ET PERFORMANCES ===
+    MAX_CONNECTION_POOL_SIZE: int = 20
+    MAX_OVERFLOW: int = 30
+    CONNECTION_TIMEOUT: int = 30
+    REQUEST_TIMEOUT: int = 60
+
+    # === SÉCURITÉ AVANCÉE ===
+    ALLOWED_IPS: List[str] = []
+    BLOCKED_IPS: List[str] = []
+    MAX_LOGIN_ATTEMPTS: int = 5
+    LOGIN_LOCKOUT_DURATION: int = 900  # 15 minutes
+
+    # === QUANTUM SPECIFIC ===
+    MAX_QUBITS_DEFAULT: int = 10
+    MAX_QUANTUM_OPERATIONS: int = 1000
+    QUANTUM_SIMULATION_MEMORY_LIMIT: int = 2048  # MB
+
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+        "validate_assignment": True,
+        "case_sensitive": False
+    }
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
+        """Parse CORS origins from string or list"""
+        if isinstance(v, str):
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
+
+    @field_validator("ALLOWED_HOSTS", mode="before")
+    @classmethod
+    def parse_allowed_hosts(cls, v: Union[str, List[str]]) -> List[str]:
+        """Parse allowed hosts from string or list"""
+        if isinstance(v, str):
+            return [host.strip() for host in v.split(",") if host.strip()]
+        return v
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug(cls, v: Union[str, bool]) -> bool:
+        """Parse DEBUG from string or bool"""
+        if isinstance(v, str):
+            return v.lower() in ("true", "1", "on", "yes")
+        return v
+
+    @property
+    def database_url_sync(self) -> str:
+        """URL de base de données synchrone pour Alembic"""
+        if self.DATABASE_URL:
+            return self.DATABASE_URL.replace("+asyncpg", "")
+        return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
+    @property
+    def redis_url_parsed(self) -> str:
+        """URL Redis parsée avec mot de passe si nécessaire"""
+        if self.REDIS_PASSWORD:
+            return self.REDIS_URL.replace("redis://", f"redis://:{self.REDIS_PASSWORD}@")
+        return self.REDIS_URL
+
+    def get_logging_config(self) -> Dict[str, Any]:
+        """Configuration complète du logging"""
+        return {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                    "datefmt": "%Y-%m-%d %H:%M:%S",
+                },
+                "access": {
+                    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                },
+            },
+            "handlers": {
+                "default": {
+                    "formatter": "default",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                },
+                "access": {
+                    "formatter": "access",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                },
+            },
+            "loggers": {
+                "uvicorn": {"handlers": ["default"], "level": self.LOG_LEVEL},
+                "uvicorn.error": {"level": "INFO"},
+                "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+                "quantum_mastermind": {"handlers": ["default"], "level": self.LOG_LEVEL, "propagate": False},
+            },
+        }
 
 
 @lru_cache()
 def get_settings() -> Settings:
-    """Singleton pour la configuration - utilise le cache LRU"""
+    """
+    Retourne les paramètres de configuration avec cache
+    Pattern Singleton pour optimiser les performances
+    """
     return Settings()
 
 
-# Instance globale
+# Instance globale des paramètres
 settings = get_settings()
 
 

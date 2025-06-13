@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.game import GameType, GameMode, GameStatus, PlayerStatus, Difficulty
 
@@ -52,7 +52,7 @@ class GameCreate(GameBase):
         None,
         min_length=4,
         max_length=20,
-        regex=r'^[A-Z0-9]+$',
+        pattern=r'^[A-Z0-9]+$',
         description="Code de room personnalisé"
     )
     is_private: bool = Field(
@@ -70,10 +70,12 @@ class GameCreate(GameBase):
         description="Paramètres personnalisés"
     )
 
-    @validator('max_players')
-    def validate_max_players_for_mode(cls, v, values):
+    @field_validator('max_players')
+    @classmethod
+    def validate_max_players_for_mode(cls, v, info):
         """Valide le nombre de joueurs selon le mode"""
-        game_mode = values.get('game_mode')
+        data = info.data
+        game_mode = data.get('game_mode')
         if game_mode == GameMode.SOLO and v != 1:
             raise ValueError("Mode solo: 1 joueur maximum")
         elif game_mode == GameMode.MULTIPLAYER and v < 2:
@@ -95,6 +97,7 @@ class GameJoin(BaseModel):
         ...,
         min_length=4,
         max_length=20,
+        pattern=r'^[A-Z0-9]+$',
         description="Code de la room"
     )
     password: Optional[str] = Field(
@@ -104,16 +107,26 @@ class GameJoin(BaseModel):
     player_name: Optional[str] = Field(
         None,
         min_length=1,
-        max_length=100,
-        description="Nom d'affichage personnalisé"
+        max_length=50,
+        description="Nom du joueur personnalisé"
     )
 
 
-# === SCHÉMAS DE RÉPONSE ===
+class GameLeave(BaseModel):
+    """Schéma pour quitter une partie"""
+    reason: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Raison de départ"
+    )
+
+
+# === SCHÉMAS COMPLETS ===
 class GameInfo(BaseModel):
-    """Informations d'une partie"""
+    """Informations complètes d'une partie"""
     id: UUID
     room_id: str
+    created_by: Optional[UUID]
     game_type: GameType
     game_mode: GameMode
     difficulty: Difficulty
@@ -121,72 +134,85 @@ class GameInfo(BaseModel):
     max_attempts: int
     time_limit: Optional[int]
     max_players: int
-    current_players: int
+    current_players_count: int
+    is_private: bool
+    has_password: bool
+    settings: Dict[str, Any]
     created_at: datetime
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
-    game_duration: Optional[timedelta]
-    is_full: bool
-    is_quantum_enabled: bool
-    created_by: Optional[UUID]
-    winner_id: Optional[UUID]
+    estimated_duration: Optional[int]
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
+
+    @property
+    def is_full(self) -> bool:
+        """Vérifie si la partie est complète"""
+        return self.current_players_count >= self.max_players
+
+    @property
+    def can_join(self) -> bool:
+        """Vérifie si on peut rejoindre la partie"""
+        return (
+            self.status == GameStatus.WAITING_PLAYERS and
+            not self.is_full
+        )
+
+    @property
+    def duration(self) -> Optional[timedelta]:
+        """Calcule la durée de la partie"""
+        if self.started_at and self.finished_at:
+            return self.finished_at - self.started_at
+        elif self.started_at:
+            return datetime.utcnow() - self.started_at
+        return None
 
 
-class GamePublic(BaseModel):
-    """Informations publiques d'une partie"""
-    id: UUID
+class GameFull(GameInfo):
+    """Partie complète avec joueurs et données détaillées"""
+    players: List["GamePlayerInfo"] = []
+    attempts_history: List["AttemptResult"] = []
+    current_combination: Optional[List[str]] = None  # Visible pour le créateur
+    quantum_state: Optional[Dict[str, Any]] = None
+    leaderboard: List[Dict[str, Any]] = []
+    chat_messages: List[Dict[str, Any]] = []
+
+    model_config = {"from_attributes": True}
+
+    @property
+    def host(self) -> Optional["GamePlayerInfo"]:
+        """Retourne le joueur host"""
+        return next((p for p in self.players if p.is_host), None)
+
+    @property
+    def active_players(self) -> List["GamePlayerInfo"]:
+        """Retourne les joueurs actifs"""
+        return [p for p in self.players if p.status == PlayerStatus.ACTIVE]
+
+    @property
+    def winner(self) -> Optional["GamePlayerInfo"]:
+        """Retourne le gagnant s'il y en a un"""
+        return next((p for p in self.players if p.has_won), None)
+
+
+class GameSummary(BaseModel):
+    """Résumé d'une partie terminée"""
+    game_id: UUID
     room_id: str
     game_type: GameType
     game_mode: GameMode
     difficulty: Difficulty
-    status: GameStatus
-    max_players: int
-    current_players: int
-    created_at: datetime
-    is_full: bool
-    has_password: bool
-
-    class Config:
-        from_attributes = True
-
-
-class GameFull(GameInfo):
-    """Partie complète avec tous les détails"""
-    quantum_solution: Optional[Dict[str, Any]]
-    classical_solution: Optional[List[str]]
+    duration: timedelta
     total_attempts: int
-    settings: Optional[Dict[str, Any]]
-    players: List["GamePlayerInfo"]
+    players_count: int
+    winner: Optional[str]
+    final_scores: Dict[str, int]
+    quantum_advantage_used: bool
+    completion_rate: float
+    average_score: float
+    best_time: Optional[float]
 
-    class Config:
-        from_attributes = True
-
-
-class GameList(BaseModel):
-    """Liste de parties"""
-    games: List[GamePublic]
-    total: int
-    page: int
-    page_size: int
-    active_games: int
-    waiting_games: int
-
-    class Config:
-        from_attributes = True
-
-
-# === SCHÉMAS PLAYER ===
-class PlayerBase(BaseModel):
-    """Schéma de base pour un joueur"""
-    player_name: str = Field(
-        ...,
-        min_length=1,
-        max_length=100,
-        description="Nom d'affichage"
-    )
+    model_config = {"from_attributes": True}
 
 
 class GamePlayerInfo(BaseModel):
@@ -210,8 +236,7 @@ class GamePlayerInfo(BaseModel):
     finished_at: Optional[datetime]
     time_taken: Optional[timedelta]
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class GamePlayerUpdate(BaseModel):
@@ -225,8 +250,8 @@ class AttemptBase(BaseModel):
     """Schéma de base pour une tentative"""
     guess: List[str] = Field(
         ...,
-        min_items=4,
-        max_items=4,
+        min_length=4,
+        max_length=4,
         description="Tentative (4 couleurs)"
     )
     use_quantum_measurement: bool = Field(
@@ -240,7 +265,8 @@ class AttemptBase(BaseModel):
         description="Position à mesurer (0-3)"
     )
 
-    @validator('guess')
+    @field_validator('guess')
+    @classmethod
     def validate_colors(cls, v):
         """Valide les couleurs de la tentative"""
         valid_colors = {
@@ -271,8 +297,7 @@ class AttemptResult(BaseModel):
     quantum_result: Optional[Dict[str, Any]]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class AttemptHistory(BaseModel):
@@ -281,109 +306,41 @@ class AttemptHistory(BaseModel):
     total_attempts: int
     best_score: int
     average_time: float
+    quantum_measurements_count: int
+    success_rate: float
 
-    class Config:
-        from_attributes = True
 
-
-# === SCHÉMAS DE RECHERCHE ===
-class GameSearch(BaseModel):
-    """Critères de recherche de parties"""
-    game_type: Optional[GameType] = None
-    game_mode: Optional[GameMode] = None
-    status: Optional[GameStatus] = None
-    difficulty: Optional[Difficulty] = None
-    has_slots: Optional[bool] = None  # Parties avec places libres
-    created_by: Optional[UUID] = None
-    sort_by: Optional[str] = Field(
-        "created_at",
-        regex=r'^(created_at|players_count|status)$'
+# === SCHÉMAS DE HINTS ===
+class HintRequest(BaseModel):
+    """Demande d'indice"""
+    hint_type: str = Field(
+        ...,
+        pattern=r'^(color_presence|position_hint|quantum_measurement|grover_search)$',
+        description="Type d'indice demandé"
     )
-    sort_order: Optional[str] = Field(
-        "desc",
-        regex=r'^(asc|desc)$'
+    position: Optional[int] = Field(
+        None,
+        ge=0,
+        le=3,
+        description="Position spécifique (si applicable)"
     )
-    page: int = Field(1, ge=1)
-    page_size: int = Field(20, ge=1, le=100)
+    quantum_parameters: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Paramètres quantiques spéciaux"
+    )
 
 
-# === SCHÉMAS DE STATISTIQUES ===
-class GameStats(BaseModel):
-    """Statistiques d'une partie"""
-    game_id: UUID
-    total_attempts: int
-    average_attempts: float
-    fastest_solve: Optional[timedelta]
-    slowest_solve: Optional[timedelta]
-    quantum_measurements_total: int
-    players_finished: int
-    completion_rate: float
-
-    class Config:
-        from_attributes = True
-
-
-class PlayerGameStats(BaseModel):
-    """Statistiques d'un joueur pour une partie"""
-    player_id: UUID
-    game_id: UUID
-    attempts_made: int
-    best_result: Dict[str, Any]
-    time_progression: List[float]  # Temps par tentative
-    quantum_usage: Dict[str, int]
-    efficiency_score: float
-
-    class Config:
-        from_attributes = True
-
-
-# === SCHÉMAS D'ÉVÉNEMENTS ===
-class GameEvent(BaseModel):
-    """Événement de jeu"""
-    event_type: str
-    game_id: UUID
-    player_id: Optional[UUID] = None
-    data: Dict[str, Any]
-    timestamp: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class GameMessage(BaseModel):
-    """Message dans une partie"""
-    type: str
-    from_player: Optional[str] = None
-    content: Any
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        from_attributes = True
-
-
-# === SCHÉMAS DE SOLUTION ===
-class SolutionReveal(BaseModel):
-    """Révélation de la solution"""
-    game_id: UUID
-    classical_solution: List[str]
-    quantum_solution: Optional[Dict[str, Any]]
-    generation_method: str
-    difficulty_level: float
-
-    class Config:
-        from_attributes = True
-
-
-class SolutionHint(BaseModel):
-    """Indice pour la solution"""
+class HintResult(BaseModel):
+    """Résultat d'un indice"""
     hint_type: str  # 'color_presence', 'position_hint', 'quantum_measurement'
     position: Optional[int] = None
     color: Optional[str] = None
     confidence: float
     cost: int  # Points déduits
+    quantum_advantage: bool = False
+    additional_info: Optional[Dict[str, Any]] = None
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 # === SCHÉMAS D'ADMINISTRATION ===
@@ -401,15 +358,14 @@ class GameAdmin(BaseModel):
     has_issues: bool
     moderator_notes: Optional[str]
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class GameModeration(BaseModel):
     """Actions de modération"""
     action: str = Field(
         ...,
-        regex=r'^(pause|resume|terminate|kick_player|ban_player)$'
+        pattern=r'^(pause|resume|terminate|kick_player|ban_player)$'
     )
     target_player_id: Optional[UUID] = None
     reason: str = Field(
@@ -432,7 +388,7 @@ class GameReport(BaseModel):
     reporter_id: UUID
     report_type: str = Field(
         ...,
-        regex=r'^(cheating|griefing|inappropriate_behavior|bug|other)$'
+        pattern=r'^(cheating|griefing|inappropriate_behavior|bug|other)$'
     )
     description: str = Field(
         ...,
@@ -442,8 +398,7 @@ class GameReport(BaseModel):
     )
     evidence: Optional[Dict[str, Any]] = None
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 # === SCHÉMAS DE TOURNOI ===
@@ -461,8 +416,7 @@ class TournamentInfo(BaseModel):
     rules: Dict[str, Any]
     status: str
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
 
 
 class TournamentRegistration(BaseModel):
@@ -471,9 +425,128 @@ class TournamentRegistration(BaseModel):
     team_name: Optional[str] = None
     preferences: Optional[Dict[str, Any]] = None
 
-    class Config:
-        from_attributes = True
+    model_config = {"from_attributes": True}
+
+
+# === SCHÉMAS DE CLASSEMENT ===
+class Leaderboard(BaseModel):
+    """Classement général"""
+    period: str = Field(
+        ...,
+        pattern=r'^(daily|weekly|monthly|all_time)$',
+        description="Période du classement"
+    )
+    game_type: Optional[GameType] = None
+    entries: List["LeaderboardEntry"]
+    last_updated: datetime
+
+
+class LeaderboardEntry(BaseModel):
+    """Entrée du classement"""
+    rank: int
+    user_id: UUID
+    username: str
+    score: int
+    games_played: int
+    win_rate: float
+    average_time: float
+    quantum_score: int
+    trend: str  # "up", "down", "stable", "new"
+
+    model_config = {"from_attributes": True}
+
+
+# === SCHÉMAS DE STATISTIQUES ===
+class GameStatistics(BaseModel):
+    """Statistiques générales des parties"""
+    total_games: int
+    active_games: int
+    games_today: int
+    games_this_week: int
+    average_game_duration: float
+    most_popular_mode: GameType
+    quantum_usage_rate: float
+    player_satisfaction_score: float
+    completion_rate: float
+
+
+class PlayerGameStats(BaseModel):
+    """Statistiques d'un joueur pour les jeux"""
+    user_id: UUID
+    total_games: int
+    wins: int
+    losses: int
+    draws: int
+    win_rate: float
+    average_score: int
+    best_score: int
+    total_time_played: timedelta
+    average_game_time: timedelta
+    best_time: Optional[timedelta]
+    favorite_difficulty: Difficulty
+    quantum_mastery_level: str
+    achievements_count: int
+    current_streak: int
+    best_streak: int
+
+    model_config = {"from_attributes": True}
+
+
+# === SCHÉMAS DE RECHERCHE ET FILTRES ===
+class GameSearchFilters(BaseModel):
+    """Filtres de recherche de parties"""
+    game_type: Optional[GameType] = None
+    game_mode: Optional[GameMode] = None
+    difficulty: Optional[Difficulty] = None
+    status: Optional[GameStatus] = None
+    has_password: Optional[bool] = None
+    min_players: Optional[int] = Field(None, ge=1)
+    max_players: Optional[int] = Field(None, le=8)
+    created_since: Optional[datetime] = None
+    room_code: Optional[str] = None
+
+
+class GameSearchResult(BaseModel):
+    """Résultat de recherche de parties"""
+    games: List[GameInfo]
+    total_count: int
+    page: int
+    page_size: int
+    has_next: bool
+    filters_applied: GameSearchFilters
+
+
+# === SCHÉMAS DE CONFIGURATION ===
+class GameConfiguration(BaseModel):
+    """Configuration avancée d'une partie"""
+    allow_hints: bool = True
+    hint_cost_multiplier: float = Field(1.0, ge=0.1, le=5.0)
+    time_pressure_mode: bool = False
+    quantum_features_enabled: bool = True
+    spectators_allowed: bool = False
+    chat_enabled: bool = True
+    auto_start_when_full: bool = True
+    eliminate_on_timeout: bool = False
+    scoring_system: str = Field(
+        "standard",
+        pattern=r'^(standard|time_based|quantum_enhanced|competitive)$'
+    )
+    custom_rules: Optional[Dict[str, Any]] = None
+
+
+# === SCHÉMAS DE NOTIFICATIONS ===
+class GameNotification(BaseModel):
+    """Notification de jeu"""
+    type: str = Field(
+        ...,
+        pattern=r'^(game_started|player_joined|player_left|game_finished|hint_available|your_turn)$'
+    )
+    game_id: UUID
+    message: str
+    data: Optional[Dict[str, Any]] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # === FORWARD REFERENCES ===
 GameFull.model_rebuild()
+Leaderboard.model_rebuild()

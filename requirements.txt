@@ -11,7 +11,8 @@ alembic==1.13.2
 # === UTILITAIRES ===
 python-dotenv==1.0.1
 pydantic==2.11.6
-python-multipart==0.0.9
+pydantic-settings==2.9.1
+python-multipart==0.0.19
 
 # === QUANTUM COMPUTING ===
 qiskit==2.0.2
