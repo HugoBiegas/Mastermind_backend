@@ -1,18 +1,20 @@
 # === FRAMEWORK WEB ===
 fastapi==0.115.12
 uvicorn[standard]==0.34.3
-websockets==15.0.1
 
 # === BASE DE DONNÉES ===
 sqlalchemy==2.0.41
-psycopg2-binary==2.9.10
-alembic==1.13.2
+asyncpg==0.30.0
+alembic==1.14.0
+
+# === WEBSOCKETS ===
+websockets==15.0.1
 
 # === UTILITAIRES ===
 python-dotenv==1.0.1
 pydantic==2.11.6
 pydantic-settings==2.9.1
-python-multipart==0.0.19
+python-multipart==0.0.20
 
 # === QUANTUM COMPUTING ===
 qiskit==2.0.2
@@ -29,3 +31,6 @@ redis==6.2.0
 
 # === HTTP CLIENT ET MONITORING ===
 httpx==0.28.1
+
+# === PRODUCTION ===
+gunicorn==23.0.0
