@@ -2,14 +2,15 @@
 Repository de base avec pattern générique
 Opérations CRUD communes et optimisations SQLAlchemy 2.0
 """
-from abc import ABC, abstractmethod
+from abc import ABC
+from operator import or_
 from typing import Any, Dict, Generic, List, Optional, Type, TypeVar, Union, Sequence
 from uuid import UUID
 
-from sqlalchemy import and_, desc, asc, func, select, update, delete
+from sqlalchemy import and_, desc, asc, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload, joinedload
-from sqlalchemy.exc import IntegrityError, NoResultFound
+from sqlalchemy.orm import selectinload
 
 from app.core.database import Base, PaginationParams, PaginationResult
 from app.utils.exceptions import (

@@ -2,16 +2,16 @@
 Module de sécurité pour Quantum Mastermind
 Gestion JWT, hachage des mots de passe, validation sécurisée
 """
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Union
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from passlib.hash import bcrypt
-import secrets
 import re
+import secrets
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 from uuid import UUID
 
-from .config import settings, security_config
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from .config import settings
 
 # === CONTEXT DE HACHAGE ===
 pwd_context = CryptContext(

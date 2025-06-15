@@ -2,31 +2,27 @@
 Configuration de base de données pour Quantum Mastermind
 SQLAlchemy 2.0.41 avec support async et PostgreSQL
 """
-from typing import AsyncGenerator, Optional, Dict, Any
-import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import AsyncGenerator, Optional, Dict, Any
+from uuid import UUID, uuid4
 
+from sqlalchemy import (
+    create_engine,
+    MetaData,
+    text,
+    event,
+    DateTime
+)
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     AsyncEngine,
     async_sessionmaker,
     create_async_engine
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import (
-    create_engine,
-    MetaData,
-    inspect,
-    text,
-    event,
-    String,
-    DateTime,
-    func
-)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from uuid import UUID, uuid4
-from datetime import datetime, timezone
 
 from app.core.config import settings, is_test
 

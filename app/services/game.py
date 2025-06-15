@@ -7,7 +7,7 @@ import hashlib
 import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, and_, or_, desc

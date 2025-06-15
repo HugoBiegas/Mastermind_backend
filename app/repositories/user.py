@@ -2,7 +2,7 @@
 Repository pour la gestion des utilisateurs
 Couche d'accès aux données avec SQLAlchemy 2.0.41 et Pydantic v2
 """
-from typing import List, Optional, Dict, Any, Sequence
+from typing import List, Optional, Dict, Any, Sequence, Union
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 

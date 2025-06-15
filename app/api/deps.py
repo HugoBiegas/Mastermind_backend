@@ -2,22 +2,20 @@
 Dépendances FastAPI pour Quantum Mastermind
 Injection de dépendances pour l'authentification, base de données, etc.
 """
-from typing import Any, Dict, Generator, Optional
-from uuid import UUID
-import time
 import hashlib
+import time
+from typing import Any, Dict, Optional
+from uuid import UUID
 
 from fastapi import Depends, HTTPException, status, Request, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import jwt_manager
 from app.models.user import User
 from app.services.auth import auth_service
 from app.utils.exceptions import (
-    AuthenticationError, AuthorizationError,
-    get_http_status_code, get_exception_details
+    AuthenticationError, get_http_status_code, get_exception_details
 )
 
 # === CONFIGURATION DE SÉCURITÉ ===

@@ -512,7 +512,57 @@ class FileNotFoundError(FileError):
         if filename:
             self.details['filename'] = filename
 
+# === EXCEPTIONS DE BASE DE DONNÉES ===
 
+class DatabaseError(BaseQuantumMastermindError):
+    """Erreur de base de données générale"""
+
+    def __init__(
+            self,
+            message: str,
+            operation: Optional[str] = None,
+            table: Optional[str] = None,
+            constraint: Optional[str] = None
+    ):
+        super().__init__(message, "DATABASE_ERROR", status_code=500)
+        if operation:
+            self.details['operation'] = operation
+        if table:
+            self.details['table'] = table
+        if constraint:
+            self.details['constraint'] = constraint
+
+
+class DatabaseConnectionError(DatabaseError):
+    """Erreur de connexion à la base de données"""
+
+    def __init__(
+            self,
+            message: str = "Erreur de connexion à la base de données",
+            host: Optional[str] = None,
+            database: Optional[str] = None
+    ):
+        super().__init__(message, "DATABASE_CONNECTION_ERROR")
+        if host:
+            self.details['host'] = host
+        if database:
+            self.details['database'] = database
+
+
+class DatabaseIntegrityError(DatabaseError):
+    """Erreur d'intégrité de la base de données"""
+
+    def __init__(
+            self,
+            message: str,
+            constraint_name: Optional[str] = None,
+            table_name: Optional[str] = None
+    ):
+        super().__init__(message, "DATABASE_INTEGRITY_ERROR", status_code=409)
+        if constraint_name:
+            self.details['constraint_name'] = constraint_name
+        if table_name:
+            self.details['table_name'] = table_name
 class FilePermissionError(FileError):
     """Erreur de permissions de fichier"""
 

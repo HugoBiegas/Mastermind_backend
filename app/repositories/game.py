@@ -10,7 +10,7 @@ from sqlalchemy import and_, desc, func, select, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 
-from app.models.game import Game, GamePlayer, GameAttempt, GameStatus, GameType, GameMode, PlayerStatus
+from app.models.game import Game, GameParticipation, GameAttempt, GameStatus, GameType, GameMode, ParticipationStatus
 from app.schemas.game import GameCreate, GameUpdate, GameSearch
 from .base import BaseRepository
 
@@ -116,10 +116,10 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
 
         if has_slots:
             # Sous-requête pour compter les joueurs actuels
-            player_count = select(func.count(GamePlayer.id)).where(
+            player_count = select(func.count(GameParticipation.id)).where(
                 and_(
-                    GamePlayer.game_id == Game.id,
-                    GamePlayer.status != PlayerStatus.DISCONNECTED
+                    GameParticipation.game_id == Game.id,
+                    GameParticipation.status != ParticipationStatus.DISCONNECTED
                 )
             ).scalar_subquery()
 
@@ -150,9 +150,9 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
         Returns:
             Liste des parties de l'utilisateur
         """
-        # Jointure avec GamePlayer pour récupérer les parties de l'utilisateur
-        query = select(Game).join(GamePlayer).where(
-            GamePlayer.user_id == user_id
+        # Jointure avec GameParticipation pour récupérer les parties de l'utilisateur
+        query = select(Game).join(GameParticipation).where(
+            GameParticipation.user_id == user_id
         ).options(selectinload(Game.players))
 
         if status:
@@ -195,8 +195,8 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
 
         if search_criteria.has_slots:
             # Seulement les parties avec places libres
-            player_count = select(func.count(GamePlayer.id)).where(
-                GamePlayer.game_id == Game.id
+            player_count = select(func.count(GameParticipation.id)).where(
+                GameParticipation.game_id == Game.id
             ).scalar_subquery()
             query = query.where(player_count < Game.max_players)
 
@@ -207,7 +207,7 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
         if search_criteria.sort_by == 'created_at':
             sort_field = Game.created_at
         elif search_criteria.sort_by == 'players_count':
-            sort_field = func.count(GamePlayer.id)
+            sort_field = func.count(GameParticipation.id)
         else:
             sort_field = Game.created_at
 
@@ -365,15 +365,15 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
         Returns:
             Dictionnaire des statistiques
         """
-        # Jointure avec GamePlayer pour les stats
+        # Jointure avec GameParticipation pour les stats
         query = select(
-            func.count(GamePlayer.id).label('total_games'),
-            func.sum(case((GamePlayer.has_won == True, 1), else_=0)).label('wins'),
-            func.avg(GamePlayer.score).label('avg_score'),
-            func.sum(GamePlayer.quantum_measurements_used).label('total_measurements'),
-            func.sum(GamePlayer.grover_hints_used).label('total_grover_hints'),
-            func.avg(GamePlayer.quantum_advantage_score).label('avg_quantum_advantage')
-        ).where(GamePlayer.user_id == user_id)
+            func.count(GameParticipation.id).label('total_games'),
+            func.sum(case((GameParticipation.has_won == True, 1), else_=0)).label('wins'),
+            func.avg(GameParticipation.score).label('avg_score'),
+            func.sum(GameParticipation.quantum_measurements_used).label('total_measurements'),
+            func.sum(GameParticipation.grover_hints_used).label('total_grover_hints'),
+            func.avg(GameParticipation.quantum_advantage_score).label('avg_quantum_advantage')
+        ).where(GameParticipation.user_id == user_id)
 
         result = await db.execute(query)
         row = result.first()
@@ -405,17 +405,17 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
         }
 
 
-class GamePlayerRepository(BaseRepository[GamePlayer, dict, dict]):
+class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict]):
     """Repository pour les joueurs dans les parties"""
 
     def __init__(self):
-        super().__init__(GamePlayer)
+        super().__init__(GameParticipation)
 
     async def get_by_unique_field(
             self,
             db: AsyncSession,
             field_value: Any
-    ) -> Optional[GamePlayer]:
+    ) -> Optional[GameParticipation]:
         """Implémentation abstraite - récupère par game_id + user_id"""
         # Cette méthode nécessiterait deux valeurs, on l'adapte
         return None
@@ -425,7 +425,7 @@ class GamePlayerRepository(BaseRepository[GamePlayer, dict, dict]):
             db: AsyncSession,
             game_id: UUID,
             user_id: UUID
-    ) -> Optional[GamePlayer]:
+    ) -> Optional[GameParticipation]:
         """
         Récupère un joueur dans une partie spécifique
 
@@ -437,10 +437,10 @@ class GamePlayerRepository(BaseRepository[GamePlayer, dict, dict]):
         Returns:
             Le joueur ou None
         """
-        query = select(GamePlayer).where(
+        query = select(GameParticipation).where(
             and_(
-                GamePlayer.game_id == game_id,
-                GamePlayer.user_id == user_id
+                GameParticipation.game_id == game_id,
+                GameParticipation.user_id == user_id
             )
         )
 
@@ -453,7 +453,7 @@ class GamePlayerRepository(BaseRepository[GamePlayer, dict, dict]):
             game_id: UUID,
             *,
             active_only: bool = False
-    ) -> List[GamePlayer]:
+    ) -> List[GameParticipation]:
         """
         Récupère tous les joueurs d'une partie
 
@@ -465,14 +465,14 @@ class GamePlayerRepository(BaseRepository[GamePlayer, dict, dict]):
         Returns:
             Liste des joueurs
         """
-        query = select(GamePlayer).where(GamePlayer.game_id == game_id)
+        query = select(GameParticipation).where(GameParticipation.game_id == game_id)
 
         if active_only:
             query = query.where(
-                GamePlayer.status != PlayerStatus.DISCONNECTED
+                GameParticipation.status != ParticipationStatus.DISCONNECTED
             )
 
-        query = query.order_by(GamePlayer.join_order)
+        query = query.order_by(GameParticipation.join_order)
 
         result = await db.execute(query)
         return result.scalars().all()

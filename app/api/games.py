@@ -2,7 +2,7 @@
 Routes de gestion des jeux pour Quantum Mastermind
 Création de parties, gameplay, statistiques, recherche
 """
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
@@ -14,17 +14,16 @@ from app.api.deps import (
     get_pagination_params, get_search_params, create_http_exception_from_error,
     PaginationParams, SearchParams
 )
+from app.models.game import GameType, GameMode, GameStatus
 from app.models.user import User
-from app.models.game import GameType, GameMode, GameStatus, Difficulty
-from app.services.game import game_service
-from app.services.quantum import quantum_service
+from app.schemas.auth import MessageResponse
 from app.schemas.game import (
     GameCreate, GameUpdate, GameJoin, AttemptCreate,
-    GameInfo, GameFull, GamePublic, GameList, GameSearch,
-    AttemptResult, SolutionHint, SolutionReveal
+    GameInfo, GameFull, GameList, AttemptResult, SolutionReveal
 )
 from app.schemas.quantum import QuantumHint
-from app.schemas.auth import MessageResponse
+from app.services.game import game_service
+from app.services.quantum import quantum_service
 from app.utils.exceptions import (
     EntityNotFoundError, GameError, GameNotActiveError,
     GameFullError, ValidationError

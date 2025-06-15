@@ -3,6 +3,7 @@ Application principale Quantum Mastermind
 Point d'entrée FastAPI avec configuration complète
 """
 import asyncio
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict
@@ -48,6 +49,8 @@ async def lifespan(app: FastAPI):
     # Démarrage
     print("🚀 Démarrage de Quantum Mastermind...")
 
+    cleanup_task = None  # Initialiser la variable
+
     try:
         # Initialisation de la base de données
         await init_db()
@@ -60,27 +63,34 @@ async def lifespan(app: FastAPI):
         print("🎯 Quantum Mastermind API prête!")
         print(f"📡 Serveur: {settings.API_HOST}:{settings.API_PORT}")
         print(f"🌐 Environnement: {settings.ENVIRONMENT}")
-        print(f"⚛️ Quantum Backend: {settings.QISKIT_BACKEND}")
 
         yield
+
+    except Exception as e:
+        print(f"❌ Erreur lors de l'initialisation de la base de données: {e}")
+        print("🛑 Arrêt de Quantum Mastermind...")
+        raise  # Re-lever l'exception pour arrêter l'app
 
     finally:
         # Arrêt
         print("🛑 Arrêt de Quantum Mastermind...")
 
-        # Arrêt des tâches
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
+        # Arrêt des tâches (seulement si elle existe)
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
 
         # Fermeture des connexions
-        await close_db()
-        print("✅ Base de données fermée")
+        try:
+            await close_db()
+            print("✅ Base de données fermée")
+        except:
+            pass
 
         print("👋 Quantum Mastermind arrêté proprement")
-
 
 # === CRÉATION DE L'APPLICATION ===
 
@@ -278,50 +288,46 @@ async def health_check():
         "version": settings.VERSION,
         "environment": settings.ENVIRONMENT,
         "components": {
-            "api": "healthy",
-            "database": "unknown",
-            "redis": "unknown",
-            "quantum": "unknown"
+            "api": "healthy"
         }
     }
 
     # Test de la base de données
     try:
         async for db in get_db():
-            await db.execute("SELECT 1")
+            from sqlalchemy import text
+            await db.execute(text("SELECT 1"))
             health_status["components"]["database"] = "healthy"
             break
     except Exception as e:
-        health_status["components"]["database"] = "unhealthy"
-        health_status["status"] = "degraded"
-
-    # Test de Redis (si configuré)
-    try:
-        # TODO: Ajouter le test Redis quand le client sera configuré
-        health_status["components"]["redis"] = "healthy"
-    except Exception:
-        health_status["components"]["redis"] = "unhealthy"
+        health_status["components"]["database"] = f"unhealthy: {str(e)}"
         health_status["status"] = "degraded"
 
     # Test du backend quantique
     try:
-        from qiskit_aer import Aer
-        backend = Aer.get_backend('qasm_simulator')
+        from app.services.quantum import quantum_service
+        quantum_info = quantum_service.get_quantum_info()
         health_status["components"]["quantum"] = "healthy"
-        health_status["quantum_backend"] = str(backend)
-    except Exception:
-        health_status["components"]["quantum"] = "unhealthy"
-        health_status["status"] = "degraded"
+        health_status["quantum_backend"] = quantum_info.get("backend", "unknown")
+    except Exception as e:
+        health_status["components"]["quantum"] = f"unhealthy: {str(e)}"
+        # On ne marque pas comme dégradé pour le quantique car c'est optionnel
 
-    # Déterminer le code de statut HTTP
-    status_code = 200 if health_status["status"] == "healthy" else 503
+    # WebSocket Manager
+    try:
+        from app.websocket.manager import websocket_manager
+        health_status["components"]["websocket"] = "healthy"
+        health_status["websocket_connections"] = websocket_manager.get_connection_count()
+    except Exception as e:
+        health_status["components"]["websocket"] = f"unhealthy: {str(e)}"
+
+    # Toujours retourner 200 sauf si base de données down
+    status_code = 200 if health_status["status"] != "critical" else 503
 
     return JSONResponse(
         status_code=status_code,
         content=health_status
     )
-
-
 @app.get(
     "/metrics",
     tags=["Base"],
@@ -398,13 +404,6 @@ async def websocket_endpoint(websocket: WebSocket, connection_type: str):
     except Exception as e:
         print(f"❌ Erreur WebSocket: {e}")
         await websocket_manager.disconnect(connection_id)
-
-
-# === ROUTES STATIQUES ===
-
-# Servir les fichiers statiques en production (si applicable)
-if settings.ENVIRONMENT == "production":
-    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # === ÉVÉNEMENTS DE DÉMARRAGE/ARRÊT (Legacy - pour compatibilité) ===

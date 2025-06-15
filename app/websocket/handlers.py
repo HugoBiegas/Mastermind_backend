@@ -4,6 +4,7 @@ Traitement des messages et événements WebSocket
 """
 import json
 import asyncio
+import time
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -348,6 +349,195 @@ class WebSocketMessageHandler:
         except Exception as e:
             await self._send_error(connection_id, f"Erreur lors du hint quantique: {str(e)}")
 
+    import time  # Ajoutez cet import en haut du fichier si pas déjà présent
+
+    # Ajoutez ces méthodes dans la classe WebSocketMessageHandler
+
+    async def _handle_surrender_game(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère l'abandon d'une partie"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        game_id = data.get("game_id")
+        if not game_id:
+            await self._send_error(connection_id, "ID de jeu manquant")
+            return
+
+        try:
+            user_id = await self._get_user_id(connection_id)
+            if not user_id:
+                return
+
+            # Pour l'instant, on simule l'abandon (à implémenter plus tard)
+            # await game_service.surrender_game(db, UUID(game_id), user_id)
+
+            # Broadcaster l'abandon
+            surrender_message = WebSocketMessage(
+                type="player_surrendered",
+                data={
+                    "game_id": game_id,
+                    "player_id": str(user_id),
+                    "timestamp": time.time()
+                }
+            )
+            await websocket_manager.broadcast_to_room(game_id, surrender_message)
+
+            # Confirmer l'abandon
+            response = WebSocketMessage(
+                type="surrender_game_result",
+                data={
+                    "success": True,
+                    "game_id": game_id
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, response)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur lors de l'abandon: {str(e)}")
+
+    async def _handle_accept_invitation(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère l'acceptation d'une invitation"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        game_id = data.get("game_id")
+        inviter_id = data.get("inviter_id")
+
+        if not game_id or not inviter_id:
+            await self._send_error(connection_id, "Données d'invitation manquantes")
+            return
+
+        try:
+            user_id = await self._get_user_id(connection_id)
+            if not user_id:
+                return
+
+            # Pour l'instant, on simule l'acceptation (à implémenter plus tard)
+            # await game_service.accept_invitation(db, UUID(game_id), user_id, UUID(inviter_id))
+
+            # Notifier l'inviteur
+            acceptance_message = WebSocketMessage(
+                type="invitation_accepted",
+                data={
+                    "game_id": game_id,
+                    "accepter_id": str(user_id),
+                    "accepter_username": data.get("username", "Joueur"),
+                    "timestamp": time.time()
+                }
+            )
+            await websocket_manager.send_to_user(UUID(inviter_id), acceptance_message)
+
+            # Confirmer à l'accepteur
+            response = WebSocketMessage(
+                type="accept_invitation_result",
+                data={
+                    "success": True,
+                    "game_id": game_id,
+                    "message": "Invitation acceptée"
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, response)
+
+            # Rediriger vers la partie automatiquement
+            join_message = WebSocketMessage(
+                type="auto_join_game",
+                data={
+                    "game_id": game_id
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, join_message)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur lors de l'acceptation: {str(e)}")
+
+    async def _handle_decline_invitation(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère le refus d'une invitation"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        game_id = data.get("game_id")
+        inviter_id = data.get("inviter_id")
+
+        if not game_id or not inviter_id:
+            await self._send_error(connection_id, "Données d'invitation manquantes")
+            return
+
+        try:
+            user_id = await self._get_user_id(connection_id)
+            if not user_id:
+                return
+
+            # Notifier l'inviteur du refus
+            decline_message = WebSocketMessage(
+                type="invitation_declined",
+                data={
+                    "game_id": game_id,
+                    "decliner_id": str(user_id),
+                    "decliner_username": data.get("username", "Joueur"),
+                    "reason": data.get("reason", ""),
+                    "timestamp": time.time()
+                }
+            )
+            await websocket_manager.send_to_user(UUID(inviter_id), decline_message)
+
+            # Confirmer le refus
+            response = WebSocketMessage(
+                type="decline_invitation_result",
+                data={
+                    "success": True,
+                    "game_id": game_id,
+                    "message": "Invitation refusée"
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, response)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur lors du refus: {str(e)}")
+
+    async def _handle_unwatch_game(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère l'arrêt du mode spectateur"""
+        game_id = data.get("game_id")
+        if not game_id:
+            await self._send_error(connection_id, "ID de jeu manquant")
+            return
+
+        try:
+            # Quitter la room de spectateur
+            success = await websocket_manager.leave_game_room(connection_id, f"watch_{game_id}")
+
+            response = WebSocketMessage(
+                type="unwatch_game_result",
+                data={
+                    "success": success,
+                    "game_id": game_id,
+                    "message": "Mode spectateur arrêté" if success else "Erreur lors de l'arrêt"
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, response)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur en arrêtant le mode spectateur: {str(e)}")
+
     async def _handle_start_game(
             self,
             connection_id: str,
@@ -440,6 +630,53 @@ class WebSocketMessageHandler:
 
         except Exception as e:
             await self._send_error(connection_id, f"Erreur lors de la pause: {str(e)}")
+
+    async def _handle_resume_game(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère la reprise d'une partie"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        game_id = data.get("game_id")
+        if not game_id:
+            await self._send_error(connection_id, "ID de jeu manquant")
+            return
+
+        try:
+            user_id = await self._get_user_id(connection_id)
+            if not user_id:
+                return
+
+            # Pour l'instant, on simule la reprise (à implémenter plus tard)
+            # await game_service.resume_game(db, UUID(game_id), user_id)
+
+            # Broadcaster la reprise
+            resume_message = WebSocketMessage(
+                type="game_resumed",
+                data={
+                    "game_id": game_id,
+                    "resumed_by": str(user_id),
+                    "timestamp": time.time()
+                }
+            )
+            await websocket_manager.broadcast_to_room(game_id, resume_message)
+
+            # Confirmer la reprise
+            response = WebSocketMessage(
+                type="resume_game_result",
+                data={
+                    "success": True,
+                    "game_id": game_id
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, response)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur lors de la reprise: {str(e)}")
 
     # === HANDLERS DE CHAT ===
 

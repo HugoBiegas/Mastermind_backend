@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean, DateTime, String, Text, Integer,
-    func, Index, CheckConstraint
+    Index, CheckConstraint
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -18,8 +18,6 @@ from app.core.database import Base
 # Import conditionnel pour éviter les imports circulaires
 if TYPE_CHECKING:
     from app.models.game import Game, GameParticipation, GameAttempt
-    from app.models.audit import AuditLog
-
 
 class User(Base):
     """

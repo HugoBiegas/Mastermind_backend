@@ -78,7 +78,7 @@ services:
     container_name: quantum_mastermind_app
     environment:
       # Base de données
-      DATABASE_URL: postgresql://${DB_USER:-quantum_user}:${DB_PASSWORD:-quantum_pass_2025_secure}@db:5432/${DB_NAME:-quantum_mastermind}
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-quantum_user}:${DB_PASSWORD:-quantum_pass_2025_secure}@db:5432/${DB_NAME:-quantum_mastermind}
 
       # Redis
       REDIS_URL: redis://redis:6379/0

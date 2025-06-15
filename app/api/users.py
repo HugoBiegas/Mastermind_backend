@@ -2,7 +2,6 @@
 Routes de gestion des utilisateurs pour Quantum Mastermind
 Profils, préférences, statistiques, recherche, administration
 """
-from typing import Any, Dict, List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
@@ -10,17 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     get_database, get_current_active_user, get_current_superuser,
-    validate_user_access, get_pagination_params, get_search_params,
-    create_http_exception_from_error, PaginationParams, SearchParams
+    get_pagination_params, create_http_exception_from_error, PaginationParams
 )
 from app.models.user import User
-from app.services.user import user_service
+from app.schemas.auth import MessageResponse
 from app.schemas.user import (
     UserUpdate, UserPreferences, UserStats, UserSearch,
     UserPublic, UserProfile, UserList, Leaderboard,
     UserBulkAction, UserValidation, UserValidationResult
 )
-from app.schemas.auth import MessageResponse
+from app.services.user import user_service
 from app.utils.exceptions import EntityNotFoundError, ValidationError
 
 # Configuration du router
