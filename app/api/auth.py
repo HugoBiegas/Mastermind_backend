@@ -11,18 +11,18 @@ from app.api.deps import (
     get_database, get_client_info, get_current_user,
     get_current_active_user, create_http_exception_from_error
 )
-from app.models.user import User
-from app.services.auth import auth_service
-from app.core.config import settings, security_config
+from app.core.config import settings
 from app.core.security import password_manager, secure_generator
+from app.models.user import User
 from app.schemas.auth import (
     LoginRequest, LoginResponse, RegisterRequest, RegisterResponse,
     PasswordResetRequest, PasswordResetConfirm, PasswordChangeRequest,
-    RefreshToken, TokenData, MessageResponse, TokenRefreshRequest,
+    MessageResponse, TokenRefreshRequest,
     TokenRefreshResponse, LogoutRequest, PasswordStrengthResponse,
     UsernameAvailabilityResponse, EmailAvailabilityResponse, AuthSettings
 )
 from app.schemas.user import UserProfile
+from app.services.auth import auth_service
 from app.utils.exceptions import (
     AuthenticationError, ValidationError, AccountLockedError
 )

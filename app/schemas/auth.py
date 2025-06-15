@@ -149,7 +149,15 @@ class RegisterResponse(BaseModel):
 
     message: str = Field(..., description="Message de confirmation")
     user: UserProfile = Field(..., description="Profil utilisateur créé")
-    requires_verification: bool = Field(
+    access_token: Optional[str] = Field(
+        None,
+        description="Token d'accès JWT"
+    )
+    refresh_token: Optional[str] = Field(
+        None,
+        description="Token de rafraîchissement"
+    )
+    requires_email_verification: bool = Field(
         default=True,
         description="Email de vérification requis"
     )

@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Quantum Mastermind API"
     VERSION: str = "1.0.0"
     ENVIRONMENT: str = "development"
-    DEBUG: bool = False
+    DEBUG: bool = True
 
     # === SERVEUR ===
     API_HOST: str = "0.0.0.0"
@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     DB_PASSWORD: str = "quantum_pass"
     DB_NAME: str = "quantum_mastermind"
     DATABASE_URL: Optional[str] = None
+    ENABLE_REGISTRATION: bool = True
+    ENABLE_EMAIL_VERIFICATION: bool = False
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

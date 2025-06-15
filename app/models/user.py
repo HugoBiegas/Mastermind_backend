@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from pydantic import EmailStr
 from sqlalchemy import (
     Boolean, DateTime, String, Text, Integer,
     Index, CheckConstraint
@@ -43,7 +44,7 @@ class User(Base):
         nullable=False
     )
 
-    email: Mapped[str] = mapped_column(
+    email: Mapped[EmailStr] = mapped_column(
         String(254),
         unique=True,
         index=True,
@@ -231,14 +232,6 @@ class User(Base):
     game_attempts: Mapped[List["GameAttempt"]] = relationship(
         "GameAttempt",
         back_populates="player",
-        cascade="all, delete-orphan",
-        lazy="dynamic"
-    )
-
-    # Logs d'audit
-    audit_logs: Mapped[List["AuditLog"]] = relationship(
-        "AuditLog",
-        back_populates="user",
         cascade="all, delete-orphan",
         lazy="dynamic"
     )
@@ -482,6 +475,9 @@ class User(Base):
 
     def __str__(self) -> str:
         return self.display_name
+
+    def increment_login_attempts(self):
+        pass
 
 
 # === ÉVÉNEMENTS SQLAlchemy ===

@@ -184,14 +184,17 @@ class AuthService:
         hashed_password = password_manager.get_password_hash(register_data.password)
 
         # Création de l'utilisateur
-        user = User.create_user(
+        user = User(
             username=register_data.username.lower().strip(),
-            email=register_data.email.lower().strip(),
+            email=register_data.email,
             hashed_password=hashed_password,
             full_name=register_data.full_name,
-            is_verified=not settings.ENABLE_EMAIL_VERIFICATION
+            is_verified=not settings.ENABLE_EMAIL_VERIFICATION,
+            is_active=True,
+            is_superuser=False
         )
 
+        # Ajout à la session et commit
         db.add(user)
         await db.commit()
         await db.refresh(user)

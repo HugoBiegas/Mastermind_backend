@@ -262,11 +262,11 @@ class UserRepository(BaseRepositoryWithMixins[User, UserCreate, UserUpdate]):
             query = select(User).where(User.is_active == True)
 
             if min_score is not None:
-                query = query.where(User.score >= min_score)
+                query = query.where(User.total_score >= min_score)
             if max_score is not None:
-                query = query.where(User.score <= max_score)
+                query = query.where(User.total_score <= max_score)
 
-            query = query.order_by(desc(User.score))
+            query = query.order_by(desc(User.total_score))
 
             if pagination:
                 # Compter le total
@@ -406,9 +406,9 @@ class UserRepository(BaseRepositoryWithMixins[User, UserCreate, UserUpdate]):
                 User.username,
                 User.full_name,
                 User.avatar_url,
-                User.score,
+                User.total_score,
                 User.rank,
-                func.row_number().over(order_by=desc(User.score)).label('position')
+                func.row_number().over(order_by=desc(User.total_score)).label('position')
             ).where(User.is_active == True)
 
             # Filtrage par période si nécessaire
@@ -425,7 +425,7 @@ class UserRepository(BaseRepositoryWithMixins[User, UserCreate, UserUpdate]):
 
             # Tri et limitation
             if metric == "score":
-                query = query.order_by(desc(User.score))
+                query = query.order_by(desc(User.total_score))
             elif metric == "games_won":
                 query = query.order_by(desc(User.games_won))
 
@@ -512,7 +512,7 @@ class UserRepository(BaseRepositoryWithMixins[User, UserCreate, UserUpdate]):
             if not user:
                 raise EntityNotFoundError(f"Utilisateur {user_id} non trouvé")
 
-            new_score = max(0, user.score + score_delta)
+            new_score = max(0, user.total_score + score_delta)
 
             query = update(User).where(User.id == user_id).values(
                 score=new_score,
@@ -724,6 +724,7 @@ class UserRepository(BaseRepositoryWithMixins[User, UserCreate, UserUpdate]):
             )
         else:
             return await self.get_multi(db, filters=filters, order_by="last_login")
+
 
 
 # === INSTANCE GLOBALE ===

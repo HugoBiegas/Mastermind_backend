@@ -25,7 +25,6 @@ from app.utils.exceptions import (
     BaseQuantumMastermindError, get_http_status_code, get_exception_details
 )
 
-
 # === TÂCHE DE NETTOYAGE WEBSOCKET ===
 
 async def websocket_cleanup_task():
