@@ -5,7 +5,6 @@ Validation et sérialisation des données de jeu
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
-from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
@@ -50,10 +49,19 @@ class GameCreate(BaseModel):
         if v is None:
             return v
 
-        # Paramètres autorisés
+        # CORRECTION CRITIQUE : Paramètres autorisés étendus
         allowed_keys = {
-            'allow_duplicates', 'allow_blanks', 'quantum_enabled',
-            'hint_cost', 'auto_reveal_pegs', 'show_statistics'
+            # Paramètres de base du jeu
+            'combination_length', 'color_count', 'max_attempts', 'time_limit',
+
+            # Paramètres de gameplay
+            'allow_duplicates', 'allow_blanks', 'quantum_enabled', 'quantum_hints_enabled',
+
+            # Paramètres d'interface et aide
+            'hint_cost', 'auto_reveal_pegs', 'show_statistics',
+
+            # Paramètres avancés
+            'difficulty_multiplier', 'scoring_mode', 'bonus_enabled'
         }
 
         for key in v.keys():

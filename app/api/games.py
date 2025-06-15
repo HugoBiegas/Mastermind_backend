@@ -33,7 +33,8 @@ from app.utils.exceptions import (
 router = APIRouter(prefix="/games", tags=["Jeux"])
 
 
-# === ROUTES DE CRÉATION ET GESTION DES PARTIES ===
+# === ROUTES SPÉCIFIQUES - DOIVENT ÊTRE EN PREMIER ===
+# CORRECTION CRITIQUE : Ces routes doivent être AVANT /{game_id}
 
 @router.post(
     "/create",
@@ -75,6 +76,138 @@ async def create_game(
             detail="Erreur lors de la création de la partie"
         )
 
+
+@router.get(
+    "/",
+    response_model=GameList,
+    summary="Lister les parties",
+    description="Récupère la liste des parties selon les critères"
+)
+async def list_games(
+        pagination: PaginationParams = Depends(get_pagination_params),
+        search: SearchParams = Depends(get_search_params),
+        game_type: Optional[GameType] = Query(None, description="Type de jeu"),
+        game_mode: Optional[GameMode] = Query(None, description="Mode de jeu"),
+        status: Optional[GameStatus] = Query(None, description="Statut de la partie"),
+        is_public: Optional[bool] = Query(None, description="Parties publiques uniquement"),
+        current_user: Optional[User] = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> GameList:
+    """
+    Récupère la liste des parties selon les critères de filtrage
+
+    Paramètres de filtrage:
+    - **game_type**: Type de jeu (classic, quantum, hybrid, tournament)
+    - **game_mode**: Mode de jeu (solo, multiplayer, ranked, training)
+    - **status**: Statut (waiting, active, finished, cancelled)
+    - **is_public**: Afficher uniquement les parties publiques
+    """
+    try:
+        games = await game_service.search_games(
+            db, pagination, search,
+            game_type=game_type, game_mode=game_mode,
+            status=status, is_public=is_public,
+            user_id=current_user.id if current_user else None
+        )
+        return games
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la recherche de parties"
+        )
+
+
+@router.get(
+    "/my-games",
+    response_model=GameList,
+    summary="Mes parties",
+    description="Récupère les parties de l'utilisateur connecté"
+)
+async def get_my_games(
+        pagination: PaginationParams = Depends(get_pagination_params),
+        status: Optional[GameStatus] = Query(None, description="Statut de la partie"),
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> GameList:
+    """
+    Récupère les parties de l'utilisateur connecté
+
+    Inclut les parties créées et celles auxquelles il participe
+    """
+    try:
+        games = await game_service.get_user_games(
+            db, current_user.id, pagination, status
+        )
+        return games
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération de vos parties"
+        )
+
+
+@router.get(
+    "/public",
+    response_model=GameList,
+    summary="Parties publiques",
+    description="Récupère les parties publiques ouvertes"
+)
+async def get_public_games(
+        pagination: PaginationParams = Depends(get_pagination_params),
+        db: AsyncSession = Depends(get_database)
+) -> GameList:
+    """
+    Récupère les parties publiques ouvertes
+
+    Accessible sans authentification
+    """
+    try:
+        games = await game_service.get_public_games(db, pagination)
+        return games
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération des parties publiques"
+        )
+
+
+@router.get(
+    "/stats/leaderboard",
+    response_model=Dict[str, Any],
+    summary="Classement général",
+    description="Récupère le classement des meilleurs joueurs"
+)
+async def get_leaderboard(
+        game_type: Optional[GameType] = Query(None, description="Type de jeu"),
+        time_period: str = Query("all", description="Période (all, month, week)"),
+        limit: int = Query(10, ge=1, le=100, description="Nombre de joueurs"),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """
+    Récupère le classement des meilleurs joueurs
+
+    - **game_type**: Filtrer par type de jeu
+    - **time_period**: Période (all, month, week)
+    - **limit**: Nombre de joueurs dans le classement
+    """
+    try:
+        leaderboard = await game_service.get_leaderboard(
+            db, game_type=game_type, time_period=time_period, limit=limit
+        )
+        return leaderboard
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération du classement"
+        )
+
+
+# === ROUTES AVEC PARAMÈTRES UUID - À LA FIN ===
+# CORRECTION CRITIQUE : Ces routes doivent être EN DERNIER
 
 @router.get(
     "/{game_id}",
@@ -175,8 +308,6 @@ async def delete_game(
         )
 
 
-# === ROUTES DE PARTICIPATION ===
-
 @router.post(
     "/{game_id}/join",
     response_model=Dict[str, Any],
@@ -243,8 +374,6 @@ async def leave_game(
             detail="Erreur lors de l'abandon de la partie"
         )
 
-
-# === ROUTES DE GAMEPLAY ===
 
 @router.post(
     "/{game_id}/start",
@@ -346,107 +475,6 @@ async def get_quantum_hint(
         )
 
 
-# === ROUTES DE RECHERCHE ET LISTING ===
-
-@router.get(
-    "/",
-    response_model=GameList,
-    summary="Lister les parties",
-    description="Récupère la liste des parties selon les critères"
-)
-async def list_games(
-        pagination: PaginationParams = Depends(get_pagination_params),
-        search: SearchParams = Depends(get_search_params),
-        game_type: Optional[GameType] = Query(None, description="Type de jeu"),
-        game_mode: Optional[GameMode] = Query(None, description="Mode de jeu"),
-        status: Optional[GameStatus] = Query(None, description="Statut de la partie"),
-        is_public: Optional[bool] = Query(None, description="Parties publiques uniquement"),
-        current_user: Optional[User] = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> GameList:
-    """
-    Récupère la liste des parties selon les critères de filtrage
-
-    Paramètres de filtrage:
-    - **game_type**: Type de jeu (classic, quantum, hybrid, tournament)
-    - **game_mode**: Mode de jeu (solo, multiplayer, ranked, training)
-    - **status**: Statut (waiting, active, finished, cancelled)
-    - **is_public**: Afficher uniquement les parties publiques
-    """
-    try:
-        games = await game_service.search_games(
-            db, pagination, search,
-            game_type=game_type, game_mode=game_mode,
-            status=status, is_public=is_public,
-            user_id=current_user.id if current_user else None
-        )
-        return games
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la recherche de parties"
-        )
-
-
-@router.get(
-    "/my-games",
-    response_model=GameList,
-    summary="Mes parties",
-    description="Récupère les parties de l'utilisateur connecté"
-)
-async def get_my_games(
-        pagination: PaginationParams = Depends(get_pagination_params),
-        status: Optional[GameStatus] = Query(None, description="Statut de la partie"),
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> GameList:
-    """
-    Récupère les parties de l'utilisateur connecté
-
-    Inclut les parties créées et celles auxquelles il participe
-    """
-    try:
-        games = await game_service.get_user_games(
-            db, current_user.id, pagination, status
-        )
-        return games
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération de vos parties"
-        )
-
-
-@router.get(
-    "/public",
-    response_model=GameList,
-    summary="Parties publiques",
-    description="Récupère les parties publiques ouvertes"
-)
-async def get_public_games(
-        pagination: PaginationParams = Depends(get_pagination_params),
-        db: AsyncSession = Depends(get_database)
-) -> GameList:
-    """
-    Récupère les parties publiques ouvertes
-
-    Accessible sans authentification
-    """
-    try:
-        games = await game_service.get_public_games(db, pagination)
-        return games
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération des parties publiques"
-        )
-
-
-# === ROUTES DE STATISTIQUES ===
-
 @router.get(
     "/{game_id}/stats",
     response_model=Dict[str, Any],
@@ -477,40 +505,6 @@ async def get_game_stats(
             detail="Erreur lors de la récupération des statistiques"
         )
 
-
-@router.get(
-    "/stats/leaderboard",
-    response_model=Dict[str, Any],
-    summary="Classement général",
-    description="Récupère le classement des meilleurs joueurs"
-)
-async def get_leaderboard(
-        game_type: Optional[GameType] = Query(None, description="Type de jeu"),
-        time_period: str = Query("all", description="Période (all, month, week)"),
-        limit: int = Query(10, ge=1, le=100, description="Nombre de joueurs"),
-        db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """
-    Récupère le classement des meilleurs joueurs
-
-    - **game_type**: Filtrer par type de jeu
-    - **time_period**: Période (all, month, week)
-    - **limit**: Nombre de joueurs dans le classement
-    """
-    try:
-        leaderboard = await game_service.get_leaderboard(
-            db, game_type=game_type, time_period=time_period, limit=limit
-        )
-        return leaderboard
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération du classement"
-        )
-
-
-# === ROUTES D'ADMINISTRATION ===
 
 @router.post(
     "/{game_id}/moderate",
@@ -558,8 +552,6 @@ async def moderate_game(
         )
 
 
-# === ROUTES D'HISTORIQUE ===
-
 @router.get(
     "/{game_id}/history",
     response_model=List[Dict[str, Any]],
@@ -590,8 +582,6 @@ async def get_game_history(
             detail="Erreur lors de la récupération de l'historique"
         )
 
-
-# === ROUTES DE DEBUG (à désactiver en production) ===
 
 @router.get(
     "/{game_id}/solution",
@@ -628,8 +618,6 @@ async def debug_reveal_solution(
             detail="Erreur lors de la révélation de la solution"
         )
 
-
-# === ROUTES D'EXPORT ===
 
 @router.get(
     "/{game_id}/export",

@@ -25,58 +25,8 @@ from app.utils.exceptions import EntityNotFoundError, ValidationError
 router = APIRouter(prefix="/users", tags=["Utilisateurs"])
 
 
-# === ROUTES DE PROFIL UTILISATEUR ===
-
-@router.get(
-    "/me",
-    response_model=UserProfile,
-    summary="Mon profil",
-    description="Récupère le profil complet de l'utilisateur connecté"
-)
-async def get_my_profile(
-        current_user: User = Depends(get_current_active_user)
-) -> UserProfile:
-    """
-    Récupère le profil complet de l'utilisateur connecté
-
-    Inclut toutes les informations personnelles et statistiques
-    """
-    return UserProfile.model_validate(current_user)
-
-
-@router.put(
-    "/me",
-    response_model=UserProfile,
-    summary="Modifier mon profil",
-    description="Met à jour le profil de l'utilisateur connecté"
-)
-async def update_my_profile(
-        user_update: UserUpdate,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> UserProfile:
-    """
-    Met à jour le profil de l'utilisateur connecté
-
-    - **username**: Nouveau nom d'utilisateur (optionnel)
-    - **email**: Nouvelle adresse email (optionnel)
-    - **preferences**: Nouvelles préférences (optionnel)
-    """
-    try:
-        updated_user = await user_service.update_user_profile(
-            db, current_user.id, user_update, updated_by=current_user.id
-        )
-        return UserProfile.model_validate(updated_user)
-
-    except (EntityNotFoundError, ValidationError) as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la mise à jour du profil"
-        )
-
+# === ROUTES SPÉCIFIQUES - DOIVENT ÊTRE EN PREMIER ===
+# CORRECTION CRITIQUE : Ces routes doivent être AVANT /{user_id}
 
 @router.get(
     "/me/stats",
@@ -107,109 +57,8 @@ async def get_my_stats(
         )
 
 
-@router.put(
-    "/me/preferences",
-    response_model=UserPreferences,
-    summary="Modifier mes préférences",
-    description="Met à jour les préférences de l'utilisateur connecté"
-)
-async def update_my_preferences(
-        preferences: UserPreferences,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> UserPreferences:
-    """
-    Met à jour les préférences de l'utilisateur connecté
-
-    - **theme**: Thème de l'interface
-    - **notifications**: Paramètres de notifications
-    - **gameplay**: Préférences de jeu
-    """
-    try:
-        updated_preferences = await user_service.update_user_preferences(
-            db, current_user.id, preferences
-        )
-        return UserPreferences.model_validate(updated_preferences)
-
-    except (EntityNotFoundError, ValidationError) as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la mise à jour des préférences"
-        )
-
-
-# === ROUTES DE CONSULTATION D'AUTRES UTILISATEURS ===
-
 @router.get(
-    "/{user_id}",
-    response_model=UserPublic,
-    summary="Profil public d'un utilisateur",
-    description="Récupère le profil public d'un utilisateur par son ID"
-)
-async def get_user_profile(
-        user_id: UUID,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> UserPublic:
-    """
-    Récupère le profil public d'un utilisateur
-
-    Seules les informations publiques sont retournées
-    """
-    try:
-        user = await user_service.get_user_by_id(db, user_id)
-        if not user:
-            raise EntityNotFoundError("Utilisateur non trouvé")
-
-        return UserPublic.model_validate(user)
-
-    except EntityNotFoundError as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération du profil"
-        )
-
-
-@router.get(
-    "/{user_id}/stats",
-    response_model=UserStats,
-    summary="Statistiques publiques d'un utilisateur",
-    description="Récupère les statistiques publiques d'un utilisateur"
-)
-async def get_user_stats(
-        user_id: UUID,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> UserStats:
-    """
-    Récupère les statistiques publiques d'un utilisateur
-
-    Seules les statistiques publiques sont retournées
-    """
-    try:
-        stats = await user_service.get_user_public_statistics(db, user_id)
-        return UserStats.model_validate(stats)
-
-    except EntityNotFoundError as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération des statistiques"
-        )
-
-
-# === ROUTES DE RECHERCHE ===
-
-@router.get(
-    "/",
+    "/search",
     response_model=UserList,
     summary="Rechercher des utilisateurs",
     description="Recherche d'utilisateurs avec filtres et pagination"
@@ -282,7 +131,125 @@ async def get_leaderboard(
         )
 
 
-# === ROUTES D'ADMINISTRATION ===
+@router.get(
+    "/me",
+    response_model=UserProfile,
+    summary="Mon profil",
+    description="Récupère le profil complet de l'utilisateur connecté"
+)
+async def get_my_profile(
+        current_user: User = Depends(get_current_active_user)
+) -> UserProfile:
+    """
+    Récupère le profil complet de l'utilisateur connecté
+
+    Inclut toutes les informations personnelles et statistiques
+    """
+    return UserProfile.model_validate(current_user)
+
+
+@router.put(
+    "/me",
+    response_model=UserProfile,
+    summary="Modifier mon profil",
+    description="Met à jour le profil de l'utilisateur connecté"
+)
+async def update_my_profile(
+        user_update: UserUpdate,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> UserProfile:
+    """
+    Met à jour le profil de l'utilisateur connecté
+
+    - **username**: Nouveau nom d'utilisateur (optionnel)
+    - **email**: Nouvelle adresse email (optionnel)
+    - **preferences**: Nouvelles préférences (optionnel)
+    """
+    try:
+        updated_user = await user_service.update_user_profile(
+            db, current_user.id, user_update, updated_by=current_user.id
+        )
+        return UserProfile.model_validate(updated_user)
+
+    except (EntityNotFoundError, ValidationError) as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la mise à jour du profil"
+        )
+
+
+@router.put(
+    "/me/preferences",
+    response_model=UserPreferences,
+    summary="Modifier mes préférences",
+    description="Met à jour les préférences de l'utilisateur connecté"
+)
+async def update_my_preferences(
+        preferences: UserPreferences,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> UserPreferences:
+    """
+    Met à jour les préférences de l'utilisateur connecté
+
+    - **theme**: Thème de l'interface
+    - **notifications**: Paramètres de notifications
+    - **gameplay**: Préférences de jeu
+    """
+    try:
+        updated_preferences = await user_service.update_user_preferences(
+            db, current_user.id, preferences
+        )
+        return UserPreferences.model_validate(updated_preferences)
+
+    except (EntityNotFoundError, ValidationError) as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la mise à jour des préférences"
+        )
+
+
+@router.delete(
+    "/me",
+    response_model=MessageResponse,
+    summary="Supprimer mon compte",
+    description="Supprime définitivement le compte de l'utilisateur connecté"
+)
+async def delete_my_account(
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> MessageResponse:
+    """
+    Supprime définitivement le compte de l'utilisateur connecté
+
+    ⚠️ Cette action est irréversible
+    """
+    try:
+        await user_service.delete_user_account(db, current_user.id)
+
+        return MessageResponse(
+            message="Compte supprimé avec succès",
+            details={"user_id": str(current_user.id)}
+        )
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la suppression du compte"
+        )
+
+
+# === ROUTES D'ADMINISTRATION SPÉCIFIQUES ===
 
 @router.get(
     "/admin/list",
@@ -323,39 +290,6 @@ async def admin_list_users(
         )
 
 
-@router.put(
-    "/admin/{user_id}",
-    response_model=UserProfile,
-    summary="Modifier un utilisateur (admin)",
-    description="Modification administrative d'un utilisateur"
-)
-async def admin_update_user(
-        user_id: UUID,
-        user_update: UserUpdate,
-        current_user: User = Depends(get_current_superuser),
-        db: AsyncSession = Depends(get_database)
-) -> UserProfile:
-    """
-    Modification administrative d'un utilisateur
-
-    Accès réservé aux super-utilisateurs
-    """
-    try:
-        updated_user = await user_service.admin_update_user(
-            db, user_id, user_update, updated_by=current_user.id
-        )
-        return UserProfile.model_validate(updated_user)
-
-    except (EntityNotFoundError, ValidationError) as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la modification de l'utilisateur"
-        )
-
-
 @router.post(
     "/admin/bulk-action",
     response_model=MessageResponse,
@@ -392,8 +326,6 @@ async def admin_bulk_action(
         )
 
 
-# === ROUTES DE VALIDATION ===
-
 @router.post(
     "/validate",
     response_model=UserValidationResult,
@@ -426,28 +358,31 @@ async def validate_user_data(
         )
 
 
-@router.delete(
-    "/me",
-    response_model=MessageResponse,
-    summary="Supprimer mon compte",
-    description="Supprime définitivement le compte de l'utilisateur connecté"
+# === ROUTES AVEC PARAMÈTRES UUID - À LA FIN ===
+# CORRECTION CRITIQUE : Ces routes doivent être EN DERNIER
+
+@router.get(
+    "/{user_id}",
+    response_model=UserPublic,
+    summary="Profil public d'un utilisateur",
+    description="Récupère le profil public d'un utilisateur par son ID"
 )
-async def delete_my_account(
+async def get_user_profile(
+        user_id: UUID,
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
-) -> MessageResponse:
+) -> UserPublic:
     """
-    Supprime définitivement le compte de l'utilisateur connecté
+    Récupère le profil public d'un utilisateur
 
-    ⚠️ Cette action est irréversible
+    Seules les informations publiques sont retournées
     """
     try:
-        await user_service.delete_user_account(db, current_user.id)
+        user = await user_service.get_user_by_id(db, user_id)
+        if not user:
+            raise EntityNotFoundError("Utilisateur non trouvé")
 
-        return MessageResponse(
-            message="Compte supprimé avec succès",
-            details={"user_id": str(current_user.id)}
-        )
+        return UserPublic.model_validate(user)
 
     except EntityNotFoundError as e:
         raise create_http_exception_from_error(e)
@@ -455,7 +390,70 @@ async def delete_my_account(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la suppression du compte"
+            detail="Erreur lors de la récupération du profil"
+        )
+
+
+@router.get(
+    "/{user_id}/stats",
+    response_model=UserStats,
+    summary="Statistiques publiques d'un utilisateur",
+    description="Récupère les statistiques publiques d'un utilisateur"
+)
+async def get_user_stats(
+        user_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> UserStats:
+    """
+    Récupère les statistiques publiques d'un utilisateur
+
+    Seules les statistiques publiques sont retournées
+    """
+    try:
+        stats = await user_service.get_user_public_statistics(db, user_id)
+        return UserStats.model_validate(stats)
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération des statistiques"
+        )
+
+
+@router.put(
+    "/admin/{user_id}",
+    response_model=UserProfile,
+    summary="Modifier un utilisateur (admin)",
+    description="Modification administrative d'un utilisateur"
+)
+async def admin_update_user(
+        user_id: UUID,
+        user_update: UserUpdate,
+        current_user: User = Depends(get_current_superuser),
+        db: AsyncSession = Depends(get_database)
+) -> UserProfile:
+    """
+    Modification administrative d'un utilisateur
+
+    Accès réservé aux super-utilisateurs
+    """
+    try:
+        updated_user = await user_service.admin_update_user(
+            db, user_id, user_update, updated_by=current_user.id
+        )
+        return UserProfile.model_validate(updated_user)
+
+    except (EntityNotFoundError, ValidationError) as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la modification de l'utilisateur"
         )
 
 
