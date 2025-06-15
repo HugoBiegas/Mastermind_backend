@@ -241,40 +241,30 @@ class WebSocketManager:
                     self.user_connections[user.id] = set()
                 self.user_connections[user.id].add(connection_id)
 
-            # Message de succès
-            success_message = WebSocketMessage(
-                type=EventType.AUTHENTICATION_SUCCESS,
-                data={
-                    "user_id": str(user.id),
-                    "username": user.username,
-                    "authenticated_at": time.time()
-                }
-            )
-            await self._send_to_connection(connection_id, success_message)
+                # Message de confirmation d'authentification
+                auth_success_message = WebSocketMessage(
+                    type=EventType.AUTHENTICATION_SUCCESS,
+                    data={
+                        "user_id": str(user.id),
+                        "username": user.username,
+                        "authenticated_at": time.time()
+                    }
+                )
 
-            # Notification aux autres connexions
-            connect_message = WebSocketMessage(
-                type=EventType.USER_CONNECTED,
-                data={
-                    "user_id": str(user.id),
-                    "username": user.username,
-                    "connection_id": connection_id
-                }
-            )
-            await self._broadcast_to_user_rooms(connection, connect_message)
+                await self._send_to_connection(connection_id, auth_success_message)
 
-            return True
+                return True
 
         except Exception as e:
-            # Message d'échec
-            error_message = WebSocketMessage(
+            # Envoi d'un message d'erreur d'authentification
+            auth_error_message = WebSocketMessage(
                 type=EventType.AUTHENTICATION_FAILED,
                 data={
-                    "error": "Token invalide",
-                    "details": str(e)
+                    "error": "Invalid token",
+                    "reason": str(e)
                 }
             )
-            await self._send_to_connection(connection_id, error_message)
+            await self._send_to_connection(connection_id, auth_error_message)
             return False
 
     # === GESTION DES ROOMS ===
@@ -290,11 +280,11 @@ class WebSocketManager:
         Returns:
             True si succès
         """
-        connection = self.connections.get(connection_id)
-        if not connection or not connection.is_authenticated:
-            return False
-
         async with self._lock:
+            connection = self.connections.get(connection_id)
+            if not connection or not connection.is_authenticated:
+                return False
+
             # Ajout à la room
             if room_id not in self.game_rooms:
                 self.game_rooms[room_id] = set()
@@ -302,21 +292,19 @@ class WebSocketManager:
             self.game_rooms[room_id].add(connection_id)
             connection.game_rooms.add(room_id)
 
-        # Notification de rejoindre la room
-        join_message = WebSocketMessage(
-            type=EventType.JOIN_GAME_ROOM,
-            data={
-                "room_id": room_id,
-                "user_id": str(connection.user_id),
-                "username": connection.username,
-                "players_in_room": len(self.game_rooms[room_id])
-            }
-        )
+            # Notification aux autres membres de la room
+            join_message = WebSocketMessage(
+                type=EventType.PLAYER_JOINED,
+                data={
+                    "user_id": str(connection.user_id),
+                    "username": connection.username,
+                    "room_id": room_id,
+                    "joined_at": time.time()
+                }
+            )
 
-        await self._send_to_connection(connection_id, join_message)
-        await self._broadcast_to_room(room_id, join_message, exclude=connection_id)
-
-        return True
+            await self._broadcast_to_room(room_id, join_message, exclude_connection=connection_id)
+            return True
 
     async def leave_game_room(self, connection_id: str, room_id: str) -> bool:
         """
@@ -337,111 +325,33 @@ class WebSocketManager:
         if not connection:
             return False
 
-        async with self._lock:
-            # Suppression de la room
-            if room_id in self.game_rooms:
-                self.game_rooms[room_id].discard(connection_id)
-                if not self.game_rooms[room_id]:
-                    del self.game_rooms[room_id]
+        # Retrait de la room
+        if room_id in self.game_rooms:
+            self.game_rooms[room_id].discard(connection_id)
+            if not self.game_rooms[room_id]:
+                del self.game_rooms[room_id]
 
-            connection.game_rooms.discard(room_id)
+        connection.game_rooms.discard(room_id)
 
-        # Notification de quitter la room
+        # Notification aux autres membres de la room
         if connection.is_authenticated:
             leave_message = WebSocketMessage(
-                type=EventType.LEAVE_GAME_ROOM,
+                type=EventType.PLAYER_LEFT,
                 data={
-                    "room_id": room_id,
                     "user_id": str(connection.user_id),
                     "username": connection.username,
-                    "players_in_room": len(self.game_rooms.get(room_id, set()))
+                    "room_id": room_id,
+                    "left_at": time.time()
                 }
             )
 
-            await self._broadcast_to_room(room_id, leave_message)
+            await self._broadcast_to_room(room_id, leave_message, exclude_connection=connection_id)
 
         return True
 
     # === ENVOI DE MESSAGES ===
 
-    async def send_to_user(
-            self,
-            user_id: UUID,
-            message: WebSocketMessage
-    ) -> bool:
-        """
-        Envoie un message à toutes les connexions d'un utilisateur
-
-        Args:
-            user_id: ID de l'utilisateur
-            message: Message à envoyer
-
-        Returns:
-            True si au moins une connexion a reçu le message
-        """
-        connection_ids = self.user_connections.get(user_id, set())
-        if not connection_ids:
-            return False
-
-        success_count = 0
-        for connection_id in connection_ids.copy():
-            if await self._send_to_connection(connection_id, message):
-                success_count += 1
-
-        return success_count > 0
-
-    async def send_to_room(
-            self,
-            room_id: str,
-            message: WebSocketMessage,
-            exclude_user_id: Optional[UUID] = None
-    ) -> int:
-        """
-        Envoie un message à toutes les connexions d'une room
-
-        Args:
-            room_id: ID de la room
-            message: Message à envoyer
-            exclude_user_id: Utilisateur à exclure (optionnel)
-
-        Returns:
-            Nombre de connexions qui ont reçu le message
-        """
-        return await self._broadcast_to_room(room_id, message, exclude_user_id=exclude_user_id)
-
-    async def broadcast_to_all(
-            self,
-            message: WebSocketMessage,
-            authenticated_only: bool = True
-    ) -> int:
-        """
-        Diffuse un message à toutes les connexions
-
-        Args:
-            message: Message à diffuser
-            authenticated_only: Seulement aux utilisateurs authentifiés
-
-        Returns:
-            Nombre de connexions qui ont reçu le message
-        """
-        success_count = 0
-
-        for connection_id, connection in self.connections.items():
-            if authenticated_only and not connection.is_authenticated:
-                continue
-
-            if await self._send_to_connection(connection_id, message):
-                success_count += 1
-
-        return success_count
-
-    # === MÉTHODES PRIVÉES ===
-
-    async def _send_to_connection(
-            self,
-            connection_id: str,
-            message: WebSocketMessage
-    ) -> bool:
+    async def send_to_connection(self, connection_id: str, message: WebSocketMessage) -> bool:
         """
         Envoie un message à une connexion spécifique
 
@@ -450,8 +360,12 @@ class WebSocketManager:
             message: Message à envoyer
 
         Returns:
-            True si envoyé avec succès
+            True si succès
         """
+        return await self._send_to_connection(connection_id, message)
+
+    async def _send_to_connection(self, connection_id: str, message: WebSocketMessage) -> bool:
+        """Implémentation interne pour envoyer un message"""
         connection = self.connections.get(connection_id)
         if not connection:
             return False
@@ -459,174 +373,204 @@ class WebSocketManager:
         try:
             await connection.websocket.send_text(message.to_json())
             return True
-        except Exception:
-            # Connexion fermée, on la nettoie
+        except Exception as e:
+            # Connexion fermée, nettoyer
             await self.disconnect(connection_id)
             return False
 
-    async def _broadcast_to_room(
-            self,
-            room_id: str,
-            message: WebSocketMessage,
-            exclude: Optional[str] = None,
-            exclude_user_id: Optional[UUID] = None
-    ) -> int:
+    async def send_to_user(self, user_id: UUID, message: WebSocketMessage) -> int:
         """
-        Diffuse un message à toutes les connexions d'une room
+        Envoie un message à toutes les connexions d'un utilisateur
 
         Args:
-            room_id: ID de la room
-            message: Message à diffuser
-            exclude: ID de connexion à exclure
-            exclude_user_id: ID utilisateur à exclure
+            user_id: ID de l'utilisateur
+            message: Message à envoyer
 
         Returns:
             Nombre de connexions qui ont reçu le message
         """
-        connection_ids = self.game_rooms.get(room_id, set())
-        if not connection_ids:
-            return 0
+        user_connections = self.user_connections.get(user_id, set())
+        sent_count = 0
 
-        success_count = 0
+        for connection_id in user_connections.copy():
+            if await self._send_to_connection(connection_id, message):
+                sent_count += 1
 
-        for connection_id in connection_ids.copy():
-            if connection_id == exclude:
-                continue
+        return sent_count
 
-            connection = self.connections.get(connection_id)
-            if connection and exclude_user_id and connection.user_id == exclude_user_id:
+    async def broadcast_to_room(self, room_id: str, message: WebSocketMessage,
+                              exclude_connection: Optional[str] = None) -> int:
+        """
+        Diffuse un message à tous les membres d'une room
+
+        Args:
+            room_id: ID de la room
+            message: Message à diffuser
+            exclude_connection: ID de connexion à exclure (optionnel)
+
+        Returns:
+            Nombre de connexions qui ont reçu le message
+        """
+        return await self._broadcast_to_room(room_id, message, exclude_connection)
+
+    async def _broadcast_to_room(self, room_id: str, message: WebSocketMessage,
+                               exclude_connection: Optional[str] = None) -> int:
+        """Implémentation interne pour broadcaster à une room"""
+        room_connections = self.game_rooms.get(room_id, set())
+        sent_count = 0
+
+        for connection_id in room_connections.copy():
+            if connection_id == exclude_connection:
                 continue
 
             if await self._send_to_connection(connection_id, message):
-                success_count += 1
+                sent_count += 1
 
-        return success_count
+        return sent_count
 
-    async def _broadcast_to_user_rooms(
-            self,
-            connection: WebSocketConnection,
-            message: WebSocketMessage
-    ) -> int:
+    async def broadcast_to_all(self, message: WebSocketMessage) -> int:
         """
-        Diffuse un message à toutes les rooms d'un utilisateur
+        Diffuse un message à toutes les connexions actives
 
         Args:
-            connection: Connexion de l'utilisateur
             message: Message à diffuser
 
         Returns:
-            Nombre total de connexions touchées
+            Nombre de connexions qui ont reçu le message
         """
-        total_sent = 0
+        sent_count = 0
 
+        for connection_id in list(self.connections.keys()):
+            if await self._send_to_connection(connection_id, message):
+                sent_count += 1
+
+        return sent_count
+
+    async def _broadcast_to_user_rooms(self, connection: WebSocketConnection,
+                                     message: WebSocketMessage) -> None:
+        """Diffuse un message à toutes les rooms où l'utilisateur est présent"""
         for room_id in connection.game_rooms:
-            sent = await self._broadcast_to_room(room_id, message, exclude=connection.connection_id)
-            total_sent += sent
+            await self._broadcast_to_room(room_id, message, exclude_connection=connection.connection_id)
 
-        return total_sent
+    # === MAINTENANCE ET NETTOYAGE ===
 
-    # === GESTION DES ÉVÉNEMENTS DE JEU ===
-
-    async def handle_game_event(
-            self,
-            game_id: UUID,
-            event_type: str,
-            event_data: Dict[str, Any],
-            exclude_user_id: Optional[UUID] = None
-    ) -> None:
+    async def update_heartbeat(self, connection_id: str) -> bool:
         """
-        Gère un événement de jeu et le diffuse aux connexions appropriées
+        Met à jour le heartbeat d'une connexion
 
         Args:
-            game_id: ID de la partie
-            event_type: Type d'événement
-            event_data: Données de l'événement
-            exclude_user_id: Utilisateur à exclure de la diffusion
+            connection_id: ID de la connexion
+
+        Returns:
+            True si succès
         """
-        room_id = str(game_id)
+        connection = self.connections.get(connection_id)
+        if connection:
+            connection.last_heartbeat = time.time()
+            return True
+        return False
 
-        message = WebSocketMessage(
-            type=event_type,
-            data={
-                "game_id": str(game_id),
-                **event_data
-            }
-        )
-
-        await self.send_to_room(room_id, message, exclude_user_id=exclude_user_id)
-
-    # === MÉTHODES UTILITAIRES ===
-
-    async def heartbeat_check(self) -> None:
+    async def cleanup_inactive_connections(self) -> int:
         """
-        Vérifie les connexions inactives et les nettoie
-        Doit être appelé périodiquement
+        Nettoie les connexions inactives
+
+        Returns:
+            Nombre de connexions nettoyées
         """
         current_time = time.time()
         inactive_connections = []
 
+        # Identifier les connexions inactives
         for connection_id, connection in self.connections.items():
             if current_time - connection.last_heartbeat > 60:  # 1 minute timeout
                 inactive_connections.append(connection_id)
 
+        # Nettoyer les connexions inactives
         for connection_id in inactive_connections:
             await self.disconnect(connection_id)
 
-    def get_connection_stats(self) -> Dict[str, Any]:
-        """
-        Retourne les statistiques des connexions
+        return len(inactive_connections)
 
-        Returns:
-            Statistiques des connexions
+    async def get_room_info(self, room_id: str) -> Dict[str, Any]:
         """
-        authenticated_count = sum(
-            1 for conn in self.connections.values()
-            if conn.is_authenticated
-        )
-
-        return {
-            "total_connections": len(self.connections),
-            "authenticated_connections": authenticated_count,
-            "anonymous_connections": len(self.connections) - authenticated_count,
-            "active_game_rooms": len(self.game_rooms),
-            "unique_users": len(self.user_connections)
-        }
-
-    def get_room_info(self, room_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Retourne les informations d'une room
+        Récupère les informations d'une room
 
         Args:
             room_id: ID de la room
 
         Returns:
-            Informations de la room ou None
+            Informations de la room
         """
-        if room_id not in self.game_rooms:
-            return None
+        room_connections = self.game_rooms.get(room_id, set())
+        players = []
 
-        connection_ids = self.game_rooms[room_id]
-        users = []
-
-        for connection_id in connection_ids:
+        for connection_id in room_connections:
             connection = self.connections.get(connection_id)
             if connection and connection.is_authenticated:
-                users.append({
+                players.append({
                     "user_id": str(connection.user_id),
                     "username": connection.username,
-                    "connection_id": connection_id,
                     "connected_at": connection.connected_at
                 })
 
         return {
             "room_id": room_id,
-            "connection_count": len(connection_ids),
-            "authenticated_users": users,
-            "created_at": min(
-                self.connections[conn_id].connected_at
-                for conn_id in connection_ids
-                if conn_id in self.connections
-            ) if connection_ids else None
+            "player_count": len(players),
+            "players": players,
+            "created_at": time.time()  # À améliorer avec la vraie date de création
+        }
+
+    # === MÉTHODES D'INFORMATION ===
+
+    def get_connection_count(self) -> int:
+        """Retourne le nombre de connexions actives"""
+        return len(self.connections)
+
+    def get_authenticated_count(self) -> int:
+        """Retourne le nombre de connexions authentifiées"""
+        return sum(1 for conn in self.connections.values() if conn.is_authenticated)
+
+    def get_room_count(self) -> int:
+        """Retourne le nombre de rooms actives"""
+        return len(self.game_rooms)
+
+    def get_user_connection_count(self, user_id: UUID) -> int:
+        """Retourne le nombre de connexions pour un utilisateur"""
+        return len(self.user_connections.get(user_id, set()))
+
+    def is_user_connected(self, user_id: UUID) -> bool:
+        """Vérifie si un utilisateur est connecté"""
+        return user_id in self.user_connections and len(self.user_connections[user_id]) > 0
+
+    def get_connection_info(self, connection_id: str) -> Optional[Dict[str, Any]]:
+        """Récupère les informations d'une connexion"""
+        connection = self.connections.get(connection_id)
+        if not connection:
+            return None
+
+        return {
+            "connection_id": connection.connection_id,
+            "user_id": str(connection.user_id) if connection.user_id else None,
+            "username": connection.username,
+            "is_authenticated": connection.is_authenticated,
+            "game_rooms": list(connection.game_rooms),
+            "connected_at": connection.connected_at,
+            "last_heartbeat": connection.last_heartbeat,
+            "is_alive": connection.is_alive
+        }
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """Récupère les statistiques globales du gestionnaire WebSocket"""
+        return {
+            "total_connections": self.get_connection_count(),
+            "authenticated_connections": self.get_authenticated_count(),
+            "active_rooms": self.get_room_count(),
+            "unique_users": len(self.user_connections),
+            "rooms_info": {
+                room_id: len(connections)
+                for room_id, connections in self.game_rooms.items()
+            },
+            "timestamp": time.time()
         }
 
 

@@ -1,555 +1,452 @@
 """
 Repository pour la gestion des utilisateurs
-Opérations CRUD et requêtes spécialisées pour les utilisateurs
+Couche d'accès aux données avec SQLAlchemy 2.0.41
 """
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import List, Optional, Dict, Any
 from uuid import UUID
+from datetime import datetime, timezone
 
-from sqlalchemy import and_, desc, func, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update, delete, func, and_, or_, desc, asc
+from sqlalchemy.orm import selectinload, joinedload
 
 from app.models.user import User
-from app.schemas.user import UserCreate, UserUpdate, UserSearch
-from .base import BaseRepository
+from app.core.database import Base
+from app.utils.exceptions import EntityNotFoundError, ValidationError
 
 
-class UserRepository(BaseRepository[User, UserCreate, UserUpdate]):
-    """Repository pour les utilisateurs avec méthodes spécialisées"""
+class UserRepository:
+    """Repository pour les opérations CRUD sur les utilisateurs"""
 
-    def __init__(self):
-        super().__init__(User)
+    async def create(self, db: AsyncSession, user_data: Dict[str, Any]) -> User:
+        """
+        Crée un nouvel utilisateur
 
-    # === MÉTHODES DE RECHERCHE SPÉCIALISÉES ===
+        Args:
+            db: Session de base de données
+            user_data: Données de l'utilisateur
 
-    async def get_by_unique_field(
-            self,
-            db: AsyncSession,
-            field_value: str
-    ) -> Optional[User]:
-        """Récupère un utilisateur par username (implémentation abstraite)"""
-        return await self.get_by_username(db, field_value)
+        Returns:
+            Utilisateur créé
 
-    async def get_by_username(
-            self,
-            db: AsyncSession,
-            username: str,
-            *,
-            with_deleted: bool = False
-    ) -> Optional[User]:
+        Raises:
+            ValidationError: Si les données sont invalides
+        """
+        try:
+            user = User(**user_data)
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+            return user
+        except Exception as e:
+            await db.rollback()
+            raise ValidationError(f"Erreur lors de la création de l'utilisateur: {str(e)}")
+
+    async def get_by_id(self, db: AsyncSession, user_id: UUID) -> Optional[User]:
+        """
+        Récupère un utilisateur par son ID
+
+        Args:
+            db: Session de base de données
+            user_id: UUID de l'utilisateur
+
+        Returns:
+            Utilisateur trouvé ou None
+        """
+        stmt = select(User).where(User.id == user_id)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_by_username(self, db: AsyncSession, username: str) -> Optional[User]:
         """
         Récupère un utilisateur par son nom d'utilisateur
 
         Args:
             db: Session de base de données
             username: Nom d'utilisateur
-            with_deleted: Inclure les utilisateurs supprimés
 
         Returns:
-            L'utilisateur ou None
+            Utilisateur trouvé ou None
         """
-        query = select(User).where(
-            func.lower(User.username) == func.lower(username.strip())
-        )
-
-        if not with_deleted:
-            query = query.where(User.is_deleted == False)
-
-        result = await db.execute(query)
+        stmt = select(User).where(User.username == username.lower())
+        result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_by_email(
-            self,
-            db: AsyncSession,
-            email: str,
-            *,
-            with_deleted: bool = False
-    ) -> Optional[User]:
+    async def get_by_email(self, db: AsyncSession, email: str) -> Optional[User]:
         """
         Récupère un utilisateur par son email
 
         Args:
             db: Session de base de données
             email: Adresse email
-            with_deleted: Inclure les utilisateurs supprimés
 
         Returns:
-            L'utilisateur ou None
+            Utilisateur trouvé ou None
         """
-        query = select(User).where(
-            func.lower(User.email) == func.lower(email.strip())
-        )
-
-        if not with_deleted:
-            query = query.where(User.is_deleted == False)
-
-        result = await db.execute(query)
+        stmt = select(User).where(User.email == email.lower())
+        result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_by_username_or_email(
-            self,
-            db: AsyncSession,
-            identifier: str,
-            *,
-            with_deleted: bool = False
+    async def get_with_relations(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        load_games: bool = False,
+        load_participations: bool = False
     ) -> Optional[User]:
         """
-        Récupère un utilisateur par username ou email
+        Récupère un utilisateur avec ses relations
 
         Args:
             db: Session de base de données
-            identifier: Username ou email
-            with_deleted: Inclure les utilisateurs supprimés
+            user_id: UUID de l'utilisateur
+            load_games: Charger les jeux créés
+            load_participations: Charger les participations
 
         Returns:
-            L'utilisateur ou None
+            Utilisateur avec relations chargées
         """
-        identifier = identifier.strip().lower()
+        stmt = select(User).where(User.id == user_id)
 
-        query = select(User).where(
-            or_(
-                func.lower(User.username) == identifier,
-                func.lower(User.email) == identifier
-            )
-        )
+        if load_games:
+            stmt = stmt.options(selectinload(User.created_games))
 
-        if not with_deleted:
-            query = query.where(User.is_deleted == False)
+        if load_participations:
+            stmt = stmt.options(selectinload(User.game_participations))
 
-        result = await db.execute(query)
+        result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
-    # === MÉTHODES DE VALIDATION ===
-
-    async def is_username_available(
-            self,
-            db: AsyncSession,
-            username: str,
-            exclude_user_id: Optional[UUID] = None
-    ) -> bool:
+    async def update(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        update_data: Dict[str, Any]
+    ) -> Optional[User]:
         """
-        Vérifie si un nom d'utilisateur est disponible
+        Met à jour un utilisateur
 
         Args:
             db: Session de base de données
-            username: Nom d'utilisateur à vérifier
-            exclude_user_id: ID utilisateur à exclure (pour les mises à jour)
+            user_id: UUID de l'utilisateur
+            update_data: Données à mettre à jour
 
         Returns:
-            True si disponible
+            Utilisateur mis à jour
+
+        Raises:
+            EntityNotFoundError: Si l'utilisateur n'existe pas
         """
-        query = select(func.count(User.id)).where(
-            and_(
-                func.lower(User.username) == func.lower(username.strip()),
-                User.is_deleted == False
-            )
+        # Ajouter la date de mise à jour
+        update_data["updated_at"] = datetime.now(timezone.utc)
+
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(**update_data)
+            .returning(User)
         )
 
-        if exclude_user_id:
-            query = query.where(User.id != exclude_user_id)
+        result = await db.execute(stmt)
+        updated_user = result.scalar_one_or_none()
 
-        result = await db.execute(query)
-        count = result.scalar()
-        return count == 0
+        if not updated_user:
+            raise EntityNotFoundError(
+                "Utilisateur non trouvé",
+                entity_type="User",
+                entity_id=user_id
+            )
 
-    async def is_email_available(
-            self,
-            db: AsyncSession,
-            email: str,
-            exclude_user_id: Optional[UUID] = None
-    ) -> bool:
+        await db.commit()
+        await db.refresh(updated_user)
+        return updated_user
+
+    async def delete(self, db: AsyncSession, user_id: UUID) -> bool:
         """
-        Vérifie si un email est disponible
+        Supprime un utilisateur
 
         Args:
             db: Session de base de données
-            email: Email à vérifier
-            exclude_user_id: ID utilisateur à exclure
+            user_id: UUID de l'utilisateur
 
         Returns:
-            True si disponible
+            True si supprimé, False si non trouvé
         """
-        query = select(func.count(User.id)).where(
-            and_(
-                func.lower(User.email) == func.lower(email.strip()),
-                User.is_deleted == False
+        stmt = delete(User).where(User.id == user_id)
+        result = await db.execute(stmt)
+        await db.commit()
+        return result.rowcount > 0
+
+    async def get_multi(
+        self,
+        db: AsyncSession,
+        skip: int = 0,
+        limit: int = 100,
+        active_only: bool = True,
+        verified_only: bool = False
+    ) -> List[User]:
+        """
+        Récupère plusieurs utilisateurs avec pagination
+
+        Args:
+            db: Session de base de données
+            skip: Nombre d'éléments à ignorer
+            limit: Nombre maximum d'éléments
+            active_only: Seulement les utilisateurs actifs
+            verified_only: Seulement les utilisateurs vérifiés
+
+        Returns:
+            Liste des utilisateurs
+        """
+        stmt = select(User)
+
+        if active_only:
+            stmt = stmt.where(User.is_active == True)
+
+        if verified_only:
+            stmt = stmt.where(User.is_verified == True)
+
+        stmt = stmt.offset(skip).limit(limit).order_by(desc(User.created_at))
+
+        result = await db.execute(stmt)
+        return result.scalars().all()
+
+    async def search_users(
+        self,
+        db: AsyncSession,
+        query: str,
+        skip: int = 0,
+        limit: int = 20,
+        active_only: bool = True
+    ) -> List[User]:
+        """
+        Recherche des utilisateurs par nom d'utilisateur ou nom complet
+
+        Args:
+            db: Session de base de données
+            query: Terme de recherche
+            skip: Nombre d'éléments à ignorer
+            limit: Nombre maximum d'éléments
+            active_only: Seulement les utilisateurs actifs
+
+        Returns:
+            Liste des utilisateurs correspondants
+        """
+        search_term = f"%{query.lower()}%"
+
+        stmt = select(User).where(
+            or_(
+                User.username.ilike(search_term),
+                User.full_name.ilike(search_term)
             )
         )
 
-        if exclude_user_id:
-            query = query.where(User.id != exclude_user_id)
+        if active_only:
+            stmt = stmt.where(User.is_active == True)
 
-        result = await db.execute(query)
-        count = result.scalar()
-        return count == 0
+        stmt = stmt.offset(skip).limit(limit).order_by(desc(User.total_score))
 
-    # === MÉTHODES DE STATISTIQUES ===
+        result = await db.execute(stmt)
+        return result.scalars().all()
 
-    async def get_user_stats(
-            self,
-            db: AsyncSession,
-            user_id: UUID
-    ) -> Optional[Dict[str, Any]]:
+    async def get_leaderboard(
+        self,
+        db: AsyncSession,
+        limit: int = 10,
+        order_by: str = "total_score"
+    ) -> List[User]:
+        """
+        Récupère le classement des utilisateurs
+
+        Args:
+            db: Session de base de données
+            limit: Nombre d'utilisateurs dans le classement
+            order_by: Champ de tri (total_score, quantum_points, win_rate)
+
+        Returns:
+            Liste des meilleurs utilisateurs
+        """
+        order_field = getattr(User, order_by, User.total_score)
+
+        stmt = (
+            select(User)
+            .where(and_(User.is_active == True, User.total_games > 0))
+            .order_by(desc(order_field))
+            .limit(limit)
+        )
+
+        result = await db.execute(stmt)
+        return result.scalars().all()
+
+    async def get_user_stats(self, db: AsyncSession, user_id: UUID) -> Dict[str, Any]:
         """
         Récupère les statistiques détaillées d'un utilisateur
 
         Args:
             db: Session de base de données
-            user_id: ID de l'utilisateur
+            user_id: UUID de l'utilisateur
 
         Returns:
-            Dictionnaire des statistiques ou None
+            Statistiques de l'utilisateur
+
+        Raises:
+            EntityNotFoundError: Si l'utilisateur n'existe pas
         """
         user = await self.get_by_id(db, user_id)
         if not user:
-            return None
+            raise EntityNotFoundError(
+                "Utilisateur non trouvé",
+                entity_type="User",
+                entity_id=user_id
+            )
 
-        # Calcul des statistiques avancées
-        now = datetime.utcnow()
-        week_ago = now - timedelta(days=7)
-        month_ago = now - timedelta(days=30)
-
-        # TODO: Ajouter les requêtes pour les statistiques de jeu
-        # Une fois que les modèles Game sont en place
-
-        return {
-            'user_id': user.id,
-            'username': user.username,
-            'total_games': user.total_games,
-            'wins': user.wins,
-            'losses': user.total_games - user.wins,
-            'win_rate': user.win_rate,
-            'best_time': user.best_time,
-            'average_time': user.average_time,
-            'quantum_score': user.quantum_score,
-            'games_this_week': 0,  # TODO: Calculer avec requête sur Game
-            'games_this_month': 0,  # TODO: Calculer avec requête sur Game
-            'account_age_days': (now - user.created_at).days,
-            'last_login': user.last_login,
-            'login_count': user.login_count,
-            'is_verified': user.is_verified,
-            'is_active': user.is_active
+        # Statistiques de base
+        stats = {
+            "user_id": str(user.id),
+            "username": user.username,
+            "total_games": user.total_games,
+            "games_won": user.games_won,
+            "win_rate": user.win_rate,
+            "total_score": user.total_score,
+            "best_score": user.best_score,
+            "average_score": user.average_score,
+            "quantum_points": user.quantum_points,
+            "rank": user.rank,
+            "created_at": user.created_at,
+            "last_login": user.last_login
         }
 
-    async def get_leaderboard(
-            self,
-            db: AsyncSession,
-            *,
-            category: str = 'quantum_score',
-            limit: int = 100,
-            period: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        # TODO: Ajouter des statistiques plus détaillées
+        # - Temps de jeu moyen
+        # - Types de jeux préférés
+        # - Progression dans le temps
+        # - Comparaison avec la moyenne
+
+        return stats
+
+    async def update_user_stats(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        game_won: bool,
+        score: int,
+        quantum_used: bool = False
+    ) -> User:
         """
-        Récupère le leaderboard des utilisateurs
+        Met à jour les statistiques d'un utilisateur après une partie
 
         Args:
             db: Session de base de données
-            category: Catégorie de classement ('quantum_score', 'wins', 'win_rate')
-            limit: Nombre d'utilisateurs à retourner
-            period: Période ('week', 'month', 'all-time')
+            user_id: UUID de l'utilisateur
+            game_won: True si la partie a été gagnée
+            score: Score obtenu
+            quantum_used: True si des fonctionnalités quantiques ont été utilisées
 
         Returns:
-            Liste des utilisateurs classés
+            Utilisateur mis à jour
+
+        Raises:
+            EntityNotFoundError: Si l'utilisateur n'existe pas
         """
-        # Vérification de la catégorie
-        valid_categories = ['quantum_score', 'wins', 'win_rate', 'total_games']
-        if category not in valid_categories:
-            category = 'quantum_score'
-
-        # Construction de la requête de base
-        query = select(User).where(
-            and_(
-                User.is_active == True,
-                User.is_deleted == False,
-                User.total_games >= 5  # Minimum 5 jeux pour apparaître
-            )
-        )
-
-        # Tri selon la catégorie
-        if category == 'quantum_score':
-            query = query.order_by(desc(User.quantum_score))
-        elif category == 'wins':
-            query = query.order_by(desc(User.wins))
-        elif category == 'win_rate':
-            # Tri par taux de victoire puis par nombre de victoires
-            query = query.order_by(
-                desc(User.wins / func.greatest(User.total_games, 1)),
-                desc(User.wins)
-            )
-        elif category == 'total_games':
-            query = query.order_by(desc(User.total_games))
-
-        query = query.limit(limit)
-
-        result = await db.execute(query)
-        users = result.scalars().all()
-
-        # Formatage des résultats avec rang
-        leaderboard = []
-        for rank, user in enumerate(users, 1):
-            leaderboard.append({
-                'rank': rank,
-                'user_id': user.id,
-                'username': user.username,
-                'score': getattr(user, category),
-                'total_games': user.total_games,
-                'wins': user.wins,
-                'win_rate': user.win_rate,
-                'quantum_score': user.quantum_score,
-                'is_verified': user.is_verified
-            })
-
-        return leaderboard
-
-    # === MÉTHODES DE RECHERCHE AVANCÉE ===
-
-    async def search_users(
-            self,
-            db: AsyncSession,
-            search_criteria: UserSearch
-    ) -> Dict[str, Any]:
-        """
-        Recherche avancée d'utilisateurs
-
-        Args:
-            db: Session de base de données
-            search_criteria: Critères de recherche
-
-        Returns:
-            Résultats de recherche paginés
-        """
-        query = select(User).where(User.is_deleted == False)
-
-        # Filtre par texte (username ou email)
-        if search_criteria.query:
-            search_term = f"%{search_criteria.query.strip().lower()}%"
-            query = query.where(
-                or_(
-                    func.lower(User.username).like(search_term),
-                    func.lower(User.email).like(search_term)
-                )
+        user = await self.get_by_id(db, user_id)
+        if not user:
+            raise EntityNotFoundError(
+                "Utilisateur non trouvé",
+                entity_type="User",
+                entity_id=user_id
             )
 
-        # Filtres spécifiques
-        if search_criteria.is_active is not None:
-            query = query.where(User.is_active == search_criteria.is_active)
+        # Mise à jour des statistiques
+        user.update_stats(game_won, score, quantum_used)
 
-        if search_criteria.is_verified is not None:
-            query = query.where(User.is_verified == search_criteria.is_verified)
+        await db.commit()
+        await db.refresh(user)
+        return user
 
-        if search_criteria.min_games is not None:
-            query = query.where(User.total_games >= search_criteria.min_games)
-
-        if search_criteria.max_games is not None:
-            query = query.where(User.total_games <= search_criteria.max_games)
-
-        if search_criteria.min_score is not None:
-            query = query.where(User.quantum_score >= search_criteria.min_score)
-
-        # Tri
-        if search_criteria.sort_by:
-            sort_field = getattr(User, search_criteria.sort_by, User.created_at)
-            if search_criteria.sort_order == 'asc':
-                query = query.order_by(sort_field)
-            else:
-                query = query.order_by(desc(sort_field))
-
-        # Pagination
-        total_query = select(func.count(User.id)).select_from(query.subquery())
-        total_result = await db.execute(total_query)
-        total = total_result.scalar()
-
-        offset = (search_criteria.page - 1) * search_criteria.page_size
-        query = query.offset(offset).limit(search_criteria.page_size)
-
-        result = await db.execute(query)
-        users = result.scalars().all()
-
-        total_pages = (total + search_criteria.page_size - 1) // search_criteria.page_size
-
-        return {
-            'users': users,
-            'total': total,
-            'page': search_criteria.page,
-            'page_size': search_criteria.page_size,
-            'total_pages': total_pages,
-            'query': search_criteria.query
-        }
-
-    # === MÉTHODES DE SÉCURITÉ ===
-
-    async def get_locked_users(
-            self,
-            db: AsyncSession,
-            *,
-            limit: int = 100
+    async def get_users_by_ids(
+        self,
+        db: AsyncSession,
+        user_ids: List[UUID]
     ) -> List[User]:
         """
-        Récupère les utilisateurs verrouillés
+        Récupère plusieurs utilisateurs par leurs IDs
 
         Args:
             db: Session de base de données
+            user_ids: Liste des UUIDs
+
+        Returns:
+            Liste des utilisateurs trouvés
+        """
+        if not user_ids:
+            return []
+
+        stmt = select(User).where(User.id.in_(user_ids))
+        result = await db.execute(stmt)
+        return result.scalars().all()
+
+    async def count_total_users(
+        self,
+        db: AsyncSession,
+        active_only: bool = False,
+        verified_only: bool = False
+    ) -> int:
+        """
+        Compte le nombre total d'utilisateurs
+
+        Args:
+            db: Session de base de données
+            active_only: Compter seulement les utilisateurs actifs
+            verified_only: Compter seulement les utilisateurs vérifiés
+
+        Returns:
+            Nombre d'utilisateurs
+        """
+        stmt = select(func.count(User.id))
+
+        if active_only:
+            stmt = stmt.where(User.is_active == True)
+
+        if verified_only:
+            stmt = stmt.where(User.is_verified == True)
+
+        result = await db.execute(stmt)
+        return result.scalar()
+
+    async def get_recent_users(
+        self,
+        db: AsyncSession,
+        days: int = 7,
+        limit: int = 50
+    ) -> List[User]:
+        """
+        Récupère les utilisateurs récemment inscrits
+
+        Args:
+            db: Session de base de données
+            days: Nombre de jours en arrière
             limit: Nombre maximum d'utilisateurs
 
         Returns:
-            Liste des utilisateurs verrouillés
+            Liste des utilisateurs récents
         """
-        now = datetime.utcnow()
-        query = select(User).where(
-            and_(
-                User.locked_until.isnot(None),
-                User.locked_until > now,
-                User.is_deleted == False
-            )
-        ).order_by(desc(User.locked_until)).limit(limit)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
 
-        result = await db.execute(query)
+        stmt = (
+            select(User)
+            .where(User.created_at >= cutoff_date)
+            .order_by(desc(User.created_at))
+            .limit(limit)
+        )
+
+        result = await db.execute(stmt)
         return result.scalars().all()
-
-    async def get_users_with_failed_logins(
-            self,
-            db: AsyncSession,
-            *,
-            min_attempts: int = 3,
-            limit: int = 100
-    ) -> List[User]:
-        """
-        Récupère les utilisateurs avec des tentatives de connexion échouées
-
-        Args:
-            db: Session de base de données
-            min_attempts: Nombre minimum de tentatives échouées
-            limit: Nombre maximum d'utilisateurs
-
-        Returns:
-            Liste des utilisateurs avec échecs de connexion
-        """
-        query = select(User).where(
-            and_(
-                User.failed_login_attempts >= min_attempts,
-                User.is_deleted == False
-            )
-        ).order_by(desc(User.failed_login_attempts)).limit(limit)
-
-        result = await db.execute(query)
-        return result.scalars().all()
-
-    # === MÉTHODES D'ADMINISTRATION ===
-
-    async def get_admin_user_list(
-            self,
-            db: AsyncSession,
-            *,
-            page: int = 1,
-            page_size: int = 50,
-            filters: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Récupère la liste des utilisateurs pour l'administration
-
-        Args:
-            db: Session de base de données
-            page: Page courante
-            page_size: Taille de la page
-            filters: Filtres additionnels
-
-        Returns:
-            Liste paginée avec métadonnées admin
-        """
-        # Utilise la méthode de pagination héritée avec des champs admin
-        return await self.get_paginated(
-            db,
-            page=page,
-            page_size=page_size,
-            filters=filters,
-            order_by='created_at',
-            order_desc=True,
-            with_deleted=True  # Les admins peuvent voir les comptes supprimés
-        )
-
-    async def bulk_update_user_status(
-            self,
-            db: AsyncSession,
-            user_ids: List[UUID],
-            *,
-            is_active: Optional[bool] = None,
-            is_verified: Optional[bool] = None,
-            unlock_accounts: bool = False,
-            updated_by: Optional[UUID] = None
-    ) -> int:
-        """
-        Met à jour le statut de plusieurs utilisateurs
-
-        Args:
-            db: Session de base de données
-            user_ids: Liste des IDs utilisateurs
-            is_active: Nouveau statut actif
-            is_verified: Nouveau statut vérifié
-            unlock_accounts: Déverrouiller les comptes
-            updated_by: ID de l'admin effectuant l'action
-
-        Returns:
-            Nombre d'utilisateurs mis à jour
-        """
-        values = {}
-
-        if is_active is not None:
-            values['is_active'] = is_active
-
-        if is_verified is not None:
-            values['is_verified'] = is_verified
-
-        if unlock_accounts:
-            values['locked_until'] = None
-            values['failed_login_attempts'] = 0
-
-        if updated_by:
-            values['updated_by'] = updated_by
-
-        if not values:
-            return 0
-
-        return await self.bulk_update(
-            db,
-            filters={'id': user_ids},
-            values=values
-        )
-
-    # === MÉTHODES DE NETTOYAGE ===
-
-    async def cleanup_expired_tokens(
-            self,
-            db: AsyncSession
-    ) -> int:
-        """
-        Nettoie les tokens expirés
-
-        Args:
-            db: Session de base de données
-
-        Returns:
-            Nombre de tokens nettoyés
-        """
-        now = datetime.utcnow()
-
-        # Nettoyage des tokens de reset de mot de passe expirés
-        values = {
-            'password_reset_token': None,
-            'password_reset_expires': None
-        }
-
-        return await self.bulk_update(
-            db,
-            filters={},  # Sera filtré par la condition WHERE dans la requête
-            values=values
-        )
 
     async def get_inactive_users(
-            self,
-            db: AsyncSession,
-            *,
-            days_inactive: int = 90,
-            limit: int = 1000
+        self,
+        db: AsyncSession,
+        days_inactive: int = 30,
+        limit: int = 100
     ) -> List[User]:
         """
         Récupère les utilisateurs inactifs
@@ -562,15 +459,180 @@ class UserRepository(BaseRepository[User, UserCreate, UserUpdate]):
         Returns:
             Liste des utilisateurs inactifs
         """
-        cutoff_date = datetime.utcnow() - timedelta(days=days_inactive)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_inactive)
 
-        query = select(User).where(
-            and_(
-                User.last_login < cutoff_date,
-                User.is_active == True,
-                User.is_deleted == False
+        stmt = (
+            select(User)
+            .where(
+                or_(
+                    User.last_login < cutoff_date,
+                    User.last_login.is_(None)
+                )
             )
-        ).order_by(User.last_login).limit(limit)
+            .where(User.is_active == True)
+            .order_by(asc(User.last_login.nulls_first()))
+            .limit(limit)
+        )
 
-        result = await db.execute(query)
+        result = await db.execute(stmt)
         return result.scalars().all()
+
+    async def update_last_login(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        ip_address: Optional[str] = None
+    ) -> None:
+        """
+        Met à jour la dernière connexion d'un utilisateur
+
+        Args:
+            db: Session de base de données
+            user_id: UUID de l'utilisateur
+            ip_address: Adresse IP (optionnelle)
+        """
+        update_data = {
+            "last_login": datetime.now(timezone.utc),
+            "login_attempts": 0,
+            "locked_until": None
+        }
+
+        if ip_address:
+            update_data["last_ip_address"] = ip_address
+
+        stmt = update(User).where(User.id == user_id).values(**update_data)
+        await db.execute(stmt)
+        await db.commit()
+
+    async def increment_login_attempts(
+        self,
+        db: AsyncSession,
+        user_id: UUID
+    ) -> User:
+        """
+        Incrémente les tentatives de connexion d'un utilisateur
+
+        Args:
+            db: Session de base de données
+            user_id: UUID de l'utilisateur
+
+        Returns:
+            Utilisateur mis à jour
+        """
+        user = await self.get_by_id(db, user_id)
+        if not user:
+            raise EntityNotFoundError(
+                "Utilisateur non trouvé",
+                entity_type="User",
+                entity_id=user_id
+            )
+
+        user.increment_login_attempts()
+        await db.commit()
+        await db.refresh(user)
+        return user
+
+    async def verify_user_email(
+        self,
+        db: AsyncSession,
+        user_id: UUID
+    ) -> User:
+        """
+        Marque l'email d'un utilisateur comme vérifié
+
+        Args:
+            db: Session de base de données
+            user_id: UUID de l'utilisateur
+
+        Returns:
+            Utilisateur mis à jour
+
+        Raises:
+            EntityNotFoundError: Si l'utilisateur n'existe pas
+        """
+        user = await self.get_by_id(db, user_id)
+        if not user:
+            raise EntityNotFoundError(
+                "Utilisateur non trouvé",
+                entity_type="User",
+                entity_id=user_id
+            )
+
+        user.verify_email()
+        await db.commit()
+        await db.refresh(user)
+        return user
+
+    async def batch_update_users(
+        self,
+        db: AsyncSession,
+        user_ids: List[UUID],
+        update_data: Dict[str, Any]
+    ) -> int:
+        """
+        Met à jour plusieurs utilisateurs en une fois
+
+        Args:
+            db: Session de base de données
+            user_ids: Liste des UUIDs à mettre à jour
+            update_data: Données à mettre à jour
+
+        Returns:
+            Nombre d'utilisateurs mis à jour
+        """
+        if not user_ids:
+            return 0
+
+        update_data["updated_at"] = datetime.now(timezone.utc)
+
+        stmt = (
+            update(User)
+            .where(User.id.in_(user_ids))
+            .values(**update_data)
+        )
+
+        result = await db.execute(stmt)
+        await db.commit()
+        return result.rowcount
+
+    async def get_users_statistics(self, db: AsyncSession) -> Dict[str, Any]:
+        """
+        Récupère les statistiques globales des utilisateurs
+
+        Args:
+            db: Session de base de données
+
+        Returns:
+            Statistiques globales
+        """
+        # Comptages de base
+        total_users = await self.count_total_users(db)
+        active_users = await self.count_total_users(db, active_only=True)
+        verified_users = await self.count_total_users(db, verified_only=True)
+
+        # Utilisateurs récents (7 derniers jours)
+        recent_users = await self.get_recent_users(db, days=7)
+
+        # Statistiques de jeu
+        game_stats_stmt = select(
+            func.avg(User.total_games).label("avg_games"),
+            func.avg(User.total_score).label("avg_score"),
+            func.avg(User.quantum_points).label("avg_quantum_points"),
+            func.max(User.best_score).label("max_score")
+        ).where(User.is_active == True)
+
+        result = await db.execute(game_stats_stmt)
+        game_stats = result.first()
+
+        return {
+            "total_users": total_users,
+            "active_users": active_users,
+            "verified_users": verified_users,
+            "recent_registrations": len(recent_users),
+            "average_games_per_user": float(game_stats.avg_games or 0),
+            "average_score_per_user": float(game_stats.avg_score or 0),
+            "average_quantum_points": float(game_stats.avg_quantum_points or 0),
+            "highest_score": int(game_stats.max_score or 0),
+            "verification_rate": (verified_users / total_users * 100) if total_users > 0 else 0,
+            "activity_rate": (active_users / total_users * 100) if total_users > 0 else 0
+        }

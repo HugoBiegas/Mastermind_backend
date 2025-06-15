@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     get_database, get_current_active_user, get_current_verified_user,
+    get_current_superuser, validate_game_access, validate_game_modification,
     get_pagination_params, get_search_params, create_http_exception_from_error,
     PaginationParams, SearchParams
 )
@@ -76,243 +77,26 @@ async def create_game(
         )
 
 
-@router.post(
-    "/join",
-    response_model=Dict[str, Any],
-    summary="Rejoindre une partie",
-    description="Rejoint une partie existante avec un code de room"
-)
-async def join_game(
-        join_data: GameJoin,
-        current_user: User = Depends(get_current_verified_user),
-        db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """
-    Rejoint une partie existante
-
-    - **room_code**: Code de la room à rejoindre
-    - **password**: Mot de passe si requis
-    - **player_name**: Nom d'affichage personnalisé (optionnel)
-    """
-    try:
-        join_info = await game_service.join_game(
-            db, join_data, user_id=current_user.id
-        )
-        return join_info
-
-    except (EntityNotFoundError, GameFullError, ValidationError) as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la tentative de rejoindre la partie"
-        )
-
-
-@router.post(
-    "/{game_id}/start",
-    response_model=MessageResponse,
-    summary="Démarrer une partie",
-    description="Démarre une partie (hôte uniquement)"
-)
-async def start_game(
-        game_id: UUID,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> MessageResponse:
-    """
-    Démarre une partie (accessible uniquement à l'hôte)
-
-    - **game_id**: ID de la partie à démarrer
-    """
-    try:
-        result = await game_service.start_game(
-            db, game_id, user_id=current_user.id
-        )
-        return MessageResponse(**result)
-
-    except (EntityNotFoundError, ValidationError) as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors du démarrage de la partie"
-        )
-
-
-# === ROUTES DE GAMEPLAY ===
-
-@router.post(
-    "/{game_id}/attempt",
-    response_model=Dict[str, Any],
-    summary="Faire une tentative",
-    description="Effectue une tentative dans la partie"
-)
-async def make_attempt(
-        game_id: UUID,
-        attempt_data: AttemptCreate,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """
-    Effectue une tentative de solution dans la partie
-
-    - **guess**: Tentative (4 couleurs)
-    - **use_quantum_measurement**: Utiliser une mesure quantique
-    - **measured_position**: Position à mesurer (0-3, optionnel)
-    """
-    try:
-        result = await game_service.make_attempt(
-            db, game_id, current_user.id, attempt_data
-        )
-        return result
-
-    except (EntityNotFoundError, GameNotActiveError, ValidationError) as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de l'exécution de la tentative"
-        )
-
-
-@router.get(
-    "/{game_id}/state",
-    response_model=Dict[str, Any],
-    summary="État de la partie",
-    description="Récupère l'état actuel de la partie"
-)
-async def get_game_state(
-        game_id: UUID,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """
-    Récupère l'état complet de la partie
-
-    Inclut :
-    - Informations de la partie
-    - Liste des joueurs
-    - Historique des tentatives (pour le joueur actuel)
-    - Statut de progression
-    """
-    try:
-        game_state = await game_service.get_game_state(
-            db, game_id, user_id=current_user.id
-        )
-        return game_state
-
-    except EntityNotFoundError as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération de l'état de la partie"
-        )
-
-
-@router.get(
-    "/{game_id}/quantum-hint",
-    response_model=QuantumHint,
-    summary="Indice quantique",
-    description="Obtient un indice quantique pour la partie"
-)
-async def get_quantum_hint(
-        game_id: UUID,
-        hint_type: str = Query(..., description="Type d'indice (grover, measurement, superposition)"),
-        position: int = Query(None, ge=0, le=3, description="Position pour l'indice (0-3)"),
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> QuantumHint:
-    """
-    Obtient un indice quantique pour aider à résoudre la partie
-
-    Types d'indices disponibles :
-    - **grover**: Utilise l'algorithme de Grover pour révéler une couleur
-    - **measurement**: Effectue une mesure quantique directe
-    - **superposition**: Révèle les états de superposition
-    - **entanglement**: Informe sur les intrications
-
-    - **hint_type**: Type d'indice désiré
-    - **position**: Position concernée (optionnel selon le type)
-    """
-    try:
-        hint = await game_service.get_quantum_hint(
-            db, game_id, current_user.id, hint_type, position
-        )
-        return hint
-
-    except (EntityNotFoundError, ValidationError) as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la génération de l'indice quantique"
-        )
-
-
-# === ROUTES DE CONSULTATION ===
-
 @router.get(
     "/{game_id}",
-    response_model=GameInfo,
-    summary="Informations de partie",
-    description="Récupère les informations d'une partie"
+    response_model=GameFull,
+    summary="Détails d'une partie",
+    description="Récupère les détails complets d'une partie"
 )
-async def get_game_info(
+async def get_game(
         game_id: UUID,
-        db: AsyncSession = Depends(get_database)
-) -> GameInfo:
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database),
+        _: bool = Depends(validate_game_access)
+) -> GameFull:
     """
-    Récupère les informations publiques d'une partie
+    Récupère les détails complets d'une partie
 
-    - **game_id**: ID de la partie
-    """
-    try:
-        game_state = await game_service.get_game_state(db, game_id)
-        return GameInfo(**game_state)
-
-    except EntityNotFoundError as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération des informations de la partie"
-        )
-
-
-@router.get(
-    "/room/{room_code}",
-    response_model=GameInfo,
-    summary="Partie par code room",
-    description="Récupère une partie par son code de room"
-)
-async def get_game_by_room_code(
-        room_code: str,
-        db: AsyncSession = Depends(get_database)
-) -> GameInfo:
-    """
-    Récupère une partie par son code de room
-
-    - **room_code**: Code de la room
+    Inclut l'état actuel, les joueurs, l'historique des coups
     """
     try:
-        # Utilisation du service pour trouver la partie par room_code
-        from app.repositories.game import GameRepository
-
-        game_repo = GameRepository()
-        game = await game_repo.get_by_room_id(db, room_code, with_players=True)
-
-        if not game:
-            raise EntityNotFoundError("Partie non trouvée")
-
-        return GameInfo.from_orm(game)
+        game = await game_service.get_game_details(db, game_id, current_user.id)
+        return game
 
     except EntityNotFoundError as e:
         raise create_http_exception_from_error(e)
@@ -324,67 +108,280 @@ async def get_game_by_room_code(
         )
 
 
-# === ROUTES DE RECHERCHE ET LISTING ===
-
-@router.get(
-    "/",
-    response_model=List[Dict[str, Any]],
-    summary="Parties actives",
-    description="Liste les parties actives disponibles"
+@router.put(
+    "/{game_id}",
+    response_model=GameInfo,
+    summary="Modifier une partie",
+    description="Met à jour les paramètres d'une partie"
 )
-async def get_active_games(
-        game_type: GameType = Query(None, description="Type de jeu"),
-        has_slots: bool = Query(False, description="Seulement les parties avec places libres"),
-        limit: int = Query(50, ge=1, le=100, description="Nombre maximum de parties"),
-        db: AsyncSession = Depends(get_database)
-) -> List[Dict[str, Any]]:
+async def update_game(
+        game_id: UUID,
+        game_update: GameUpdate,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database),
+        _: bool = Depends(validate_game_modification)
+) -> GameInfo:
     """
-    Récupère la liste des parties actives
+    Met à jour les paramètres d'une partie
 
-    - **game_type**: Filtrer par type de jeu (optionnel)
-    - **has_slots**: Seulement les parties avec places libres
-    - **limit**: Nombre maximum de parties (max 100)
+    Seul le créateur de la partie ou un admin peut la modifier
     """
     try:
-        games = await game_service.get_active_games(
-            db, game_type=game_type, has_slots=has_slots, limit=limit
+        updated_game = await game_service.update_game(
+            db, game_id, game_update, current_user.id
         )
-        return games
+        return updated_game
+
+    except (EntityNotFoundError, ValidationError, GameError) as e:
+        raise create_http_exception_from_error(e)
 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération des parties actives"
+            detail="Erreur lors de la mise à jour de la partie"
+        )
+
+
+@router.delete(
+    "/{game_id}",
+    response_model=MessageResponse,
+    summary="Supprimer une partie",
+    description="Supprime définitivement une partie"
+)
+async def delete_game(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database),
+        _: bool = Depends(validate_game_modification)
+) -> MessageResponse:
+    """
+    Supprime définitivement une partie
+
+    Attention: Cette action est irréversible !
+    """
+    try:
+        await game_service.delete_game(db, game_id, current_user.id)
+        return MessageResponse(
+            message="Partie supprimée avec succès",
+            details={"game_id": str(game_id)}
+        )
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la suppression de la partie"
+        )
+
+
+# === ROUTES DE PARTICIPATION ===
+
+@router.post(
+    "/{game_id}/join",
+    response_model=Dict[str, Any],
+    summary="Rejoindre une partie",
+    description="Rejoint une partie existante"
+)
+async def join_game(
+        game_id: UUID,
+        join_data: GameJoin,
+        current_user: User = Depends(get_current_verified_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """
+    Rejoint une partie existante
+
+    - **password**: Mot de passe (si la partie est protégée)
+    - **player_name**: Nom d'affichage du joueur (optionnel)
+    """
+    try:
+        result = await game_service.join_game(
+            db, game_id, current_user.id, join_data
+        )
+        return result
+
+    except (EntityNotFoundError, GameFullError, GameNotActiveError) as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la participation à la partie"
         )
 
 
 @router.post(
-    "/search",
-    response_model=Dict[str, Any],
-    summary="Rechercher des parties",
-    description="Recherche des parties avec critères avancés"
+    "/{game_id}/leave",
+    response_model=MessageResponse,
+    summary="Quitter une partie",
+    description="Quitte une partie en cours"
 )
-async def search_games(
-        search_criteria: GameSearch,
+async def leave_game(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> MessageResponse:
+    """
+    Quitte une partie en cours
+
+    L'utilisateur sera retiré de la liste des participants
+    """
+    try:
+        await game_service.leave_game(db, game_id, current_user.id)
+        return MessageResponse(
+            message="Vous avez quitté la partie",
+            details={"game_id": str(game_id)}
+        )
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de l'abandon de la partie"
+        )
+
+
+# === ROUTES DE GAMEPLAY ===
+
+@router.post(
+    "/{game_id}/start",
+    response_model=Dict[str, Any],
+    summary="Démarrer une partie",
+    description="Démarre officiellement une partie"
+)
+async def start_game(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
     """
-    Recherche des parties avec critères avancés
+    Démarre officiellement une partie
 
-    - **game_type**: Type de jeu
-    - **game_mode**: Mode de jeu
-    - **status**: Statut de la partie
-    - **difficulty**: Niveau de difficulté
-    - **has_slots**: Parties avec places libres
-    - **created_by**: Créateur de la partie
-    - **sort_by**: Champ de tri
-    - **sort_order**: Ordre de tri
-    - **page**: Numéro de page
-    - **page_size**: Taille de la page
+    Seul le créateur peut démarrer la partie
     """
     try:
-        results = await game_service.search_games(db, search_criteria)
-        return results
+        result = await game_service.start_game(db, game_id, current_user.id)
+        return result
+
+    except (EntityNotFoundError, GameError) as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors du démarrage de la partie"
+        )
+
+
+@router.post(
+    "/{game_id}/attempt",
+    response_model=AttemptResult,
+    summary="Faire une tentative",
+    description="Soumet une tentative de solution"
+)
+async def make_attempt(
+        game_id: UUID,
+        attempt: AttemptCreate,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> AttemptResult:
+    """
+    Soumet une tentative de solution
+
+    - **combination**: Combinaison proposée (liste de couleurs)
+    - **use_quantum_hint**: Utiliser un hint quantique (optionnel)
+    """
+    try:
+        result = await game_service.make_attempt(
+            db, game_id, current_user.id, attempt
+        )
+        return result
+
+    except (EntityNotFoundError, GameError, ValidationError) as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la tentative"
+        )
+
+
+@router.post(
+    "/{game_id}/quantum-hint",
+    response_model=QuantumHint,
+    summary="Obtenir un hint quantique",
+    description="Utilise l'algorithme de Grover pour obtenir un hint"
+)
+async def get_quantum_hint(
+        game_id: UUID,
+        hint_type: str = Query("grover", description="Type de hint quantique"),
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> QuantumHint:
+    """
+    Utilise l'informatique quantique pour obtenir un hint
+
+    Types de hints disponibles:
+    - **grover**: Algorithme de Grover pour la recherche
+    - **superposition**: États de superposition quantique
+    - **entanglement**: Corrélations d'intrication
+    """
+    try:
+        hint = await quantum_service.generate_quantum_hint(
+            db, game_id, current_user.id, hint_type
+        )
+        return hint
+
+    except (EntityNotFoundError, GameError) as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la génération du hint quantique"
+        )
+
+
+# === ROUTES DE RECHERCHE ET LISTING ===
+
+@router.get(
+    "/",
+    response_model=GameList,
+    summary="Lister les parties",
+    description="Récupère la liste des parties selon les critères"
+)
+async def list_games(
+        pagination: PaginationParams = Depends(get_pagination_params),
+        search: SearchParams = Depends(get_search_params),
+        game_type: Optional[GameType] = Query(None, description="Type de jeu"),
+        game_mode: Optional[GameMode] = Query(None, description="Mode de jeu"),
+        status: Optional[GameStatus] = Query(None, description="Statut de la partie"),
+        is_public: Optional[bool] = Query(None, description="Parties publiques uniquement"),
+        current_user: Optional[User] = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> GameList:
+    """
+    Récupère la liste des parties selon les critères de filtrage
+
+    Paramètres de filtrage:
+    - **game_type**: Type de jeu (classic, quantum, hybrid, tournament)
+    - **game_mode**: Mode de jeu (solo, multiplayer, ranked, training)
+    - **status**: Statut (waiting, active, finished, cancelled)
+    - **is_public**: Afficher uniquement les parties publiques
+    """
+    try:
+        games = await game_service.search_games(
+            db, pagination, search,
+            game_type=game_type, game_mode=game_mode,
+            status=status, is_public=is_public,
+            user_id=current_user.id if current_user else None
+        )
+        return games
 
     except Exception as e:
         raise HTTPException(
@@ -395,25 +392,24 @@ async def search_games(
 
 @router.get(
     "/my-games",
-    response_model=List[Dict[str, Any]],
+    response_model=GameList,
     summary="Mes parties",
     description="Récupère les parties de l'utilisateur connecté"
 )
 async def get_my_games(
-        status: GameStatus = Query(None, description="Filtrer par statut"),
-        limit: int = Query(20, ge=1, le=100, description="Nombre maximum de parties"),
+        pagination: PaginationParams = Depends(get_pagination_params),
+        status: Optional[GameStatus] = Query(None, description="Statut de la partie"),
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
-) -> List[Dict[str, Any]]:
+) -> GameList:
     """
     Récupère les parties de l'utilisateur connecté
 
-    - **status**: Filtrer par statut de partie (optionnel)
-    - **limit**: Nombre maximum de parties
+    Inclut les parties créées et celles auxquelles il participe
     """
     try:
         games = await game_service.get_user_games(
-            db, current_user.id, status=status, limit=limit
+            db, current_user.id, pagination, status
         )
         return games
 
@@ -424,157 +420,116 @@ async def get_my_games(
         )
 
 
+@router.get(
+    "/public",
+    response_model=GameList,
+    summary="Parties publiques",
+    description="Récupère les parties publiques ouvertes"
+)
+async def get_public_games(
+        pagination: PaginationParams = Depends(get_pagination_params),
+        db: AsyncSession = Depends(get_database)
+) -> GameList:
+    """
+    Récupère les parties publiques ouvertes
+
+    Accessible sans authentification
+    """
+    try:
+        games = await game_service.get_public_games(db, pagination)
+        return games
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération des parties publiques"
+        )
+
+
 # === ROUTES DE STATISTIQUES ===
 
 @router.get(
-    "/stats/global",
+    "/{game_id}/stats",
     response_model=Dict[str, Any],
-    summary="Statistiques globales",
-    description="Récupère les statistiques globales des jeux"
+    summary="Statistiques d'une partie",
+    description="Récupère les statistiques détaillées d'une partie"
 )
-async def get_global_game_statistics(
-        period_days: int = Query(30, ge=1, le=365, description="Période en jours"),
-        db: AsyncSession = Depends(get_database)
+async def get_game_stats(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database),
+        _: bool = Depends(validate_game_access)
 ) -> Dict[str, Any]:
     """
-    Récupère les statistiques globales des jeux
+    Récupère les statistiques détaillées d'une partie
 
-    - **period_days**: Période en jours pour les statistiques
+    Inclut les scores, temps, tentatives, utilisation quantique
     """
     try:
-        from app.repositories.game import GameRepository
-
-        game_repo = GameRepository()
-        stats = await game_repo.get_game_statistics(db, period_days=period_days)
+        stats = await game_service.get_game_statistics(db, game_id)
         return stats
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération des statistiques globales"
+            detail="Erreur lors de la récupération des statistiques"
         )
 
 
 @router.get(
-    "/stats/user/{user_id}",
+    "/stats/leaderboard",
     response_model=Dict[str, Any],
-    summary="Statistiques utilisateur jeux",
-    description="Récupère les statistiques de jeu d'un utilisateur"
+    summary="Classement général",
+    description="Récupère le classement des meilleurs joueurs"
 )
-async def get_user_game_statistics(
-        user_id: UUID,
+async def get_leaderboard(
+        game_type: Optional[GameType] = Query(None, description="Type de jeu"),
+        time_period: str = Query("all", description="Période (all, month, week)"),
+        limit: int = Query(10, ge=1, le=100, description="Nombre de joueurs"),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
     """
-    Récupère les statistiques de jeu d'un utilisateur
+    Récupère le classement des meilleurs joueurs
 
-    - **user_id**: ID de l'utilisateur
+    - **game_type**: Filtrer par type de jeu
+    - **time_period**: Période (all, month, week)
+    - **limit**: Nombre de joueurs dans le classement
     """
     try:
-        from app.repositories.game import GameRepository
-
-        game_repo = GameRepository()
-        stats = await game_repo.get_user_game_stats(db, user_id)
-        return stats
+        leaderboard = await game_service.get_leaderboard(
+            db, game_type=game_type, time_period=time_period, limit=limit
+        )
+        return leaderboard
 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération des statistiques utilisateur"
+            detail="Erreur lors de la récupération du classement"
         )
 
 
-# === ROUTES QUANTIQUES ===
+# === ROUTES D'ADMINISTRATION ===
 
 @router.post(
-    "/quantum/generate-solution",
-    response_model=Dict[str, Any],
-    summary="Générer solution quantique",
-    description="Génère une solution quantique pour test/développement"
-)
-async def generate_quantum_solution(
-        difficulty: Difficulty = Query(Difficulty.NORMAL, description="Niveau de difficulté"),
-        seed: str = Query(None, description="Seed pour reproductibilité"),
-        current_user: User = Depends(get_current_verified_user)
-) -> Dict[str, Any]:
-    """
-    Génère une solution quantique (pour développement et tests)
-
-    - **difficulty**: Niveau de difficulté
-    - **seed**: Seed pour la reproductibilité (optionnel)
-    """
-    try:
-        solution = await quantum_service.generate_quantum_mastermind_solution(
-            difficulty=difficulty.value, seed=seed
-        )
-
-        return {
-            "classical_solution": solution.classical_solution,
-            "quantum_encoding": solution.quantum_encoding,
-            "entanglement_map": solution.entanglement_map,
-            "superposition_states": solution.superposition_states,
-            "generation_seed": solution.generation_seed
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la génération de la solution quantique"
-        )
-
-
-@router.post(
-    "/quantum/analyze-attempt",
-    response_model=Dict[str, Any],
-    summary="Analyser tentative quantique",
-    description="Analyse une tentative avec les données quantiques"
-)
-async def analyze_quantum_attempt(
-        attempt: List[str] = Query(..., description="Tentative à analyser"),
-        game_id: UUID = Query(..., description="ID de la partie"),
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """
-    Analyse une tentative avec les algorithmes quantiques
-
-    - **attempt**: Tentative à analyser (4 couleurs)
-    - **game_id**: ID de la partie pour le contexte
-    """
-    try:
-        # TODO: Récupérer la solution quantique de la partie
-        # Pour l'instant, génération d'une solution factice
-        solution = await quantum_service.generate_quantum_mastermind_solution()
-
-        analysis = await quantum_service.analyze_quantum_attempt(solution, attempt)
-        return analysis
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de l'analyse quantique de la tentative"
-        )
-
-
-# === ROUTES D'ADMINISTRATION (pour les modérateurs) ===
-
-@router.put(
-    "/admin/{game_id}",
+    "/{game_id}/moderate",
     response_model=MessageResponse,
-    summary="Modérer une partie",
-    description="Actions de modération sur une partie"
+    summary="Modération d'une partie",
+    description="Effectue des actions de modération sur une partie"
 )
 async def moderate_game(
         game_id: UUID,
         action: str = Query(..., description="Action de modération"),
         reason: str = Query(..., description="Raison de l'action"),
-        current_user: User = Depends(get_current_active_user),
+        current_user: User = Depends(get_current_superuser),
         db: AsyncSession = Depends(get_database)
 ) -> MessageResponse:
     """
     Effectue des actions de modération sur une partie
 
-    Actions disponibles :
+    Actions disponibles:
     - pause: Mettre en pause
     - resume: Reprendre
     - terminate: Terminer
@@ -584,20 +539,18 @@ async def moderate_game(
     - **action**: Action à effectuer
     - **reason**: Raison de l'action (obligatoire)
     """
-    # Vérification des permissions (admin ou modérateur)
-    if not current_user.is_superuser:
-        # TODO: Ajouter un système de modérateurs
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permissions de modération requises"
+    try:
+        await game_service.moderate_game(
+            db, game_id, action, reason, current_user.id
         )
 
-    try:
-        # TODO: Implémenter les actions de modération
         return MessageResponse(
             message=f"Action '{action}' effectuée sur la partie {game_id}",
             details={"action": action, "reason": reason, "moderator": str(current_user.id)}
         )
+
+    except (EntityNotFoundError, ValidationError) as e:
+        raise create_http_exception_from_error(e)
 
     except Exception as e:
         raise HTTPException(
@@ -606,36 +559,106 @@ async def moderate_game(
         )
 
 
+# === ROUTES D'HISTORIQUE ===
+
+@router.get(
+    "/{game_id}/history",
+    response_model=List[Dict[str, Any]],
+    summary="Historique d'une partie",
+    description="Récupère l'historique complet des actions d'une partie"
+)
+async def get_game_history(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database),
+        _: bool = Depends(validate_game_access)
+) -> List[Dict[str, Any]]:
+    """
+    Récupère l'historique complet des actions d'une partie
+
+    Inclut toutes les tentatives, hints utilisés, événements
+    """
+    try:
+        history = await game_service.get_game_history(db, game_id)
+        return history
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération de l'historique"
+        )
+
+
 # === ROUTES DE DEBUG (à désactiver en production) ===
 
-if False:  # Activer uniquement en développement
-    @router.get(
-        "/debug/{game_id}/solution",
-        summary="Solution de debug",
-        description="Révèle la solution pour debug (DEV uniquement)"
-    )
-    async def debug_reveal_solution(
-            game_id: UUID,
-            current_user: User = Depends(get_current_active_user),
-            db: AsyncSession = Depends(get_database)
-    ) -> Dict[str, Any]:
-        """Route de debug pour révéler la solution (développement uniquement)"""
-        try:
-            from app.repositories.game import GameRepository
+@router.get(
+    "/{game_id}/solution",
+    response_model=SolutionReveal,
+    summary="Révéler la solution (DEBUG)",
+    description="Révèle la solution pour debug (DEV uniquement)",
+    include_in_schema=False  # Masquer en production
+)
+async def debug_reveal_solution(
+        game_id: UUID,
+        current_user: User = Depends(get_current_superuser),
+        db: AsyncSession = Depends(get_database)
+) -> SolutionReveal:
+    """Route de debug pour révéler la solution (développement uniquement)"""
 
-            game_repo = GameRepository()
-            game = await game_repo.get_by_id(db, game_id)
+    # Vérification de l'environnement
+    from app.core.config import settings
+    if settings.ENVIRONMENT == "production":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Route non disponible en production"
+        )
 
-            if not game:
-                raise EntityNotFoundError("Partie non trouvée")
+    try:
+        solution = await game_service.reveal_solution(db, game_id)
+        return solution
 
-            return {
-                "game_id": str(game_id),
-                "classical_solution": game.classical_solution,
-                "quantum_solution": game.quantum_solution,
-                "solution_hash": game.solution_hash,
-                "debug_mode": True
-            }
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
 
-        except Exception as e:
-            return {"error": str(e)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la révélation de la solution"
+        )
+
+
+# === ROUTES D'EXPORT ===
+
+@router.get(
+    "/{game_id}/export",
+    response_model=Dict[str, Any],
+    summary="Exporter une partie",
+    description="Exporte les données d'une partie au format JSON"
+)
+async def export_game(
+        game_id: UUID,
+        format: str = Query("json", description="Format d'export"),
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database),
+        _: bool = Depends(validate_game_access)
+) -> Dict[str, Any]:
+    """
+    Exporte les données d'une partie
+
+    Formats supportés: json, csv (futur)
+    """
+    try:
+        exported_data = await game_service.export_game(db, game_id, format)
+        return exported_data
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de l'export de la partie"
+        )

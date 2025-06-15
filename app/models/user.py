@@ -1,361 +1,491 @@
 """
-Modèle User pour Quantum Mastermind
-Gestion complète des utilisateurs avec statistiques et sécurité
+Modèle utilisateur pour Quantum Mastermind
+SQLAlchemy 2.0.41 avec typing moderne et async support
 """
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-from uuid import UUID
+from datetime import datetime, timezone
+from typing import List, Optional, TYPE_CHECKING
+from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Float, Integer, String, DateTime, CheckConstraint, Index
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    Boolean, DateTime, String, Text, Integer,
+    func, Index, CheckConstraint
+)
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.sql import func
 
-from .base import TimestampedModel
+from app.core.database import Base
+
+# Import conditionnel pour éviter les imports circulaires
+if TYPE_CHECKING:
+    from app.models.game import Game, GameParticipation
+    from app.models.audit import AuditLog
 
 
-class User(TimestampedModel):
+class User(Base):
     """
-    Modèle utilisateur avec statistiques de jeu et sécurité renforcée
+    Modèle utilisateur principal avec support SQLAlchemy 2.0
     """
     __tablename__ = "users"
 
-    # === INFORMATIONS DE BASE ===
+    # === COLONNES PRINCIPALES ===
+
+    # Clé primaire UUID
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        index=True
+    )
+
+    # Informations d'identification
     username: Mapped[str] = mapped_column(
         String(50),
         unique=True,
-        nullable=False,
         index=True,
-        comment="Nom d'utilisateur unique"
+        nullable=False
     )
 
     email: Mapped[str] = mapped_column(
         String(254),
         unique=True,
-        nullable=False,
         index=True,
-        comment="Adresse email unique"
+        nullable=False
     )
 
-    password_hash: Mapped[str] = mapped_column(
+    hashed_password: Mapped[str] = mapped_column(
         String(255),
-        nullable=False,
-        comment="Hash du mot de passe (bcrypt)"
+        nullable=False
     )
 
-    # === ÉTAT DU COMPTE ===
+    # === INFORMATIONS PERSONNELLES ===
+
+    full_name: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True
+    )
+
+    avatar_url: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True
+    )
+
+    bio: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    # === STATUT ET PERMISSIONS ===
+
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         default=True,
         nullable=False,
-        index=True,
-        comment="Compte actif"
+        index=True
     )
 
     is_verified: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
-        nullable=False,
-        comment="Email vérifié"
+        nullable=False
     )
 
     is_superuser: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         nullable=False,
-        comment="Administrateur"
+        index=True
+    )
+
+    # === PARAMÈTRES ET PRÉFÉRENCES ===
+
+    # Utilisation de JSONB pour PostgreSQL, JSON pour autres DB
+    preferences: Mapped[Optional[dict]] = mapped_column(
+        JSONB,
+        nullable=True,
+        default=lambda: {}
+    )
+
+    settings: Mapped[Optional[dict]] = mapped_column(
+        JSONB,
+        nullable=True,
+        default=lambda: {
+            "theme": "dark",
+            "language": "fr",
+            "notifications": {
+                "email": True,
+                "push": True,
+                "game_invites": True,
+                "tournaments": True
+            },
+            "privacy": {
+                "show_stats": True,
+                "show_online_status": True
+            }
+        }
     )
 
     # === STATISTIQUES DE JEU ===
+
     total_games: Mapped[int] = mapped_column(
         Integer,
         default=0,
-        nullable=False,
-        comment="Nombre total de parties jouées"
+        nullable=False
     )
 
-    wins: Mapped[int] = mapped_column(
+    games_won: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False
+    )
+
+    total_score: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False
+    )
+
+    best_score: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False
+    )
+
+    quantum_points: Mapped[int] = mapped_column(
         Integer,
         default=0,
         nullable=False,
-        comment="Nombre de victoires"
+        comment="Points gagnés en utilisant les fonctionnalités quantiques"
     )
 
-    best_time: Mapped[Optional[float]] = mapped_column(
-        Float,
-        nullable=True,
-        comment="Meilleur temps en secondes"
-    )
+    # === MÉTADONNÉES TEMPORELLES ===
 
-    average_time: Mapped[Optional[float]] = mapped_column(
-        Float,
-        nullable=True,
-        comment="Temps moyen en secondes"
-    )
-
-    quantum_score: Mapped[int] = mapped_column(
-        Integer,
-        default=0,
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
         nullable=False,
-        comment="Score quantique accumulé"
+        index=True
     )
 
-    # === CONNEXIONS ET ACTIVITÉ ===
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
     last_login: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
-        comment="Dernière connexion"
+        index=True
     )
 
-    login_count: Mapped[int] = mapped_column(
+    email_verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    # === MÉTADONNÉES DE CONNEXION ===
+
+    login_attempts: Mapped[int] = mapped_column(
         Integer,
         default=0,
-        nullable=False,
-        comment="Nombre de connexions"
-    )
-
-    last_ip_address: Mapped[Optional[str]] = mapped_column(
-        String(45),  # IPv6 max length
-        nullable=True,
-        comment="Dernière adresse IP"
-    )
-
-    # === PRÉFÉRENCES UTILISATEUR ===
-    preferences: Mapped[Optional[Dict[str, Any]]] = mapped_column(
-        JSONB,
-        nullable=True,
-        default=dict,
-        comment="Préférences utilisateur JSON"
-    )
-
-    # === SÉCURITÉ ===
-    failed_login_attempts: Mapped[int] = mapped_column(
-        Integer,
-        default=0,
-        nullable=False,
-        comment="Tentatives de connexion échouées"
+        nullable=False
     )
 
     locked_until: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
-        nullable=True,
-        comment="Verrouillage temporaire jusqu'à"
+        nullable=True
     )
 
-    password_changed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        comment="Dernière modification du mot de passe"
-    )
-
-    # === TOKENS DE SÉCURITÉ ===
-    email_verification_token: Mapped[Optional[str]] = mapped_column(
-        String(255),
-        nullable=True,
-        comment="Token de vérification email"
-    )
-
-    password_reset_token: Mapped[Optional[str]] = mapped_column(
-        String(255),
-        nullable=True,
-        comment="Token de réinitialisation mot de passe"
-    )
-
-    password_reset_expires: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        comment="Expiration du token de reset"
+    last_ip_address: Mapped[Optional[str]] = mapped_column(
+        String(45),  # Support IPv6
+        nullable=True
     )
 
     # === RELATIONS ===
-    # Les relations seront définies dans les autres modèles pour éviter les imports circulaires
 
-    # === CONTRAINTES ===
-    __table_args__ = (
-        CheckConstraint('total_games >= 0', name='check_total_games_positive'),
-        CheckConstraint('wins >= 0', name='check_wins_positive'),
-        CheckConstraint('wins <= total_games', name='check_wins_not_greater_than_total'),
-        CheckConstraint('best_time > 0 OR best_time IS NULL', name='check_best_time_positive'),
-        CheckConstraint('average_time > 0 OR average_time IS NULL', name='check_average_time_positive'),
-        CheckConstraint('quantum_score >= 0', name='check_quantum_score_positive'),
-        CheckConstraint('login_count >= 0', name='check_login_count_positive'),
-        CheckConstraint('failed_login_attempts >= 0', name='check_failed_attempts_positive'),
-        Index('idx_users_username_active', 'username', 'is_active'),
-        Index('idx_users_email_active', 'email', 'is_active'),
-        Index('idx_users_quantum_score', 'quantum_score', postgresql_using='btree'),
-        Index('idx_users_last_login', 'last_login', postgresql_using='btree'),
+    # Jeux créés par l'utilisateur
+    created_games: Mapped[List["Game"]] = relationship(
+        "Game",
+        back_populates="creator",
+        foreign_keys="Game.creator_id",
+        cascade="all, delete-orphan",
+        lazy="dynamic"
     )
 
-    # === MÉTHODES DE PROPRIÉTÉS CALCULÉES ===
+    # Participations aux jeux
+    game_participations: Mapped[List["GameParticipation"]] = relationship(
+        "GameParticipation",
+        back_populates="player",
+        cascade="all, delete-orphan",
+        lazy="dynamic"
+    )
+
+    # Logs d'audit
+    audit_logs: Mapped[List["AuditLog"]] = relationship(
+        "AuditLog",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="dynamic"
+    )
+
+    # === CONTRAINTES ===
+
+    __table_args__ = (
+        # Index composites pour les requêtes fréquentes
+        Index("ix_users_active_verified", "is_active", "is_verified"),
+        Index("ix_users_created_score", "created_at", "total_score"),
+        Index("ix_users_last_login", "last_login"),
+
+        # Contraintes de validation
+        CheckConstraint(
+            "char_length(username) >= 3",
+            name="ck_username_min_length"
+        ),
+        CheckConstraint(
+            "char_length(email) >= 5",
+            name="ck_email_min_length"
+        ),
+        CheckConstraint(
+            "total_games >= 0",
+            name="ck_total_games_positive"
+        ),
+        CheckConstraint(
+            "games_won >= 0",
+            name="ck_games_won_positive"
+        ),
+        CheckConstraint(
+            "games_won <= total_games",
+            name="ck_games_won_lte_total"
+        ),
+        CheckConstraint(
+            "total_score >= 0",
+            name="ck_total_score_positive"
+        ),
+        CheckConstraint(
+            "best_score >= 0",
+            name="ck_best_score_positive"
+        ),
+        CheckConstraint(
+            "quantum_points >= 0",
+            name="ck_quantum_points_positive"
+        ),
+        CheckConstraint(
+            "login_attempts >= 0",
+            name="ck_login_attempts_positive"
+        ),
+    )
+
+    # === MÉTHODES ===
+
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
+
+    def __str__(self) -> str:
+        return self.username
+
     @property
     def win_rate(self) -> float:
         """Calcule le taux de victoire"""
         if self.total_games == 0:
             return 0.0
-        return (self.wins / self.total_games) * 100
+        return round((self.games_won / self.total_games) * 100, 2)
 
     @property
-    def full_name(self) -> str:
-        """Nom complet pour affichage"""
-        return self.username  # Pas de prénom/nom dans ce modèle simple
+    def average_score(self) -> float:
+        """Calcule le score moyen"""
+        if self.total_games == 0:
+            return 0.0
+        return round(self.total_score / self.total_games, 2)
 
     @property
     def is_locked(self) -> bool:
         """Vérifie si le compte est verrouillé"""
-        if self.locked_until is None:
+        if not self.locked_until:
             return False
-        return datetime.utcnow() < self.locked_until
+        return datetime.now(timezone.utc) < self.locked_until
 
     @property
-    def is_email_verified(self) -> bool:
-        """Vérifie si l'email est vérifié"""
-        return self.is_verified
+    def display_name(self) -> str:
+        """Retourne le nom d'affichage préféré"""
+        return self.full_name or self.username
 
     @property
-    def games_this_month(self) -> int:
-        """Nombre de parties ce mois (à calculer avec une requête)"""
-        # Cette propriété nécessite une requête à la base,
-        # elle sera calculée dans le service
-        return 0
+    def rank(self) -> str:
+        """Calcule le rang basé sur les points quantiques"""
+        if self.quantum_points < 100:
+            return "Novice"
+        elif self.quantum_points < 500:
+            return "Apprenti"
+        elif self.quantum_points < 1000:
+            return "Quantique"
+        elif self.quantum_points < 2500:
+            return "Expert"
+        elif self.quantum_points < 5000:
+            return "Maître"
+        else:
+            return "Grand Maître"
 
-    # === MÉTHODES DE SÉCURITÉ ===
-    def increment_failed_login(self) -> None:
-        """Incrémente les tentatives de connexion échouées"""
-        self.failed_login_attempts += 1
+    def update_stats(self, game_won: bool, score: int, quantum_used: bool) -> None:
+        """
+        Met à jour les statistiques après une partie
 
-        # Verrouillage temporaire après 5 tentatives
-        if self.failed_login_attempts >= 5:
-            self.locked_until = datetime.utcnow() + timedelta(minutes=15)
+        Args:
+            game_won: True si la partie a été gagnée
+            score: Score obtenu
+            quantum_used: True si des fonctionnalités quantiques ont été utilisées
+        """
+        self.total_games += 1
+        if game_won:
+            self.games_won += 1
 
-    def reset_failed_login(self) -> None:
-        """Remet à zéro les tentatives échouées"""
-        self.failed_login_attempts = 0
+        self.total_score += score
+        if score > self.best_score:
+            self.best_score = score
+
+        if quantum_used:
+            # Bonus pour l'utilisation de fonctionnalités quantiques
+            quantum_bonus = score // 10
+            self.quantum_points += quantum_bonus
+
+    def reset_login_attempts(self) -> None:
+        """Remet à zéro les tentatives de connexion"""
+        self.login_attempts = 0
         self.locked_until = None
 
-    def record_login(self, ip_address: str) -> None:
-        """Enregistre une connexion réussie"""
-        self.last_login = datetime.utcnow()
-        self.login_count += 1
-        self.last_ip_address = ip_address
-        self.reset_failed_login()
+    def increment_login_attempts(self) -> None:
+        """Incrémente les tentatives de connexion et verrouille si nécessaire"""
+        self.login_attempts += 1
 
-    def lock_account(self, duration_minutes: int = 60) -> None:
-        """Verrouille le compte temporairement"""
-        from datetime import timedelta
-        self.locked_until = datetime.utcnow() + timedelta(minutes=duration_minutes)
+        # Verrouillage après 5 tentatives
+        if self.login_attempts >= 5:
+            from datetime import timedelta
+            self.locked_until = datetime.now(timezone.utc) + timedelta(minutes=15)
 
-    def unlock_account(self) -> None:
-        """Déverrouille le compte"""
-        self.locked_until = None
-        self.failed_login_attempts = 0
+    def update_last_login(self, ip_address: Optional[str] = None) -> None:
+        """Met à jour la dernière connexion"""
+        self.last_login = datetime.now(timezone.utc)
+        if ip_address:
+            self.last_ip_address = ip_address
+        self.reset_login_attempts()
 
-    # === MÉTHODES DE GESTION DES PRÉFÉRENCES ===
-    def get_preference(self, key: str, default: Any = None) -> Any:
+    def verify_email(self) -> None:
+        """Marque l'email comme vérifié"""
+        self.is_verified = True
+        self.email_verified_at = datetime.now(timezone.utc)
+
+    def get_preference(self, key: str, default=None):
         """Récupère une préférence utilisateur"""
         if not self.preferences:
             return default
         return self.preferences.get(key, default)
 
-    def set_preference(self, key: str, value: Any) -> None:
+    def set_preference(self, key: str, value) -> None:
         """Définit une préférence utilisateur"""
         if not self.preferences:
             self.preferences = {}
         self.preferences[key] = value
 
-    def remove_preference(self, key: str) -> None:
-        """Supprime une préférence"""
-        if self.preferences and key in self.preferences:
-            del self.preferences[key]
+    def get_setting(self, key: str, default=None):
+        """Récupère un paramètre utilisateur avec support de clés imbriquées"""
+        if not self.settings:
+            return default
 
-    # === MÉTHODES DE STATISTIQUES ===
-    def update_game_stats(
-            self,
-            won: bool,
-            game_time: float,
-            quantum_points: int = 0
-    ) -> None:
-        """Met à jour les statistiques après une partie"""
-        self.total_games += 1
+        # Support des clés imbriquées comme "notifications.email"
+        keys = key.split('.')
+        current = self.settings
 
-        if won:
-            self.wins += 1
+        for k in keys:
+            if isinstance(current, dict) and k in current:
+                current = current[k]
+            else:
+                return default
 
-        # Mise à jour du meilleur temps
-        if self.best_time is None or game_time < self.best_time:
-            self.best_time = game_time
+        return current
 
-        # Mise à jour du temps moyen
-        if self.average_time is None:
-            self.average_time = game_time
-        else:
-            # Moyenne pondérée
-            total_time = self.average_time * (self.total_games - 1) + game_time
-            self.average_time = total_time / self.total_games
+    def set_setting(self, key: str, value) -> None:
+        """Définit un paramètre utilisateur avec support de clés imbriquées"""
+        if not self.settings:
+            self.settings = {}
 
-        # Mise à jour du score quantique
-        self.quantum_score += quantum_points
+        # Support des clés imbriquées
+        keys = key.split('.')
+        current = self.settings
 
-    def reset_stats(self) -> None:
-        """Remet à zéro les statistiques (admin uniquement)"""
-        self.total_games = 0
-        self.wins = 0
-        self.best_time = None
-        self.average_time = None
-        self.quantum_score = 0
+        for k in keys[:-1]:
+            if k not in current:
+                current[k] = {}
+            current = current[k]
 
-    # === MÉTHODES DE VALIDATION ===
-    def validate(self) -> Dict[str, List[str]]:
-        """Valide les données du modèle"""
-        errors = {}
+        current[keys[-1]] = value
 
-        # Validation username
-        if not self.username or len(self.username) < 3:
-            errors.setdefault('username', []).append('Minimum 3 caractères requis')
+    def to_dict(self, include_sensitive: bool = False) -> dict:
+        """
+        Convertit l'utilisateur en dictionnaire
 
-        if len(self.username) > 50:
-            errors.setdefault('username', []).append('Maximum 50 caractères')
+        Args:
+            include_sensitive: Inclure les données sensibles
 
-        # Validation email
-        import re
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, self.email):
-            errors.setdefault('email', []).append('Format email invalide')
-
-        # Validation des statistiques
-        if self.wins > self.total_games:
-            errors.setdefault('wins', []).append('Victoires > parties totales')
-
-        return errors
-
-    # === MÉTHODES D'EXPORT ===
-    def to_public_dict(self) -> Dict[str, Any]:
-        """Exporte les données publiques (sans infos sensibles)"""
-        return {
-            'id': str(self.id),
-            'username': self.username,
-            'total_games': self.total_games,
-            'wins': self.wins,
-            'win_rate': self.win_rate,
-            'best_time': self.best_time,
-            'quantum_score': self.quantum_score,
-            'created_at': self.created_at.isoformat(),
-            'last_login': self.last_login.isoformat() if self.last_login else None,
-            'is_verified': self.is_verified
+        Returns:
+            Dictionnaire représentant l'utilisateur
+        """
+        data = {
+            "id": str(self.id),
+            "username": self.username,
+            "email": self.email if include_sensitive else self.email[:3] + "***",
+            "full_name": self.full_name,
+            "avatar_url": self.avatar_url,
+            "bio": self.bio,
+            "is_active": self.is_active,
+            "is_verified": self.is_verified,
+            "is_superuser": self.is_superuser if include_sensitive else None,
+            "total_games": self.total_games,
+            "games_won": self.games_won,
+            "win_rate": self.win_rate,
+            "total_score": self.total_score,
+            "best_score": self.best_score,
+            "average_score": self.average_score,
+            "quantum_points": self.quantum_points,
+            "rank": self.rank,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "last_login": self.last_login.isoformat() if self.last_login else None,
+            "settings": self.settings,
+            "preferences": self.preferences
         }
 
-    def to_profile_dict(self) -> Dict[str, Any]:
-        """Exporte le profil complet (pour le propriétaire)"""
-        public_data = self.to_public_dict()
-        public_data.update({
-            'email': self.email,
-            'is_active': self.is_active,
-            'login_count': self.login_count,
-            'average_time': self.average_time,
-            'preferences': self.preferences or {},
-            'updated_at': self.updated_at.isoformat()
-        })
-        return public_data
+        # Supprimer les valeurs None si pas sensible
+        if not include_sensitive:
+            data = {k: v for k, v in data.items() if v is not None}
 
-    def __str__(self) -> str:
-        """Représentation string"""
-        return f"User(username='{self.username}', email='{self.email}')"
+        return data
+
+    @classmethod
+    def create_user(
+        cls,
+        username: str,
+        email: str,
+        hashed_password: str,
+        full_name: Optional[str] = None,
+        is_verified: bool = False
+    ) -> "User":
+        """
+        Factory method pour créer un utilisateur
+
+        Args:
+            username: Nom d'utilisateur
+            email: Adresse email
+            hashed_password: Mot de passe hashé
+            full_name: Nom complet (optionnel)
+            is_verified: Email vérifié (défaut: False)
+
+        Returns:
+            Instance User créée
+        """
+        return cls(
+            username=username,
+            email=email,
+            hashed_password=hashed_password,
+            full_name=full_name,
+            is_verified=is_verified
+        )

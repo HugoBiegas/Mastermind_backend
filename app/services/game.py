@@ -1,47 +1,45 @@
 """
-Service de jeu pour Quantum Mastermind
-Gestion des parties, joueurs, tentatives et logique de jeu
+Service de gestion des jeux pour Quantum Mastermind
+Logique métier pour les parties, tentatives et scoring
 """
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID
-import random
+import json
 import hashlib
 import secrets
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update, func, and_, or_, desc
+from sqlalchemy.orm import selectinload, joinedload
 
-from app.core.security import token_generator
 from app.models.game import (
-    Game, GamePlayer, GameAttempt, GameStatus, GameType,
-    GameMode, PlayerStatus, Difficulty
+    Game, GameParticipation, GameAttempt, GameType, GameMode,
+    GameStatus, Difficulty, ParticipationStatus, generate_room_code,
+    calculate_game_score
 )
-from app.repositories.game import GameRepository, GamePlayerRepository, GameAttemptRepository
-from app.schemas.game import (
-    GameCreate, GameUpdate, GameJoin, AttemptCreate,
-    GameSearch, SolutionHint
-)
+from app.models.user import User
+from app.repositories.user import UserRepository
+from app.schemas.game import GameCreate, GameJoin, AttemptCreate
 from app.utils.exceptions import (
-    EntityNotFoundError, ValidationError, GameError,
-    GameFullError, GameNotActiveError
+    EntityNotFoundError, GameError, GameNotActiveError,
+    GameFullError, ValidationError, AuthorizationError
 )
 
 
 class GameService:
-    """Service pour la gestion des jeux"""
+    """Service principal pour la gestion des jeux"""
 
     def __init__(self):
-        self.game_repo = GameRepository()
-        self.player_repo = GamePlayerRepository()
-        self.attempt_repo = GameAttemptRepository()
+        self.user_repo = UserRepository()
 
-    # === MÉTHODES DE CRÉATION ET GESTION DES PARTIES ===
+    # === CRÉATION ET GESTION DES PARTIES ===
 
     async def create_game(
-            self,
-            db: AsyncSession,
-            game_data: GameCreate,
-            creator_id: UUID
+        self,
+        db: AsyncSession,
+        game_data: GameCreate,
+        creator_id: UUID
     ) -> Dict[str, Any]:
         """
         Crée une nouvelle partie
@@ -57,108 +55,151 @@ class GameService:
         Raises:
             ValidationError: Si les données sont invalides
         """
-        # Génération du code de room unique
-        room_code = game_data.room_code or await self._generate_unique_room_code(db)
+        try:
+            # Validation des données
+            await self._validate_game_creation(db, game_data, creator_id)
 
-        # Vérification de l'unicité
-        if not await self.game_repo.is_room_id_available(db, room_code):
-            raise ValidationError("Code de room déjà utilisé")
+            # Génération du code de room si non fourni
+            room_code = game_data.room_code
+            if not room_code:
+                room_code = await self._generate_unique_room_code(db)
 
-        # Génération de la solution selon le type de jeu
-        solution_data = await self._generate_game_solution(game_data.game_type, game_data.difficulty)
+            # Configuration basée sur la difficulté
+            difficulty_config = self._get_difficulty_config(game_data.difficulty)
 
-        # Création de la partie
-        game_dict = game_data.dict(exclude={'room_code'})
-        game_dict.update({
-            'room_id': room_code,
-            'created_by': creator_id,
-            'status': GameStatus.WAITING,
-            'classical_solution': solution_data['classical_solution'],
-            'quantum_solution': solution_data.get('quantum_solution'),
-            'solution_hash': solution_data['solution_hash'],
-            'quantum_seed': solution_data.get('quantum_seed')
-        })
+            # Hachage du mot de passe si fourni
+            password_hash = None
+            if game_data.password:
+                password_hash = hashlib.sha256(game_data.password.encode()).hexdigest()
 
-        game = await self.game_repo.create(db, obj_in=game_dict, created_by=creator_id)
+            # Création de la partie
+            game = Game(
+                room_code=room_code,
+                game_type=game_data.game_type,
+                game_mode=game_data.game_mode,
+                difficulty=game_data.difficulty,
+                max_attempts=game_data.max_attempts or difficulty_config["attempts"],
+                combination_length=difficulty_config["length"],
+                color_count=difficulty_config["colors"],
+                time_limit_seconds=game_data.time_limit,
+                max_players=game_data.max_players,
+                is_private=game_data.is_private,
+                password_hash=password_hash,
+                creator_id=creator_id,
+                settings=game_data.settings or {}
+            )
 
-        # Ajout du créateur comme premier joueur
-        await self._add_player_to_game(
-            db, game.id, creator_id, f"Player_{creator_id.hex[:8]}", is_host=True
-        )
+            # Génération de la solution
+            await self._generate_solution(game)
 
-        return {
-            'game_id': game.id,
-            'room_code': room_code,
-            'game_type': game.game_type,
-            'status': game.status,
-            'max_players': game.max_players,
-            'quantum_enabled': game.is_quantum_enabled
-        }
+            db.add(game)
+            await db.commit()
+            await db.refresh(game)
+
+            # Ajouter le créateur comme participant si c'est un jeu multijoueur
+            if game.max_players > 1:
+                await self._add_participant(db, game.id, creator_id)
+
+            return {
+                "game_id": str(game.id),
+                "room_code": game.room_code,
+                "game_type": game.game_type,
+                "status": game.status,
+                "max_players": game.max_players,
+                "difficulty": game.difficulty,
+                "created_at": game.created_at.isoformat()
+            }
+
+        except Exception as e:
+            await db.rollback()
+            raise ValidationError(f"Erreur lors de la création de la partie: {str(e)}")
 
     async def join_game(
-            self,
-            db: AsyncSession,
-            join_data: GameJoin,
-            user_id: UUID
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        player_id: UUID,
+        join_data: GameJoin
     ) -> Dict[str, Any]:
         """
-        Rejoint une partie existante
+        Fait rejoindre un joueur à une partie
 
         Args:
             db: Session de base de données
-            join_data: Données pour rejoindre
-            user_id: ID de l'utilisateur
+            game_id: ID de la partie
+            player_id: ID du joueur
+            join_data: Données de participation
 
         Returns:
-            Informations de la partie rejointe
+            Informations de participation
 
         Raises:
             EntityNotFoundError: Si la partie n'existe pas
-            GameFullError: Si la partie est pleine
-            ValidationError: Si impossible de rejoindre
+            GameFullError: Si la partie est complète
+            GameNotActiveError: Si la partie ne peut pas être rejointe
         """
-        # Récupération de la partie
-        game = await self.game_repo.get_by_room_id(
-            db, join_data.room_code, with_players=True
-        )
+        # Récupérer la partie
+        game = await self._get_game_with_participations(db, game_id)
         if not game:
-            raise EntityNotFoundError("Partie non trouvée")
+            raise EntityNotFoundError("Partie non trouvée", "Game", game_id)
 
         # Vérifications
-        join_check = await self.game_repo.can_user_join_game(db, game.id, user_id)
-        if not join_check['can_join']:
-            if 'complète' in join_check['reason']:
-                raise GameFullError(join_check['reason'])
+        if not game.can_join:
+            if game.is_full:
+                raise GameFullError(
+                    "Partie complète",
+                    game_id=game_id,
+                    max_players=game.max_players,
+                    current_players=game.active_player_count
+                )
             else:
-                raise ValidationError(join_check['reason'])
+                raise GameNotActiveError(
+                    "Impossible de rejoindre cette partie",
+                    game_id=game_id,
+                    current_status=game.status
+                )
 
-        # TODO: Vérifier le mot de passe si nécessaire
-        # if game.password and join_data.password != game.password:
-        #     raise ValidationError("Mot de passe incorrect")
+        # Vérification du mot de passe si nécessaire
+        if game.password_hash and join_data.password:
+            password_hash = hashlib.sha256(join_data.password.encode()).hexdigest()
+            if password_hash != game.password_hash:
+                raise AuthorizationError("Mot de passe incorrect")
+        elif game.password_hash:
+            raise AuthorizationError("Mot de passe requis")
 
-        # Ajout du joueur
-        player_name = join_data.player_name or f"Player_{user_id.hex[:8]}"
-        join_order = len(game.players) + 1
+        # Vérifier si le joueur n'est pas déjà dans la partie
+        existing = await self._get_participation(db, game_id, player_id)
+        if existing:
+            if existing.status == ParticipationStatus.ACTIVE:
+                raise ValidationError("Vous participez déjà à cette partie")
+            else:
+                # Réactiver la participation
+                existing.status = ParticipationStatus.ACTIVE
+                existing.joined_at = datetime.now(timezone.utc)
+                await db.commit()
+                return {"participation_id": str(existing.id), "rejoined": True}
 
-        player = await self._add_player_to_game(
-            db, game.id, user_id, player_name, join_order=join_order
+        # Créer la participation
+        participation = await self._add_participant(
+            db, game_id, player_id, join_data.player_name
         )
 
         return {
-            'game_id': game.id,
-            'player_id': player.id,
-            'player_name': player.player_name,
-            'join_order': player.join_order,
-            'is_host': player.is_host,
-            'current_players': len(game.players) + 1,
-            'max_players': game.max_players
+            "participation_id": str(participation.id),
+            "game_info": {
+                "id": str(game.id),
+                "room_code": game.room_code,
+                "status": game.status,
+                "player_count": game.active_player_count + 1,
+                "max_players": game.max_players
+            }
         }
 
     async def start_game(
-            self,
-            db: AsyncSession,
-            game_id: UUID,
-            user_id: UUID
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        user_id: UUID
     ) -> Dict[str, Any]:
         """
         Démarre une partie
@@ -166,614 +207,527 @@ class GameService:
         Args:
             db: Session de base de données
             game_id: ID de la partie
-            user_id: ID de l'utilisateur (doit être l'hôte)
+            user_id: ID de l'utilisateur qui démarre
 
         Returns:
-            Confirmation du démarrage
+            État de la partie démarrée
 
         Raises:
             EntityNotFoundError: Si la partie n'existe pas
-            ValidationError: Si impossible de démarrer
+            AuthorizationError: Si l'utilisateur ne peut pas démarrer
+            GameError: Si la partie ne peut pas être démarrée
         """
-        game = await self.game_repo.get_game_with_full_details(db, game_id)
+        game = await self._get_game_with_participations(db, game_id)
         if not game:
-            raise EntityNotFoundError("Partie non trouvée")
+            raise EntityNotFoundError("Partie non trouvée", "Game", game_id)
 
-        # Vérification des permissions
-        host_player = next((p for p in game.players if p.is_host), None)
-        if not host_player or host_player.user_id != user_id:
-            raise ValidationError("Seul l'hôte peut démarrer la partie")
+        # Vérifier les permissions
+        if game.creator_id != user_id:
+            raise AuthorizationError("Seul le créateur peut démarrer la partie")
 
-        # Vérifications d'état
+        # Vérifier l'état
         if game.status != GameStatus.WAITING:
-            raise ValidationError("La partie ne peut plus être démarrée")
+            raise GameError(f"La partie ne peut pas être démarrée (statut: {game.status})")
 
-        if game.game_mode == GameMode.MULTIPLAYER and len(game.players) < 2:
-            raise ValidationError("Au moins 2 joueurs requis pour le mode multijoueur")
+        # Vérifier qu'il y a assez de joueurs
+        if game.game_mode != GameMode.SOLO and game.active_player_count < 2:
+            raise GameError("Au moins 2 joueurs requis pour démarrer")
 
-        # Démarrage de la partie
+        # Démarrer la partie
         game.start_game()
-
-        # Mise à jour du statut des joueurs
-        for player in game.players:
-            if player.status == PlayerStatus.JOINED:
-                player.status = PlayerStatus.PLAYING
-
         await db.commit()
 
-        return {
-            'message': 'Partie démarrée avec succès',
-            'started_at': game.started_at,
-            'players_count': len(game.players)
-        }
+        return await self.get_game_state(db, game_id)
 
-    # === MÉTHODES DE JEU ===
+    # === GAMEPLAY ===
 
     async def make_attempt(
-            self,
-            db: AsyncSession,
-            game_id: UUID,
-            user_id: UUID,
-            attempt_data: AttemptCreate
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        player_id: UUID,
+        attempt: AttemptCreate
     ) -> Dict[str, Any]:
         """
-        Effectue une tentative dans la partie
+        Traite une tentative de solution
 
         Args:
             db: Session de base de données
             game_id: ID de la partie
-            user_id: ID de l'utilisateur
-            attempt_data: Données de la tentative
+            player_id: ID du joueur
+            attempt: Données de la tentative
 
         Returns:
             Résultat de la tentative
-
-        Raises:
-            EntityNotFoundError: Si la partie ou le joueur n'existe pas
-            GameNotActiveError: Si la partie n'est pas active
-            ValidationError: Si la tentative est invalide
         """
-        # Récupération de la partie et du joueur
-        game = await self.game_repo.get_by_id(db, game_id)
+        # Récupérer la partie et la participation
+        game = await self._get_game_with_participations(db, game_id)
         if not game:
-            raise EntityNotFoundError("Partie non trouvée")
+            raise EntityNotFoundError("Partie non trouvée", "Game", game_id)
 
-        if game.status != GameStatus.ACTIVE:
-            raise GameNotActiveError("La partie n'est pas active")
+        if not game.is_active:
+            raise GameNotActiveError("La partie n'est pas active", game_id, game.status)
 
-        player = await self.player_repo.get_player_in_game(db, game_id, user_id)
-        if not player:
-            raise EntityNotFoundError("Joueur non trouvé dans cette partie")
+        participation = await self._get_participation(db, game_id, player_id)
+        if not participation or participation.status != ParticipationStatus.ACTIVE:
+            raise AuthorizationError("Vous ne participez pas à cette partie")
 
-        if player.status != PlayerStatus.PLAYING:
-            raise ValidationError("Vous ne pouvez pas jouer actuellement")
+        # Vérifier les limites
+        if participation.attempts_made >= game.max_attempts:
+            raise GameError("Nombre maximum de tentatives atteint")
 
-        # Vérification du nombre de tentatives
-        attempts_count = await self.attempt_repo.count_player_attempts(db, game_id, player.id)
-        if attempts_count >= game.max_attempts:
-            raise ValidationError("Nombre maximum de tentatives atteint")
+        # Valider la combinaison
+        if len(attempt.combination) != game.combination_length:
+            raise ValidationError(f"La combinaison doit contenir {game.combination_length} éléments")
 
-        # Validation de la tentative
-        if not await self._validate_attempt(attempt_data.guess):
-            raise ValidationError("Tentative invalide")
-
-        # Traitement de la tentative
-        attempt_number = attempts_count + 1
-        result = await self._process_attempt(
-            db, game, player, attempt_data, attempt_number
+        # Calculer le résultat
+        black_pegs, white_pegs = self._calculate_pegs(
+            attempt.combination,
+            json.loads(game.classical_solution)
         )
 
-        # Vérification de fin de partie
-        if result['is_correct']:
-            await self._handle_game_completion(db, game, player, won=True)
-        elif attempt_number >= game.max_attempts:
-            await self._handle_game_completion(db, game, player, won=False)
+        is_solution = black_pegs == game.combination_length
+
+        # Créer la tentative
+        game_attempt = GameAttempt(
+            game_id=game_id,
+            player_id=player_id,
+            attempt_number=participation.attempts_made + 1,
+            combination=json.dumps(attempt.combination),
+            black_pegs=black_pegs,
+            white_pegs=white_pegs,
+            is_solution=is_solution,
+            used_quantum_hint=attempt.use_quantum_hint or False
+        )
+
+        db.add(game_attempt)
+
+        # Mettre à jour les statistiques
+        participation.attempts_made += 1
+        game.total_attempts += 1
+
+        # Si c'est la solution
+        if is_solution:
+            await self._handle_solution_found(db, game, participation, game_attempt)
+
+        await db.commit()
+
+        result = {
+            "attempt_number": game_attempt.attempt_number,
+            "combination": attempt.combination,
+            "black_pegs": black_pegs,
+            "white_pegs": white_pegs,
+            "is_solution": is_solution,
+            "attempts_remaining": game.max_attempts - participation.attempts_made,
+            "game_finished": is_solution or participation.attempts_made >= game.max_attempts
+        }
+
+        if is_solution:
+            result["congratulations"] = True
+            result["score"] = participation.score
 
         return result
 
+    async def make_attempt_websocket(
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        player_id: UUID,
+        combination: List[Any]
+    ) -> Dict[str, Any]:
+        """Version WebSocket de make_attempt"""
+        attempt_data = AttemptCreate(combination=combination)
+        return await self.make_attempt(db, game_id, player_id, attempt_data)
+
+    # === ÉTAT ET INFORMATIONS ===
+
     async def get_game_state(
-            self,
-            db: AsyncSession,
-            game_id: UUID,
-            user_id: Optional[UUID] = None
+        self,
+        db: AsyncSession,
+        game_id: UUID
     ) -> Dict[str, Any]:
         """
-        Récupère l'état actuel d'une partie
+        Récupère l'état complet d'une partie
 
         Args:
             db: Session de base de données
             game_id: ID de la partie
-            user_id: ID de l'utilisateur (pour les données personnalisées)
 
         Returns:
             État complet de la partie
-
-        Raises:
-            EntityNotFoundError: Si la partie n'existe pas
         """
-        game = await self.game_repo.get_game_with_full_details(db, game_id)
+        game = await self._get_game_with_all_relations(db, game_id)
         if not game:
-            raise EntityNotFoundError("Partie non trouvée")
+            raise EntityNotFoundError("Partie non trouvée", "Game", game_id)
 
-        # Informations de base
-        game_state = {
-            'game_id': game.id,
-            'room_code': game.room_id,
-            'status': game.status,
-            'game_type': game.game_type,
-            'game_mode': game.game_mode,
-            'difficulty': game.difficulty,
-            'max_attempts': game.max_attempts,
-            'max_players': game.max_players,
-            'created_at': game.created_at,
-            'started_at': game.started_at,
-            'finished_at': game.finished_at,
-            'quantum_enabled': game.is_quantum_enabled,
-            'players': []
+        # Participants actifs
+        participants = []
+        for participation in game.participations:
+            if participation.status == ParticipationStatus.ACTIVE:
+                participants.append({
+                    "player_id": str(participation.player_id),
+                    "username": participation.player.username,
+                    "player_name": participation.player_name or participation.player.username,
+                    "attempts_made": participation.attempts_made,
+                    "score": participation.score,
+                    "is_winner": participation.is_winner,
+                    "quantum_hints_used": participation.quantum_hints_used
+                })
+
+        # Dernières tentatives (pour l'historique)
+        recent_attempts = []
+        for attempt in game.attempts.order_by(desc(GameAttempt.created_at)).limit(10):
+            recent_attempts.append({
+                "player_id": str(attempt.player_id),
+                "username": attempt.player.username,
+                "attempt_number": attempt.attempt_number,
+                "black_pegs": attempt.black_pegs,
+                "white_pegs": attempt.white_pegs,
+                "is_solution": attempt.is_solution,
+                "created_at": attempt.created_at.isoformat()
+            })
+
+        return {
+            "game_id": str(game.id),
+            "room_code": game.room_code,
+            "status": game.status,
+            "game_type": game.game_type,
+            "game_mode": game.game_mode,
+            "difficulty": game.difficulty,
+            "combination_length": game.combination_length,
+            "color_count": game.color_count,
+            "max_attempts": game.max_attempts,
+            "max_players": game.max_players,
+            "current_turn": game.current_turn,
+            "total_attempts": game.total_attempts,
+            "participants": participants,
+            "recent_attempts": recent_attempts,
+            "started_at": game.started_at.isoformat() if game.started_at else None,
+            "duration_minutes": game.duration_minutes,
+            "settings": game.settings
         }
 
-        # Informations des joueurs
-        for player in game.players:
-            player_info = {
-                'player_id': player.id,
-                'user_id': player.user_id,
-                'player_name': player.player_name,
-                'status': player.status,
-                'is_host': player.is_host,
-                'score': player.score,
-                'attempts_count': player.attempts_count,
-                'quantum_measurements_used': player.quantum_measurements_used
-            }
-            game_state['players'].append(player_info)
+    async def get_spectator_view(
+        self,
+        db: AsyncSession,
+        game_id: UUID
+    ) -> Dict[str, Any]:
+        """Vue pour les spectateurs (informations limitées)"""
+        state = await self.get_game_state(db, game_id)
 
-        # Informations spécifiques au joueur
-        if user_id:
-            player = await self.player_repo.get_player_in_game(db, game_id, user_id)
-            if player:
-                # Historique des tentatives du joueur
-                attempts = await self.attempt_repo.get_player_attempts(
-                    db, game_id, player.id
-                )
-                game_state['my_attempts'] = [
-                    {
-                        'attempt_number': attempt.attempt_number,
-                        'guess': attempt.guess,
-                        'result': attempt.result,
-                        'is_correct': attempt.is_correct,
-                        'time_taken': attempt.time_taken.total_seconds(),
-                        'quantum_used': attempt.measurement_used
-                    }
-                    for attempt in attempts
-                ]
-                game_state['my_player_id'] = player.id
+        # Masquer les informations sensibles pour les spectateurs
+        for participant in state["participants"]:
+            participant.pop("quantum_hints_used", None)
 
-        return game_state
+        # Limiter l'historique
+        state["recent_attempts"] = state["recent_attempts"][:5]
 
-    async def get_quantum_hint(
-            self,
-            db: AsyncSession,
-            game_id: UUID,
-            user_id: UUID,
-            hint_type: str,
-            position: Optional[int] = None
-    ) -> SolutionHint:
-        """
-        Fournit un indice quantique
+        return state
 
-        Args:
-            db: Session de base de données
-            game_id: ID de la partie
-            user_id: ID de l'utilisateur
-            hint_type: Type d'indice ('grover', 'measurement', etc.)
-            position: Position pour l'indice (optionnel)
+    # === GESTION AVANCÉE ===
 
-        Returns:
-            Indice quantique
-
-        Raises:
-            EntityNotFoundError: Si la partie n'existe pas
-            ValidationError: Si l'indice n'est pas disponible
-        """
-        # Vérifications de base
-        game = await self.game_repo.get_by_id(db, game_id)
+    async def pause_game(
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        user_id: UUID
+    ) -> None:
+        """Met en pause une partie"""
+        game = await self._get_game_by_id(db, game_id)
         if not game:
-            raise EntityNotFoundError("Partie non trouvée")
+            raise EntityNotFoundError("Partie non trouvée", "Game", game_id)
 
-        if not game.is_quantum_enabled:
-            raise ValidationError("Fonctionnalités quantiques non activées")
+        if game.creator_id != user_id:
+            raise AuthorizationError("Seul le créateur peut mettre en pause")
 
-        player = await self.player_repo.get_player_in_game(db, game_id, user_id)
-        if not player:
-            raise EntityNotFoundError("Joueur non trouvé")
+        game.pause_game()
+        await db.commit()
 
-        # Génération de l'indice selon le type
-        hint = await self._generate_quantum_hint(
-            game, player, hint_type, position
-        )
+    async def moderate_game(
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        action: str,
+        reason: str,
+        moderator_id: UUID
+    ) -> None:
+        """Actions de modération sur une partie"""
+        game = await self._get_game_by_id(db, game_id)
+        if not game:
+            raise EntityNotFoundError("Partie non trouvée", "Game", game_id)
 
-        # Mise à jour des statistiques du joueur
-        if hint_type == 'grover':
-            player.grover_hints_used += 1
-        elif hint_type == 'measurement':
-            player.quantum_measurements_used += 1
+        if action == "terminate":
+            game.status = GameStatus.CANCELLED
+            game.finished_at = datetime.now(timezone.utc)
+        elif action == "pause":
+            game.pause_game()
+        elif action == "resume":
+            game.resume_game()
 
         await db.commit()
 
-        return hint
+    # === STATISTIQUES ET CLASSEMENTS ===
 
-    # === MÉTHODES DE RECHERCHE ===
-
-    async def search_games(
-            self,
-            db: AsyncSession,
-            search_criteria: GameSearch
+    async def get_leaderboard(
+        self,
+        db: AsyncSession,
+        game_type: Optional[GameType] = None,
+        time_period: str = "all",
+        limit: int = 10
     ) -> Dict[str, Any]:
-        """
-        Recherche des parties avec critères
+        """Récupère le classement des joueurs"""
 
-        Args:
-            db: Session de base de données
-            search_criteria: Critères de recherche
+        # Base query
+        query = select(User).where(User.is_active == True)
 
-        Returns:
-            Résultats de recherche paginés
-        """
-        return await self.game_repo.search_games(db, search_criteria)
+        # Filtrage par période
+        if time_period != "all":
+            cutoff_date = datetime.now(timezone.utc)
+            if time_period == "week":
+                cutoff_date -= timedelta(weeks=1)
+            elif time_period == "month":
+                cutoff_date -= timedelta(days=30)
 
-    async def get_active_games(
-            self,
-            db: AsyncSession,
-            *,
-            game_type: Optional[GameType] = None,
-            has_slots: bool = False,
-            limit: int = 50
-    ) -> List[Dict[str, Any]]:
-        """
-        Récupère les parties actives
+            # TODO: Ajouter filtrage par date quand on aura les stats par période
 
-        Args:
-            db: Session de base de données
-            game_type: Type de jeu à filtrer
-            has_slots: Seulement les parties avec places libres
-            limit: Nombre maximum de parties
+        # Ordre par score total (pour l'instant)
+        query = query.order_by(desc(User.total_score)).limit(limit)
 
-        Returns:
-            Liste des parties actives
-        """
-        games = await self.game_repo.get_active_games(
-            db, game_type=game_type, has_slots=has_slots, limit=limit
-        )
+        result = await db.execute(query)
+        users = result.scalars().all()
 
-        return [
-            {
-                'game_id': game.id,
-                'room_code': game.room_id,
-                'game_type': game.game_type,
-                'game_mode': game.game_mode,
-                'difficulty': game.difficulty,
-                'status': game.status,
-                'current_players': len(game.players),
-                'max_players': game.max_players,
-                'created_at': game.created_at,
-                'has_password': bool(game.settings and game.settings.get('password')),
-                'quantum_enabled': game.is_quantum_enabled
-            }
-            for game in games
-        ]
+        leaderboard = []
+        for i, user in enumerate(users, 1):
+            leaderboard.append({
+                "position": i,
+                "user_id": str(user.id),
+                "username": user.username,
+                "total_score": user.total_score,
+                "total_games": user.total_games,
+                "win_rate": user.win_rate,
+                "quantum_points": user.quantum_points,
+                "rank": user.rank
+            })
 
-    async def get_user_games(
-            self,
-            db: AsyncSession,
-            user_id: UUID,
-            *,
-            status: Optional[GameStatus] = None,
-            limit: int = 20
-    ) -> List[Dict[str, Any]]:
-        """
-        Récupère les parties d'un utilisateur
-
-        Args:
-            db: Session de base de données
-            user_id: ID de l'utilisateur
-            status: Statut des parties à filtrer
-            limit: Nombre maximum de parties
-
-        Returns:
-            Liste des parties de l'utilisateur
-        """
-        games = await self.game_repo.get_user_games(
-            db, user_id, status=status, limit=limit
-        )
-
-        return [
-            {
-                'game_id': game.id,
-                'room_code': game.room_id,
-                'game_type': game.game_type,
-                'status': game.status,
-                'created_at': game.created_at,
-                'started_at': game.started_at,
-                'finished_at': game.finished_at,
-                'my_player': next(
-                    (p for p in game.players if p.user_id == user_id),
-                    None
-                )
-            }
-            for game in games
-        ]
+        return {
+            "type": game_type or "all",
+            "period": time_period,
+            "entries": leaderboard,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
 
     # === MÉTHODES PRIVÉES ===
 
+    async def _validate_game_creation(
+        self,
+        db: AsyncSession,
+        game_data: GameCreate,
+        creator_id: UUID
+    ) -> None:
+        """Valide les données de création de partie"""
+
+        # Vérifier l'utilisateur
+        user = await self.user_repo.get_by_id(db, creator_id)
+        if not user or not user.is_active:
+            raise ValidationError("Utilisateur invalide")
+
+        # Vérifier les limites
+        if game_data.max_attempts and (game_data.max_attempts < 1 or game_data.max_attempts > 50):
+            raise ValidationError("Le nombre de tentatives doit être entre 1 et 50")
+
+        if game_data.max_players < 1 or game_data.max_players > 8:
+            raise ValidationError("Le nombre de joueurs doit être entre 1 et 8")
+
+        # Vérifier le code de room si fourni
+        if game_data.room_code:
+            existing = await self._get_game_by_room_code(db, game_data.room_code)
+            if existing:
+                raise ValidationError("Ce code de room est déjà utilisé")
+
     async def _generate_unique_room_code(self, db: AsyncSession) -> str:
         """Génère un code de room unique"""
-        max_attempts = 10
-        for _ in range(max_attempts):
-            code = token_generator.generate_room_code()
-            if await self.game_repo.is_room_id_available(db, code):
+        for _ in range(10):  # Essayer 10 fois
+            code = generate_room_code()
+            existing = await self._get_game_by_room_code(db, code)
+            if not existing:
                 return code
 
-        # Fallback avec timestamp si tous les codes sont pris
-        import time
-        return f"GAME{int(time.time()) % 100000:05d}"
+        # Si on n'arrive pas à générer un code unique, utiliser un UUID
+        return str(uuid4())[:8].upper()
 
-    async def _generate_game_solution(
-            self,
-            game_type: GameType,
-            difficulty: Difficulty
-    ) -> Dict[str, Any]:
-        """Génère la solution de la partie"""
-        colors = ['red', 'blue', 'green', 'yellow', 'orange', 'purple']
-
-        # Ajustement selon la difficulté
-        if difficulty == Difficulty.EASY:
-            colors = colors[:4]  # Seulement 4 couleurs
-        elif difficulty == Difficulty.EXPERT:
-            colors.extend(['black', 'white'])  # 8 couleurs
-
-        # Génération de la solution classique
-        solution = [random.choice(colors) for _ in range(4)]
-
-        # Hash pour vérification
-        solution_str = ''.join(solution)
-        solution_hash = hashlib.sha256(solution_str.encode()).hexdigest()
-
-        result = {
-            'classical_solution': solution,
-            'solution_hash': solution_hash
+    def _get_difficulty_config(self, difficulty: Difficulty) -> Dict[str, int]:
+        """Récupère la configuration d'une difficulté"""
+        configs = {
+            Difficulty.EASY: {"colors": 4, "length": 3, "attempts": 15},
+            Difficulty.NORMAL: {"colors": 6, "length": 4, "attempts": 12},
+            Difficulty.HARD: {"colors": 8, "length": 5, "attempts": 10},
+            Difficulty.EXPERT: {"colors": 10, "length": 6, "attempts": 8}
         }
+        return configs.get(difficulty, configs[Difficulty.NORMAL])
 
-        # Génération quantique si nécessaire
-        if game_type in [GameType.QUANTUM, GameType.HYBRID]:
-            quantum_seed = secrets.token_hex(16)
-            result.update({
-                'quantum_solution': {
-                    'encoding': 'superposition',
-                    'entangled_positions': [],
-                    'measurement_probabilities': {}
-                },
-                'quantum_seed': quantum_seed
-            })
+    async def _generate_solution(self, game: Game) -> None:
+        """Génère la solution pour une partie"""
+        import random
 
-        return result
+        # Solution classique
+        colors = list(range(game.color_count))
+        solution = random.choices(colors, k=game.combination_length)
+        game.classical_solution = json.dumps(solution)
 
-    async def _add_player_to_game(
-            self,
-            db: AsyncSession,
-            game_id: UUID,
-            user_id: UUID,
-            player_name: str,
-            *,
-            is_host: bool = False,
-            join_order: Optional[int] = None
-    ) -> GamePlayer:
-        """Ajoute un joueur à une partie"""
-        if join_order is None:
-            join_order = 1
+        # Hash de vérification
+        solution_str = json.dumps(solution, sort_keys=True)
+        game.solution_hash = hashlib.sha256(solution_str.encode()).hexdigest()
 
-        player_data = {
-            'game_id': game_id,
-            'user_id': user_id,
-            'player_name': player_name,
-            'is_host': is_host,
-            'join_order': join_order,
-            'status': PlayerStatus.JOINED
-        }
+        # TODO: Générer solution quantique si nécessaire
+        if game.game_type in [GameType.QUANTUM, GameType.HYBRID]:
+            game.quantum_solution = "quantum_state_placeholder"
 
-        return await self.player_repo.create(db, obj_in=player_data)
+    def _calculate_pegs(
+        self,
+        guess: List[Any],
+        solution: List[Any]
+    ) -> Tuple[int, int]:
+        """
+        Calcule les pions noirs et blancs pour une tentative
 
-    async def _validate_attempt(self, guess: List[str]) -> bool:
-        """Valide une tentative"""
-        if len(guess) != 4:
-            return False
+        Args:
+            guess: Combinaison proposée
+            solution: Solution correcte
 
-        valid_colors = {
-            'red', 'blue', 'green', 'yellow',
-            'orange', 'purple', 'black', 'white'
-        }
+        Returns:
+            Tuple (pions_noirs, pions_blancs)
+        """
+        if len(guess) != len(solution):
+            return 0, 0
 
-        return all(color in valid_colors for color in guess)
+        black_pegs = 0
+        white_pegs = 0
 
-    async def _process_attempt(
-            self,
-            db: AsyncSession,
-            game: Game,
-            player: GamePlayer,
-            attempt_data: AttemptCreate,
-            attempt_number: int
-    ) -> Dict[str, Any]:
-        """Traite une tentative et retourne le résultat"""
-        guess = attempt_data.guess
-        solution = game.classical_solution
+        # Compter les pions noirs (bonne position)
+        guess_remaining = []
+        solution_remaining = []
 
-        # Calcul du résultat classique
-        blacks = sum(1 for i, color in enumerate(guess) if color == solution[i])
-        whites = 0
+        for i in range(len(guess)):
+            if guess[i] == solution[i]:
+                black_pegs += 1
+            else:
+                guess_remaining.append(guess[i])
+                solution_remaining.append(solution[i])
 
-        # Comptage des couleurs pour les pions blancs
-        guess_counts = {}
-        solution_counts = {}
+        # Compter les pions blancs (bonne couleur, mauvaise position)
+        for color in guess_remaining:
+            if color in solution_remaining:
+                white_pegs += 1
+                solution_remaining.remove(color)
 
-        for i, color in enumerate(guess):
-            if color != solution[i]:  # Exclure les pions noirs
-                guess_counts[color] = guess_counts.get(color, 0) + 1
+        return black_pegs, white_pegs
 
-        for i, color in enumerate(solution):
-            if guess[i] != color:  # Exclure les pions noirs
-                solution_counts[color] = solution_counts.get(color, 0) + 1
-
-        for color, count in guess_counts.items():
-            whites += min(count, solution_counts.get(color, 0))
-
-        # Résultat de base
-        result = {
-            'blacks': blacks,
-            'whites': whites
-        }
-
-        is_correct = blacks == 4
-        start_time = datetime.utcnow()
-
-        # Traitement quantique si demandé
-        quantum_result = None
-        if attempt_data.use_quantum_measurement and game.is_quantum_enabled:
-            quantum_result = await self._process_quantum_measurement(
-                game, attempt_data.measured_position
-            )
-
-        # Création de l'enregistrement de tentative
-        attempt_dict = {
-            'game_id': game.id,
-            'player_id': player.id,
-            'user_id': player.user_id,
-            'attempt_number': attempt_number,
-            'guess': guess,
-            'result': result,
-            'is_correct': is_correct,
-            'time_taken': timedelta(seconds=5),  # TODO: Calculer le temps réel
-            'measurement_used': attempt_data.use_quantum_measurement,
-            'measured_position': attempt_data.measured_position,
-            'quantum_result': quantum_result
-        }
-
-        attempt = await self.attempt_repo.create(db, obj_in=attempt_dict)
-
-        # Mise à jour des statistiques du joueur
-        player.attempts_count += 1
-        if attempt_data.use_quantum_measurement:
-            player.quantum_measurements_used += 1
-
-        await db.commit()
-
-        return {
-            'attempt_id': attempt.id,
-            'attempt_number': attempt_number,
-            'guess': guess,
-            'result': result,
-            'is_correct': is_correct,
-            'quantum_result': quantum_result,
-            'score': self._calculate_attempt_score(result, quantum_result),
-            'remaining_attempts': game.max_attempts - attempt_number
-        }
-
-    async def _process_quantum_measurement(
-            self,
-            game: Game,
-            position: Optional[int]
-    ) -> Dict[str, Any]:
-        """Traite une mesure quantique"""
-        if position is None or not (0 <= position <= 3):
-            return {'error': 'Position de mesure invalide'}
-
-        # Simulation de mesure quantique
-        solution = game.classical_solution
-        measured_color = solution[position]
-
-        # Ajout de bruit quantique
-        confidence = random.uniform(0.7, 0.95)
-
-        return {
-            'position': position,
-            'measured_color': measured_color,
-            'confidence': confidence,
-            'quantum_state': 'collapsed',
-            'bonus_points': 10
-        }
-
-    async def _generate_quantum_hint(
-            self,
-            game: Game,
-            player: GamePlayer,
-            hint_type: str,
-            position: Optional[int]
-    ) -> SolutionHint:
-        """Génère un indice quantique"""
-        solution = game.classical_solution
-
-        if hint_type == 'grover' and position is not None:
-            # Indice Grover pour une position spécifique
-            correct_color = solution[position]
-            return SolutionHint(
-                hint_type=hint_type,
-                position=position,
-                color=correct_color,
-                confidence=0.85,
-                cost=50
-            )
-
-        elif hint_type == 'measurement':
-            # Mesure quantique sur position aléatoire
-            pos = random.randint(0, 3)
-            return SolutionHint(
-                hint_type=hint_type,
-                position=pos,
-                color=solution[pos],
-                confidence=0.90,
-                cost=25
-            )
-
-        else:
-            return SolutionHint(
-                hint_type='unknown',
-                position=None,
-                color=None,
-                confidence=0.0,
-                cost=0
-            )
-
-    def _calculate_attempt_score(
-            self,
-            result: Dict[str, int],
-            quantum_result: Optional[Dict[str, Any]]
-    ) -> int:
-        """Calcule le score d'une tentative"""
-        base_score = result['blacks'] * 10 + result['whites'] * 3
-
-        quantum_bonus = 0
-        if quantum_result and quantum_result.get('bonus_points'):
-            quantum_bonus = quantum_result['bonus_points']
-
-        return base_score + quantum_bonus
-
-    async def _handle_game_completion(
-            self,
-            db: AsyncSession,
-            game: Game,
-            player: GamePlayer,
-            won: bool
+    async def _handle_solution_found(
+        self,
+        db: AsyncSession,
+        game: Game,
+        participation: GameParticipation,
+        attempt: GameAttempt
     ) -> None:
-        """Gère la fin de partie pour un joueur"""
-        player.finish(won=won)
+        """Gère la découverte de la solution"""
 
-        # Si c'est le premier à finir et qu'il a gagné, il gagne la partie
-        if won and game.winner_id is None:
-            game.finish_game(winner_id=player.user_id)
+        # Marquer le joueur comme gagnant
+        participation.is_winner = True
+        participation.finished_at = datetime.now(timezone.utc)
 
-        # En mode solo, finir la partie complètement
+        # Calculer le score
+        score = calculate_game_score(
+            attempts=participation.attempts_made,
+            max_attempts=game.max_attempts,
+            time_taken=game.duration_minutes * 60 if game.duration_minutes else None,
+            quantum_used=participation.quantum_hints_used > 0,
+            difficulty=game.difficulty
+        )
+
+        participation.score = score
+
+        # Mettre à jour les stats utilisateur
+        await self.user_repo.update_user_stats(
+            db, participation.player_id, True, score, participation.quantum_hints_used > 0
+        )
+
+        # Terminer la partie si mode solo
         if game.game_mode == GameMode.SOLO:
-            game.finish_game(winner_id=player.user_id if won else None)
+            game.finish_game()
 
+    # === REQUÊTES DE BASE DE DONNÉES ===
+
+    async def _get_game_by_id(self, db: AsyncSession, game_id: UUID) -> Optional[Game]:
+        """Récupère une partie par ID"""
+        stmt = select(Game).where(Game.id == game_id)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _get_game_by_room_code(self, db: AsyncSession, room_code: str) -> Optional[Game]:
+        """Récupère une partie par code de room"""
+        stmt = select(Game).where(Game.room_code == room_code)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _get_game_with_participations(self, db: AsyncSession, game_id: UUID) -> Optional[Game]:
+        """Récupère une partie avec ses participations"""
+        stmt = (
+            select(Game)
+            .options(selectinload(Game.participations).selectinload(GameParticipation.player))
+            .where(Game.id == game_id)
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _get_game_with_all_relations(self, db: AsyncSession, game_id: UUID) -> Optional[Game]:
+        """Récupère une partie avec toutes ses relations"""
+        stmt = (
+            select(Game)
+            .options(
+                selectinload(Game.participations).selectinload(GameParticipation.player),
+                selectinload(Game.attempts).selectinload(GameAttempt.player)
+            )
+            .where(Game.id == game_id)
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _get_participation(
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        player_id: UUID
+    ) -> Optional[GameParticipation]:
+        """Récupère une participation"""
+        stmt = select(GameParticipation).where(
+            and_(
+                GameParticipation.game_id == game_id,
+                GameParticipation.player_id == player_id
+            )
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _add_participant(
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        player_id: UUID,
+        player_name: Optional[str] = None
+    ) -> GameParticipation:
+        """Ajoute un participant à une partie"""
+        participation = GameParticipation(
+            game_id=game_id,
+            player_id=player_id,
+            player_name=player_name
+        )
+
+        db.add(participation)
         await db.commit()
+        await db.refresh(participation)
+
+        return participation
 
 
-# Instance globale du service
+# Instance globale du service de jeu
 game_service = GameService()

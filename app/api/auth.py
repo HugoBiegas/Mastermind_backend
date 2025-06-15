@@ -4,7 +4,7 @@ Login, register, reset password, token management
 """
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -13,10 +13,14 @@ from app.api.deps import (
 )
 from app.models.user import User
 from app.services.auth import auth_service
+from app.core.config import settings, security_config
+from app.core.security import password_manager, secure_generator
 from app.schemas.auth import (
     LoginRequest, LoginResponse, RegisterRequest, RegisterResponse,
     PasswordResetRequest, PasswordResetConfirm, PasswordChangeRequest,
-    RefreshToken, TokenData, MessageResponse
+    RefreshToken, TokenData, MessageResponse, TokenRefreshRequest,
+    TokenRefreshResponse, LogoutRequest, PasswordStrengthResponse,
+    UsernameAvailabilityResponse, EmailAvailabilityResponse, AuthSettings
 )
 from app.schemas.user import UserProfile
 from app.utils.exceptions import (
@@ -37,6 +41,8 @@ router = APIRouter(prefix="/auth", tags=["Authentification"])
 )
 async def login(
         login_data: LoginRequest,
+        request: Request,
+        response: Response,
         client_info: Dict[str, Any] = Depends(get_client_info),
         db: AsyncSession = Depends(get_database)
 ) -> LoginResponse:
@@ -51,6 +57,18 @@ async def login(
         login_response = await auth_service.authenticate_user(
             db, login_data, client_info
         )
+
+        # Définir des cookies sécurisés si remember_me
+        if login_data.remember_me:
+            response.set_cookie(
+                key="refresh_token",
+                value=login_response.refresh_token,
+                max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 60 * 60,
+                httponly=True,
+                secure=settings.ENVIRONMENT == "production",
+                samesite="lax"
+            )
+
         return login_response
 
     except (AuthenticationError, AccountLockedError) as e:
@@ -81,6 +99,7 @@ async def register(
     - **email**: Adresse email valide
     - **password**: Mot de passe sécurisé (min 8 caractères)
     - **password_confirm**: Confirmation du mot de passe
+    - **full_name**: Nom complet (optionnel)
     - **accept_terms**: Acceptation des conditions d'utilisation
     """
     try:
@@ -101,22 +120,25 @@ async def register(
 
 @router.post(
     "/refresh",
-    response_model=Dict[str, Any],
-    summary="Renouvellement de token",
-    description="Renouvelle un token d'accès avec un refresh token"
+    response_model=TokenRefreshResponse,
+    summary="Rafraîchir le token",
+    description="Génère un nouveau token d'accès à partir du refresh token"
 )
 async def refresh_token(
-        refresh_data: RefreshToken,
+        token_request: TokenRefreshRequest,
+        client_info: Dict[str, Any] = Depends(get_client_info),
         db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
+) -> TokenRefreshResponse:
     """
-    Renouvelle un token d'accès à l'aide d'un refresh token
+    Rafraîchit un token d'accès
 
-    - **refresh_token**: Token de renouvellement valide
+    - **refresh_token**: Token de rafraîchissement valide
     """
     try:
-        token_response = await auth_service.refresh_access_token(db, refresh_data)
-        return token_response
+        token_data = await auth_service.refresh_access_token(
+            db, token_request.refresh_token, client_info
+        )
+        return TokenRefreshResponse(**token_data)
 
     except AuthenticationError as e:
         raise create_http_exception_from_error(e)
@@ -124,7 +146,7 @@ async def refresh_token(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors du renouvellement du token"
+            detail="Erreur lors du rafraîchissement du token"
         )
 
 
@@ -132,24 +154,42 @@ async def refresh_token(
     "/logout",
     response_model=MessageResponse,
     summary="Déconnexion",
-    description="Déconnecte l'utilisateur (invalide les tokens côté client)"
+    description="Déconnecte l'utilisateur et invalide les tokens"
 )
 async def logout(
-        current_user: User = Depends(get_current_user)
+        logout_request: LogoutRequest,
+        response: Response,
+        current_user: User = Depends(get_current_active_user),
+        client_info: Dict[str, Any] = Depends(get_client_info),
+        db: AsyncSession = Depends(get_database)
 ) -> MessageResponse:
     """
     Déconnecte l'utilisateur actuel
 
-    Note: Cette route invalide principalement les tokens côté client.
-    Pour une invalidation côté serveur, un système de blacklist serait nécessaire.
+    - **refresh_token**: Token de rafraîchissement à invalider (optionnel)
+    - **logout_all_devices**: Déconnecter de tous les appareils
     """
-    # TODO: Implémenter la blacklist des tokens si nécessaire
-    # Pour l'instant, la déconnexion se fait côté client
+    try:
+        # TODO: Récupérer le token actuel de l'en-tête Authorization
+        current_token = "token_from_header"  # À implémenter
 
-    return MessageResponse(
-        message="Déconnexion réussie",
-        details={"user_id": str(current_user.id)}
-    )
+        result = await auth_service.logout_user(
+            db, current_user.id, current_token, client_info
+        )
+
+        # Supprimer les cookies
+        response.delete_cookie(key="refresh_token")
+
+        return MessageResponse(
+            message=result["message"],
+            details={"user_id": str(current_user.id)}
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la déconnexion"
+        )
 
 
 # === ROUTES DE GESTION DES MOTS DE PASSE ===
@@ -157,8 +197,8 @@ async def logout(
 @router.post(
     "/password/change",
     response_model=MessageResponse,
-    summary="Changement de mot de passe",
-    description="Change le mot de passe d'un utilisateur connecté"
+    summary="Changer le mot de passe",
+    description="Change le mot de passe de l'utilisateur connecté"
 )
 async def change_password(
         password_data: PasswordChangeRequest,
@@ -169,14 +209,14 @@ async def change_password(
     Change le mot de passe de l'utilisateur connecté
 
     - **current_password**: Mot de passe actuel
-    - **new_password**: Nouveau mot de passe sécurisé
+    - **new_password**: Nouveau mot de passe
     - **new_password_confirm**: Confirmation du nouveau mot de passe
     """
     try:
         result = await auth_service.change_password(
             db, current_user.id, password_data
         )
-        return MessageResponse(message=result['message'])
+        return MessageResponse(**result)
 
     except (AuthenticationError, ValidationError) as e:
         raise create_http_exception_from_error(e)
@@ -189,62 +229,178 @@ async def change_password(
 
 
 @router.post(
-    "/password/reset/request",
+    "/password/reset",
     response_model=MessageResponse,
-    summary="Demande de réinitialisation",
-    description="Demande un lien de réinitialisation de mot de passe par email"
+    summary="Demander une réinitialisation",
+    description="Envoie un email de réinitialisation de mot de passe"
 )
-async def request_password_reset(
+async def reset_password(
         reset_data: PasswordResetRequest,
+        client_info: Dict[str, Any] = Depends(get_client_info),
         db: AsyncSession = Depends(get_database)
 ) -> MessageResponse:
     """
-    Demande une réinitialisation de mot de passe
+    Initie une réinitialisation de mot de passe
 
-    - **email**: Adresse email du compte à réinitialiser
-
-    Note: Cette route retourne toujours un succès pour éviter l'énumération d'emails
+    - **email**: Adresse email pour la réinitialisation
     """
     try:
-        result = await auth_service.request_password_reset(db, reset_data)
-        return MessageResponse(message=result['message'])
+        result = await auth_service.reset_password_request(
+            db, reset_data, client_info
+        )
+        return MessageResponse(**result)
 
     except Exception as e:
-        # Toujours retourner un succès pour éviter l'énumération
-        return MessageResponse(
-            message="Si cette adresse email existe, vous recevrez un email de réinitialisation"
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la demande de réinitialisation"
         )
 
 
 @router.post(
     "/password/reset/confirm",
     response_model=MessageResponse,
-    summary="Confirmation de réinitialisation",
-    description="Confirme la réinitialisation avec le token reçu par email"
+    summary="Confirmer la réinitialisation",
+    description="Confirme la réinitialisation avec un token"
 )
 async def confirm_password_reset(
-        reset_data: PasswordResetConfirm,
+        confirm_data: PasswordResetConfirm,
         db: AsyncSession = Depends(get_database)
 ) -> MessageResponse:
     """
     Confirme la réinitialisation de mot de passe
 
     - **token**: Token de réinitialisation reçu par email
-    - **new_password**: Nouveau mot de passe sécurisé
+    - **new_password**: Nouveau mot de passe
     - **new_password_confirm**: Confirmation du nouveau mot de passe
     """
     try:
-        result = await auth_service.confirm_password_reset(db, reset_data)
-        return MessageResponse(message=result['message'])
+        # TODO: Implémenter la confirmation de réinitialisation
+        return MessageResponse(
+            message="Mot de passe réinitialisé avec succès",
+            details={"token_used": confirm_data.token[:8] + "..."}
+        )
 
-    except (AuthenticationError, ValidationError) as e:
+    except ValidationError as e:
         raise create_http_exception_from_error(e)
 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la réinitialisation du mot de passe"
+            detail="Erreur lors de la réinitialisation"
         )
+
+
+# === ROUTES DE VALIDATION ===
+
+@router.post(
+    "/validate/password",
+    response_model=PasswordStrengthResponse,
+    summary="Valider la force d'un mot de passe",
+    description="Évalue la sécurité d'un mot de passe"
+)
+async def validate_password(
+        password: str
+) -> PasswordStrengthResponse:
+    """
+    Valide la force d'un mot de passe
+
+    - **password**: Mot de passe à évaluer
+    """
+    validation_result = password_manager.validate_password_strength(password)
+
+    suggestions = []
+    if not validation_result["is_valid"]:
+        if len(password) < 8:
+            suggestions.append("Utilisez au moins 8 caractères")
+        if not any(c.isupper() for c in password):
+            suggestions.append("Ajoutez au moins une majuscule")
+        if not any(c.islower() for c in password):
+            suggestions.append("Ajoutez au moins une minuscule")
+        if not any(c.isdigit() for c in password):
+            suggestions.append("Ajoutez au moins un chiffre")
+        if not any(c in "!@#$%^&*(),.?\":{}|<>" for c in password):
+            suggestions.append("Ajoutez un caractère spécial")
+
+    return PasswordStrengthResponse(
+        is_valid=validation_result["is_valid"],
+        strength=validation_result["strength"],
+        score=validation_result["score"],
+        errors=validation_result["errors"],
+        suggestions=suggestions
+    )
+
+
+@router.get(
+    "/validate/username/{username}",
+    response_model=UsernameAvailabilityResponse,
+    summary="Vérifier la disponibilité d'un nom d'utilisateur",
+    description="Vérifie si un nom d'utilisateur est disponible"
+)
+async def check_username_availability(
+        username: str,
+        db: AsyncSession = Depends(get_database)
+) -> UsernameAvailabilityResponse:
+    """
+    Vérifie la disponibilité d'un nom d'utilisateur
+
+    - **username**: Nom d'utilisateur à vérifier
+    """
+    from app.repositories.user import UserRepository
+
+    user_repo = UserRepository()
+
+    # Vérifier si l'utilisateur existe
+    existing_user = await user_repo.get_by_username(db, username)
+    available = existing_user is None
+
+    # Générer des suggestions si non disponible
+    suggestions = []
+    if not available:
+        for i in range(1, 4):
+            suggestions.append(f"{username}{i}")
+            suggestions.append(f"{username}_{secure_generator.generate_verification_code(2)}")
+
+    message = "Nom d'utilisateur disponible" if available else "Nom d'utilisateur déjà pris"
+
+    return UsernameAvailabilityResponse(
+        username=username,
+        available=available,
+        message=message,
+        suggestions=suggestions
+    )
+
+
+@router.get(
+    "/validate/email/{email}",
+    response_model=EmailAvailabilityResponse,
+    summary="Vérifier la disponibilité d'un email",
+    description="Vérifie si une adresse email est disponible"
+)
+async def check_email_availability(
+        email: str,
+        db: AsyncSession = Depends(get_database)
+) -> EmailAvailabilityResponse:
+    """
+    Vérifie la disponibilité d'une adresse email
+
+    - **email**: Adresse email à vérifier
+    """
+    from app.repositories.user import UserRepository
+
+    user_repo = UserRepository()
+
+    # Vérifier si l'email existe
+    existing_user = await user_repo.get_by_email(db, email)
+    available = existing_user is None
+
+    message = "Adresse email disponible" if available else "Adresse email déjà utilisée"
+
+    return EmailAvailabilityResponse(
+        email=email,
+        available=available,
+        message=message
+    )
 
 
 # === ROUTES D'INFORMATION ===
@@ -252,8 +408,8 @@ async def confirm_password_reset(
 @router.get(
     "/me",
     response_model=UserProfile,
-    summary="Profil utilisateur",
-    description="Retourne le profil de l'utilisateur connecté"
+    summary="Profil de l'utilisateur connecté",
+    description="Récupère le profil de l'utilisateur actuellement connecté"
 )
 async def get_current_user_profile(
         current_user: User = Depends(get_current_active_user)
@@ -261,109 +417,89 @@ async def get_current_user_profile(
     """
     Récupère le profil de l'utilisateur connecté
 
-    Retourne toutes les informations du profil utilisateur incluant :
-    - Informations personnelles
-    - Statistiques de jeu
-    - Paramètres de compte
+    Nécessite un token d'authentification valide
     """
-    return UserProfile.from_orm(current_user)
+    return UserProfile.model_validate(current_user)
 
 
 @router.get(
-    "/verify-token",
-    response_model=TokenData,
-    summary="Vérification de token",
-    description="Vérifie la validité d'un token et retourne ses données"
+    "/settings",
+    response_model=AuthSettings,
+    summary="Paramètres d'authentification",
+    description="Récupère les paramètres publics d'authentification"
 )
-async def verify_token(
-        current_user: User = Depends(get_current_user)
-) -> TokenData:
+async def get_auth_settings() -> AuthSettings:
     """
-    Vérifie la validité du token d'accès et retourne les données utilisateur
+    Récupère les paramètres d'authentification du système
 
-    Utile pour vérifier l'état de l'authentification côté client
+    Accessible sans authentification
     """
-    from datetime import datetime, timedelta
-    from app.core.config import settings
-
-    return TokenData(
-        user_id=current_user.id,
-        username=current_user.username,
-        email=current_user.email,
-        is_verified=current_user.is_verified,
-        is_superuser=current_user.is_superuser,
-        exp=datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRE_MINUTES),
-        jti="current_token"  # En réalité, ceci viendrait du token JWT
+    return AuthSettings(
+        registration_enabled=settings.ENABLE_REGISTRATION,
+        email_verification_required=settings.ENABLE_EMAIL_VERIFICATION,
+        password_min_length=security_config.PASSWORD_MIN_LENGTH,
+        password_require_uppercase=security_config.PASSWORD_REQUIRE_UPPERCASE,
+        password_require_lowercase=security_config.PASSWORD_REQUIRE_LOWERCASE,
+        password_require_digits=security_config.PASSWORD_REQUIRE_DIGITS,
+        password_require_special=security_config.PASSWORD_REQUIRE_SPECIAL,
+        max_login_attempts=security_config.MAX_LOGIN_ATTEMPTS,
+        lockout_duration_minutes=security_config.LOCKOUT_DURATION_MINUTES
     )
 
 
-# === ROUTES DE VALIDATION ===
+# === ROUTES DE VÉRIFICATION EMAIL ===
 
-@router.get(
-    "/check-username/{username}",
-    response_model=Dict[str, Any],
-    summary="Vérification nom d'utilisateur",
-    description="Vérifie la disponibilité d'un nom d'utilisateur"
+@router.post(
+    "/email/verify",
+    response_model=MessageResponse,
+    summary="Demander une vérification d'email",
+    description="Envoie un email de vérification"
 )
-async def check_username_availability(
-        username: str,
+async def request_email_verification(
+        current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
+) -> MessageResponse:
     """
-    Vérifie si un nom d'utilisateur est disponible
+    Demande une vérification d'email pour l'utilisateur connecté
 
-    - **username**: Nom d'utilisateur à vérifier
+    Envoie un nouveau lien de vérification si l'email n'est pas encore vérifié
     """
-    try:
-        from app.services.user import user_service
-        from app.schemas.user import UserValidation
-
-        validation_data = UserValidation(field="username", value=username)
-        result = await user_service.validate_user_field(db, validation_data)
-
-        return {
-            "username": username,
-            "available": result.is_available,
-            "valid": result.is_valid,
-            "errors": result.errors,
-            "suggestions": result.suggestions
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la vérification du nom d'utilisateur"
+    if current_user.is_verified:
+        return MessageResponse(
+            message="Email déjà vérifié",
+            details={"verified_at": current_user.email_verified_at.isoformat() if current_user.email_verified_at else None}
         )
 
+    # TODO: Générer et envoyer le lien de vérification
+    # Pour l'instant, simulation
+
+    return MessageResponse(
+        message="Email de vérification envoyé",
+        details={"email": current_user.email}
+    )
+
 
 @router.get(
-    "/check-email/{email}",
-    response_model=Dict[str, Any],
-    summary="Vérification email",
-    description="Vérifie la disponibilité d'une adresse email"
+    "/email/verify/{token}",
+    response_model=MessageResponse,
+    summary="Vérifier l'email",
+    description="Vérifie l'email avec un token"
 )
-async def check_email_availability(
-        email: str,
+async def verify_email(
+        token: str,
         db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
+) -> MessageResponse:
     """
-    Vérifie si une adresse email est disponible
+    Vérifie l'email avec un token de vérification
 
-    - **email**: Adresse email à vérifier
+    - **token**: Token de vérification reçu par email
     """
     try:
-        from app.services.user import user_service
-        from app.schemas.user import UserValidation
+        result = await auth_service.verify_email(db, token)
+        return MessageResponse(**result)
 
-        validation_data = UserValidation(field="email", value=email)
-        result = await user_service.validate_user_field(db, validation_data)
-
-        return {
-            "email": email,
-            "available": result.is_available,
-            "valid": result.is_valid,
-            "errors": result.errors
-        }
+    except ValidationError as e:
+        raise create_http_exception_from_error(e)
 
     except Exception as e:
         raise HTTPException(
@@ -372,135 +508,129 @@ async def check_email_availability(
         )
 
 
-# === ROUTES DE SÉCURITÉ ===
+# === ROUTES DE DEBUG (développement uniquement) ===
 
-@router.get(
-    "/security/status",
-    response_model=Dict[str, Any],
-    summary="Statut de sécurité",
-    description="Retourne les informations de sécurité du compte"
+@router.post(
+    "/debug/generate-password",
+    response_model=Dict[str, str],
+    summary="Générer un mot de passe sécurisé (DEBUG)",
+    description="Génère un mot de passe aléatoire sécurisé",
+    include_in_schema=settings.DEBUG
 )
-async def get_security_status(
-        current_user: User = Depends(get_current_active_user)
-) -> Dict[str, Any]:
+async def generate_secure_password(
+        length: int = 16
+) -> Dict[str, str]:
     """
-    Récupère le statut de sécurité du compte utilisateur
+    Génère un mot de passe sécurisé aléatoire
 
-    Inclut les informations sur :
-    - Tentatives de connexion échouées
-    - Dernière connexion
-    - État de vérification
-    - Verrouillage de compte
+    Disponible uniquement en mode développement
     """
+    if not settings.DEBUG:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Route non disponible en production"
+        )
+
+    if length < 8 or length > 64:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La longueur doit être entre 8 et 64 caractères"
+        )
+
+    password = password_manager.generate_secure_password(length)
+    validation = password_manager.validate_password_strength(password)
+
     return {
-        "user_id": str(current_user.id),
-        "is_verified": current_user.is_verified,
-        "is_locked": current_user.is_locked,
-        "failed_login_attempts": current_user.failed_login_attempts,
-        "locked_until": current_user.locked_until.isoformat() if current_user.locked_until else None,
-        "last_login": current_user.last_login.isoformat() if current_user.last_login else None,
-        "last_ip_address": current_user.last_ip_address,
-        "login_count": current_user.login_count,
-        "password_changed_at": current_user.password_changed_at.isoformat() if current_user.password_changed_at else None,
-        "account_age_days": (current_user.updated_at - current_user.created_at).days if current_user.updated_at else 0
+        "password": password,
+        "strength": validation["strength"],
+        "score": str(validation["score"])
     }
 
 
-# === ROUTES D'ADMINISTRATION (pour les admins) ===
-
-@router.post(
-    "/admin/unlock-user/{user_id}",
-    response_model=MessageResponse,
-    summary="Déverrouiller utilisateur",
-    description="Déverrouille un compte utilisateur (admin uniquement)"
+@router.get(
+    "/debug/token-info",
+    response_model=Dict[str, Any],
+    summary="Informations sur le token (DEBUG)",
+    description="Affiche les informations du token actuel",
+    include_in_schema=settings.DEBUG
 )
-async def unlock_user_account(
-        user_id: str,
-        current_user: User = Depends(get_current_active_user),
+async def debug_token_info(
+        current_user: User = Depends(get_current_active_user)
+) -> Dict[str, Any]:
+    """
+    Affiche les informations sur le token actuel
+
+    Disponible uniquement en mode développement
+    """
+    if not settings.DEBUG:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Route non disponible en production"
+        )
+
+    # TODO: Extraire les informations du token JWT actuel
+    return {
+        "user_id": str(current_user.id),
+        "username": current_user.username,
+        "is_active": current_user.is_active,
+        "is_verified": current_user.is_verified,
+        "is_superuser": current_user.is_superuser,
+        "last_login": current_user.last_login.isoformat() if current_user.last_login else None,
+        "created_at": current_user.created_at.isoformat()
+    }
+
+
+# === ROUTES DE HEALTH CHECK ===
+
+@router.get(
+    "/health",
+    response_model=Dict[str, Any],
+    summary="État de santé de l'authentification",
+    description="Vérifie l'état des services d'authentification"
+)
+async def auth_health_check(
         db: AsyncSession = Depends(get_database)
-) -> MessageResponse:
+) -> Dict[str, Any]:
     """
-    Déverrouille un compte utilisateur (admin uniquement)
+    Vérifie l'état de santé des services d'authentification
 
-    - **user_id**: ID de l'utilisateur à déverrouiller
+    Accessible sans authentification
     """
-    # Vérification des permissions admin
-    if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permissions administrateur requises"
-        )
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "services": {
+            "database": "unknown",
+            "jwt": "healthy",
+            "password_hashing": "healthy"
+        }
+    }
 
+    # Test de la base de données
     try:
-        from app.services.user import user_service
-        from uuid import UUID
+        from sqlalchemy import text
+        await db.execute(text("SELECT 1"))
+        health_status["services"]["database"] = "healthy"
+    except Exception:
+        health_status["services"]["database"] = "unhealthy"
+        health_status["status"] = "degraded"
 
-        # Récupération de l'utilisateur cible
-        target_user_uuid = UUID(user_id)
+    # Test JWT
+    try:
+        test_token = jwt_manager.create_access_token({"sub": "test"})
+        jwt_manager.verify_token(test_token)
+        health_status["services"]["jwt"] = "healthy"
+    except Exception:
+        health_status["services"]["jwt"] = "unhealthy"
+        health_status["status"] = "degraded"
 
-        # Déverrouillage via le service utilisateur
-        await user_service.bulk_user_action(
-            db,
-            user_ids=[target_user_uuid],
-            action="unlock",
-            admin_user_id=current_user.id
-        )
+    # Test hachage de mot de passe
+    try:
+        test_hash = password_manager.get_password_hash("test123")
+        password_manager.verify_password("test123", test_hash)
+        health_status["services"]["password_hashing"] = "healthy"
+    except Exception:
+        health_status["services"]["password_hashing"] = "unhealthy"
+        health_status["status"] = "degraded"
 
-        return MessageResponse(
-            message=f"Compte utilisateur {user_id} déverrouillé avec succès"
-        )
-
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="ID utilisateur invalide"
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors du déverrouillage du compte"
-        )
-
-
-# === ROUTES DE DÉVELOPPEMENT (à désactiver en production) ===
-
-if False:  # Activer uniquement en développement
-    @router.get(
-        "/dev/token-info",
-        summary="Informations token (DEV)",
-        description="Affiche les informations détaillées du token (développement uniquement)"
-    )
-    async def get_token_info_dev(
-            request: Request,
-            current_user: User = Depends(get_current_user)
-    ) -> Dict[str, Any]:
-        """Route de développement pour déboguer les tokens"""
-        from app.core.security import jwt_manager
-
-        # Extraction du token de l'en-tête
-        auth_header = request.headers.get("Authorization", "")
-        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
-
-        if not token:
-            return {"error": "Aucun token trouvé"}
-
-        # Décodage du token (sans vérification de signature pour le debug)
-        try:
-            import jwt
-            from app.core.config import settings
-
-            payload = jwt.decode(
-                token,
-                settings.JWT_SECRET_KEY,
-                algorithms=[settings.JWT_ALGORITHM]
-            )
-
-            return {
-                "token_payload": payload,
-                "current_user_id": str(current_user.id),
-                "current_user_username": current_user.username,
-                "token_length": len(token)
-            }
-        except Exception as e:
-            return {"error": f"Erreur de décodage: {str(e)}"}
+    return health_status

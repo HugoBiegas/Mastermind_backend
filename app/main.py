@@ -25,6 +25,21 @@ from app.utils.exceptions import (
 )
 
 
+# === TÂCHE DE NETTOYAGE WEBSOCKET ===
+
+async def websocket_cleanup_task():
+    """Tâche périodique de nettoyage des connexions WebSocket inactives"""
+    while True:
+        try:
+            await websocket_manager.cleanup_inactive_connections()
+            await asyncio.sleep(60)  # Nettoyage toutes les minutes
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"❌ Erreur lors du nettoyage WebSocket: {e}")
+            await asyncio.sleep(10)  # Attendre avant de réessayer
+
+
 # === LIFESPAN DE L'APPLICATION ===
 
 @asynccontextmanager
@@ -75,140 +90,124 @@ app = FastAPI(
     description="""
     🎯⚛️ **Quantum Mastermind API** - Un jeu de Mastermind révolutionnaire intégrant les principes de l'informatique quantique.
     
-    ## Fonctionnalités
+    ## 🌟 Fonctionnalités
     
-    * **Authentification JWT** sécurisée avec refresh tokens
-    * **Modes de jeu multiples** : Solo, Multijoueur, Battle Royale, Tournois
-    * **Algorithmes quantiques** : Grover, Superposition, Intrication
-    * **WebSocket temps réel** pour les parties multijoueurs
-    * **Système de scoring** basé sur l'avantage quantique
-    * **API REST complète** avec pagination et recherche avancée
+    ### 🎮 Modes de Jeu
+    - **Solo Classique** : Mastermind traditionnel avec hints quantiques
+    - **Solo Quantique** : Utilisation de superposition et intrication
+    - **Multijoueur Synchrone** : Tous les joueurs résolvent la même combinaison
+    - **Battle Royale** : Chacun sa combinaison, élimination progressive
+    - **Mode Rapidité** : Classement basé sur le temps
+    - **Mode Précision** : Classement basé sur le nombre de coups
     
-    ## Technologies
+    ### 🏆 Système de Scoring
+    - Score quantique basé sur l'utilisation des fonctionnalités avancées
+    - Statistiques détaillées par joueur
+    - Leaderboard global et classements par mode
+    - Système de rang et progression
     
-    * **FastAPI** 0.115.12 - Framework web haute performance
-    * **SQLAlchemy** 2.0.41 - ORM moderne avec support async
-    * **PostgreSQL** 16 - Base de données relationnelle
-    * **Redis** 7.4 - Cache et sessions
-    * **Qiskit** 2.0.2 - Framework quantique IBM
+    ### ⚛️ Informatique Quantique
+    - **Qiskit 2.0.2** : Framework IBM pour informatique quantique
+    - **Hints Quantiques** : Algorithme de Grover pour optimiser les indices
+    - **Superposition** : États quantiques multiples simultanés
+    - **Intrication** : Corrélations quantiques entre les couleurs
     
-    ---
-    
-    Développé avec ❤️ et ⚛️ pour repousser les limites du gaming quantique.
+    ## 🔧 Technologies
+    - **FastAPI 0.115.12** : API REST haute performance
+    - **SQLAlchemy 2.0.41** : ORM moderne avec support async
+    - **PostgreSQL 16** : Base de données relationnelle
+    - **Redis 7.4** : Cache et sessions
+    - **WebSockets** : Communication temps réel
+    - **JWT** : Authentification sécurisée
     """,
     openapi_url=f"{settings.API_V1_STR}/openapi.json" if settings.DEBUG else None,
-    docs_url=f"{settings.API_V1_STR}/docs" if settings.DEBUG else None,
-    redoc_url=f"{settings.API_V1_STR}/redoc" if settings.DEBUG else None,
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None,
     lifespan=lifespan
 )
 
-
 # === MIDDLEWARE ===
 
-# CORS - Configuration sécurisée
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[str(origin) for origin in settings.BACKEND_CORS_ORIGINS],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
-    expose_headers=["X-Request-ID", "X-Error-Code"]
-)
-
-# Compression Gzip
-app.add_middleware(GZipMiddleware, minimum_size=1000)
-
-# Hosts de confiance
+# Sécurité des hosts de confiance
 if settings.TRUSTED_HOSTS:
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=settings.TRUSTED_HOSTS
     )
 
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-Total-Count", "X-Request-ID"]
+)
 
-# === MIDDLEWARE CUSTOM ===
+# Compression
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+# === MIDDLEWARE PERSONNALISÉ ===
 
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     """Ajoute les en-têtes de sécurité"""
     response = await call_next(request)
 
-    # En-têtes de sécurité
-    security_headers = {
-        "X-Content-Type-Options": "nosniff",
-        "X-Frame-Options": "DENY",
-        "X-XSS-Protection": "1; mode=block",
-        "Referrer-Policy": "strict-origin-when-cross-origin",
-    }
+    # Headers de sécurité
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
-    # En production uniquement
     if settings.ENVIRONMENT == "production":
-        security_headers.update({
-            "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
-            "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
-        })
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
-    for header, value in security_headers.items():
-        response.headers[header] = value
+    # Header personnalisé pour identifier l'API
+    response.headers["X-Powered-By"] = f"Quantum-Mastermind-{settings.VERSION}"
 
     return response
 
 
 @app.middleware("http")
-async def add_request_id(request: Request, call_next):
-    """Ajoute un ID de requête unique"""
-    import uuid
-    request_id = str(uuid.uuid4())
-    request.state.request_id = request_id
-
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-
-    return response
-
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log les requêtes en production"""
+async def add_request_timing(request: Request, call_next):
+    """Ajoute le timing des requêtes"""
     start_time = time.time()
-
     response = await call_next(request)
-
     process_time = time.time() - start_time
-
-    if settings.ENVIRONMENT == "production":
-        # TODO: Intégrer avec un système de logging structuré
-        print(f"[{request.state.request_id}] {request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s")
-
     response.headers["X-Process-Time"] = str(process_time)
-
     return response
 
 
-# === GESTIONNAIRE D'EXCEPTIONS GLOBAL ===
+# === GESTION GLOBALE DES EXCEPTIONS ===
 
 @app.exception_handler(BaseQuantumMastermindError)
-async def quantum_mastermind_exception_handler(
-    request: Request,
-    exc: BaseQuantumMastermindError
-):
-    """Gestionnaire pour les exceptions métier"""
+async def quantum_mastermind_exception_handler(request: Request, exc: BaseQuantumMastermindError):
+    """Gestionnaire pour les exceptions personnalisées"""
     return JSONResponse(
-        status_code=get_http_status_code(exc),
-        content=exc.to_dict(),
-        headers={"X-Error-Code": exc.error_code}
+        status_code=exc.status_code,
+        content={
+            "error": exc.error_code,
+            "message": exc.message,
+            "details": exc.details,
+            "timestamp": time.time(),
+            "path": str(request.url.path)
+        }
     )
 
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Gestionnaire pour les HTTPException"""
+    """Gestionnaire pour les exceptions HTTP"""
     return JSONResponse(
         status_code=exc.status_code,
         content={
-            "error": "HTTP_ERROR",
+            "error": f"HTTP_{exc.status_code}",
             "message": exc.detail,
-            "details": {}
+            "timestamp": time.time(),
+            "path": str(request.url.path)
         }
     )
 
@@ -216,233 +215,224 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Gestionnaire pour les exceptions générales"""
-    error_details = get_exception_details(exc)
+    status_code = get_http_status_code(exc)
+    details = get_exception_details(exc)
 
-    # En développement, on peut révéler plus de détails
-    if settings.DEBUG:
-        error_details["debug_info"] = {
-            "exception_type": type(exc).__name__,
-            "traceback": str(exc)
-        }
+    # En production, masquer les détails d'erreur sensibles
+    if settings.ENVIRONMENT == "production" and status_code == 500:
+        details['message'] = "Erreur interne du serveur"
+        details['details'] = {}
 
     return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        status_code=status_code,
         content={
-            "error": "INTERNAL_SERVER_ERROR",
-            "message": "Une erreur interne s'est produite",
-            "details": error_details if settings.DEBUG else {}
+            **details,
+            "timestamp": time.time(),
+            "path": str(request.url.path)
         }
     )
 
 
-# === ROUTES PRINCIPALES ===
+# === ROUTES DE BASE ===
 
-@app.get("/", tags=["Root"])
+@app.get(
+    "/",
+    tags=["Base"],
+    summary="Page d'accueil",
+    description="Point d'entrée de l'API Quantum Mastermind"
+)
 async def root():
     """Page d'accueil de l'API"""
     return {
         "message": "🎯⚛️ Quantum Mastermind API",
         "version": settings.VERSION,
         "environment": settings.ENVIRONMENT,
-        "status": "operational",
-        "quantum_ready": True,
+        "documentation": "/docs",
         "features": [
-            "🔐 Authentification JWT sécurisée",
-            "🎮 Modes de jeu multiples",
-            "⚛️ Algorithmes quantiques intégrés",
-            "📡 WebSocket temps réel",
-            "📊 Statistiques avancées",
-            "🏆 Système de classement"
+            "Jeu de Mastermind avec informatique quantique",
+            "Modes solo et multijoueur",
+            "Système de scoring avancé",
+            "WebSocket temps réel",
+            "Authentification JWT sécurisée"
         ],
-        "endpoints": {
-            "docs": f"{settings.API_V1_STR}/docs" if settings.DEBUG else "disabled",
-            "auth": f"{settings.API_V1_STR}/auth",
-            "users": f"{settings.API_V1_STR}/users",
-            "games": f"{settings.API_V1_STR}/games",
-            "websocket": "/ws"
-        },
-        "quantum_info": {
-            "backend": settings.QISKIT_BACKEND,
-            "max_qubits": settings.MAX_QUBITS,
-            "quantum_shots": settings.QUANTUM_SHOTS
-        }
+        "quantum_features": [
+            "Algorithme de Grover pour les hints",
+            "Superposition quantique",
+            "Intrication des couleurs",
+            "Mesures probabilistes"
+        ]
     }
 
 
-@app.get("/health", tags=["Health"])
+@app.get(
+    "/health",
+    tags=["Base"],
+    summary="Santé de l'API",
+    description="Vérifie l'état de santé de l'API et de ses composants"
+)
 async def health_check():
-    """Endpoint de santé pour les checks de déploiement"""
-    # Vérification de la base de données
-    db_healthy = True
+    """Check de santé de l'API"""
+    health_status = {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "version": settings.VERSION,
+        "environment": settings.ENVIRONMENT,
+        "components": {
+            "api": "healthy",
+            "database": "unknown",
+            "redis": "unknown",
+            "quantum": "unknown"
+        }
+    }
+
+    # Test de la base de données
     try:
         async for db in get_db():
             await db.execute("SELECT 1")
+            health_status["components"]["database"] = "healthy"
             break
-    except Exception:
-        db_healthy = False
+    except Exception as e:
+        health_status["components"]["database"] = "unhealthy"
+        health_status["status"] = "degraded"
 
-    # Statistiques WebSocket
-    ws_stats = websocket_manager.get_connection_stats()
-
-    # Informations quantum
+    # Test de Redis (si configuré)
     try:
-        from app.services.quantum import quantum_service
-        quantum_info = quantum_service.get_backend_info()
+        # TODO: Ajouter le test Redis quand le client sera configuré
+        health_status["components"]["redis"] = "healthy"
     except Exception:
-        quantum_info = {"available": False, "error": "Service indisponible"}
+        health_status["components"]["redis"] = "unhealthy"
+        health_status["status"] = "degraded"
 
-    status_code = status.HTTP_200_OK if db_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
+    # Test du backend quantique
+    try:
+        from qiskit_aer import Aer
+        backend = Aer.get_backend('qasm_simulator')
+        health_status["components"]["quantum"] = "healthy"
+        health_status["quantum_backend"] = str(backend)
+    except Exception:
+        health_status["components"]["quantum"] = "unhealthy"
+        health_status["status"] = "degraded"
+
+    # Déterminer le code de statut HTTP
+    status_code = 200 if health_status["status"] == "healthy" else 503
 
     return JSONResponse(
         status_code=status_code,
-        content={
-            "status": "healthy" if db_healthy else "unhealthy",
-            "timestamp": time.time(),
-            "version": settings.VERSION,
-            "environment": settings.ENVIRONMENT,
-            "services": {
-                "database": "up" if db_healthy else "down",
-                "websocket": "up",
-                "quantum": "up" if quantum_info["available"] else "down"
-            },
-            "metrics": {
-                "websocket_connections": ws_stats["total_connections"],
-                "authenticated_users": ws_stats["authenticated_connections"],
-                "active_game_rooms": ws_stats["active_game_rooms"]
-            },
-            "quantum_backend": quantum_info
-        }
+        content=health_status
     )
 
 
-@app.get("/metrics", tags=["Monitoring"])
-async def get_metrics():
-    """Endpoint de métriques pour Prometheus"""
-    if not settings.ENABLE_METRICS:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Métriques désactivées"
-        )
-
-    ws_stats = websocket_manager.get_connection_stats()
-
-    # Format Prometheus basique
-    metrics = [
-        f"# HELP quantum_mastermind_websocket_connections Total WebSocket connections",
-        f"# TYPE quantum_mastermind_websocket_connections gauge",
-        f"quantum_mastermind_websocket_connections {ws_stats['total_connections']}",
-        "",
-        f"# HELP quantum_mastermind_authenticated_users Authenticated users",
-        f"# TYPE quantum_mastermind_authenticated_users gauge",
-        f"quantum_mastermind_authenticated_users {ws_stats['authenticated_connections']}",
-        "",
-        f"# HELP quantum_mastermind_game_rooms Active game rooms",
-        f"# TYPE quantum_mastermind_game_rooms gauge",
-        f"quantum_mastermind_game_rooms {ws_stats['active_game_rooms']}",
-    ]
-
-    return "\n".join(metrics)
+@app.get(
+    "/metrics",
+    tags=["Base"],
+    summary="Métriques de l'API",
+    description="Métriques de performance et d'utilisation"
+)
+async def metrics():
+    """Métriques de l'API"""
+    return {
+        "connections": {
+            "websocket_active": websocket_manager.get_connection_count(),
+            "websocket_rooms": websocket_manager.get_room_count()
+        },
+        "performance": {
+            "uptime": time.time(),  # À améliorer avec le vrai uptime
+        },
+        "version": settings.VERSION,
+        "timestamp": time.time()
+    }
 
 
 # === ROUTES API ===
 
-# Inclusion des routes avec préfixe
-app.include_router(auth.router, prefix=settings.API_V1_STR, tags=["Authentification"])
-app.include_router(users.router, prefix=settings.API_V1_STR, tags=["Utilisateurs"])
-app.include_router(games.router, prefix=settings.API_V1_STR, tags=["Jeux"])
+# Inclusion des routers
+app.include_router(
+    auth.router,
+    prefix=settings.API_V1_STR,
+    tags=["Authentification"]
+)
+
+app.include_router(
+    users.router,
+    prefix=settings.API_V1_STR,
+    tags=["Utilisateurs"]
+)
+
+app.include_router(
+    games.router,
+    prefix=settings.API_V1_STR,
+    tags=["Jeux"]
+)
 
 
 # === WEBSOCKET ===
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """Endpoint WebSocket principal"""
-    connection_id = None
+@app.websocket("/ws/{connection_type}")
+async def websocket_endpoint(websocket: WebSocket, connection_type: str):
+    """
+    Point d'entrée WebSocket principal
+
+    Types de connexion supportés:
+    - game: Connexion de jeu temps réel
+    - chat: Chat en temps réel (futur)
+    - admin: Administration (futur)
+    """
+    if connection_type not in ["game", "chat", "admin"]:
+        await websocket.close(code=status.WS_1003_UNSUPPORTED_DATA)
+        return
+
+    connection_id = await websocket_manager.connect(websocket)
 
     try:
-        # Connexion
-        connection_id = await websocket_manager.connect(websocket)
-
-        # Boucle de traitement des messages
         while True:
-            # Attente d'un message
-            message = await websocket.receive_text()
+            # Réception du message
+            data = await websocket.receive_text()
 
-            # Traitement avec base de données
+            # Traitement via le gestionnaire de messages
             async for db in get_db():
-                await message_handler.handle_message(connection_id, message, db)
+                await message_handler.handle_message(connection_id, data, db)
                 break
 
     except WebSocketDisconnect:
-        # Déconnexion normale
-        pass
+        await websocket_manager.disconnect(connection_id)
     except Exception as e:
-        # Erreur de connexion
-        print(f"Erreur WebSocket pour {connection_id}: {e}")
-    finally:
-        # Nettoyage
-        if connection_id:
-            await websocket_manager.disconnect(connection_id)
+        print(f"❌ Erreur WebSocket: {e}")
+        await websocket_manager.disconnect(connection_id)
 
 
-@app.get("/ws/stats", tags=["WebSocket"])
-async def websocket_stats():
-    """Statistiques des connexions WebSocket"""
-    return websocket_manager.get_connection_stats()
+# === ROUTES STATIQUES ===
+
+# Servir les fichiers statiques en production (si applicable)
+if settings.ENVIRONMENT == "production":
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-@app.get("/ws/rooms", tags=["WebSocket"])
-async def websocket_rooms():
-    """Liste des rooms WebSocket actives"""
-    rooms_info = {}
+# === ÉVÉNEMENTS DE DÉMARRAGE/ARRÊT (Legacy - pour compatibilité) ===
 
-    for room_id in websocket_manager.game_rooms.keys():
-        room_info = websocket_manager.get_room_info(room_id)
-        if room_info:
-            rooms_info[room_id] = room_info
-
-    return {
-        "total_rooms": len(rooms_info),
-        "rooms": rooms_info
-    }
+@app.on_event("startup")
+async def startup_event():
+    """Événement de démarrage (legacy)"""
+    print("📡 Application démarrée (legacy event)")
 
 
-# === TÂCHES PÉRIODIQUES ===
-
-async def websocket_cleanup_task():
-    """Tâche de nettoyage périodique des WebSockets"""
-    while True:
-        try:
-            await asyncio.sleep(30)  # Toutes les 30 secondes
-            await websocket_manager.heartbeat_check()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"Erreur lors du nettoyage WebSocket: {e}")
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Événement d'arrêt (legacy)"""
+    print("🔄 Application en cours d'arrêt (legacy event)")
 
 
-# === ROUTES STATIQUES (OPTIONNEL) ===
-
-if settings.DEBUG:
-    # En développement, on peut servir des fichiers statiques
-    # app.mount("/static", StaticFiles(directory="static"), name="static")
-    pass
-
-
-# === POINT D'ENTRÉE ===
+# === CONFIGURATION FINALE ===
 
 if __name__ == "__main__":
     import uvicorn
-
-    print("🚀 Démarrage en mode développement...")
 
     uvicorn.run(
         "app.main:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=settings.DEBUG,
-        workers=1 if settings.DEBUG else settings.WORKERS,
-        log_level=settings.LOG_LEVEL.lower(),
+        workers=settings.WORKERS if not settings.DEBUG else 1,
+        log_level="info",
         access_log=True,
         server_header=False,  # Sécurité
         date_header=False     # Sécurité

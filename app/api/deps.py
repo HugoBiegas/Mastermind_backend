@@ -4,8 +4,10 @@ Injection de dépendances pour l'authentification, base de données, etc.
 """
 from typing import Any, Dict, Generator, Optional
 from uuid import UUID
+import time
+import hashlib
 
-from fastapi import Depends, HTTPException, status, Request
+from fastapi import Depends, HTTPException, status, Request, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,7 +97,7 @@ async def get_current_user_token(
     if credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Schéma d'authentification invalide. Utilisez Bearer",
+            detail="Schéma d'authentification invalide. Utilisez 'Bearer token'",
             headers={"WWW-Authenticate": "Bearer"}
         )
 
@@ -114,17 +116,17 @@ async def get_current_user(
         token: Token JWT
 
     Returns:
-        Utilisateur authentifié
+        Utilisateur actuel
 
     Raises:
-        HTTPException: Si l'utilisateur n'est pas trouvé ou le token invalide
+        HTTPException: Si le token est invalide ou l'utilisateur n'existe pas
     """
     try:
         user = await auth_service.get_current_user(db, token)
         return user
     except AuthenticationError as e:
         raise HTTPException(
-            status_code=get_http_status_code(e),
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail=e.message,
             headers={"WWW-Authenticate": "Bearer"}
         )
@@ -135,6 +137,31 @@ async def get_current_user(
         )
 
 
+async def get_current_user_optional(
+        db: AsyncSession = Depends(get_database),
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
+) -> Optional[User]:
+    """
+    Récupère l'utilisateur actuel de manière optionnelle
+
+    Args:
+        db: Session de base de données
+        credentials: Credentials optionnelles
+
+    Returns:
+        Utilisateur actuel ou None si non authentifié
+    """
+    if not credentials:
+        return None
+
+    try:
+        token = credentials.credentials
+        user = await auth_service.get_current_user(db, token)
+        return user
+    except:
+        return None
+
+
 async def get_current_active_user(
         current_user: User = Depends(get_current_user)
 ) -> User:
@@ -142,18 +169,18 @@ async def get_current_active_user(
     Vérifie que l'utilisateur actuel est actif
 
     Args:
-        current_user: Utilisateur authentifié
+        current_user: Utilisateur actuel
 
     Returns:
         Utilisateur actif
 
     Raises:
-        HTTPException: Si l'utilisateur n'est pas actif
+        HTTPException: Si l'utilisateur est inactif
     """
     if not current_user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Compte utilisateur désactivé"
+            detail="Compte utilisateur inactif"
         )
     return current_user
 
@@ -162,21 +189,21 @@ async def get_current_verified_user(
         current_user: User = Depends(get_current_active_user)
 ) -> User:
     """
-    Vérifie que l'utilisateur actuel a vérifié son email
+    Vérifie que l'utilisateur actuel est vérifié (email confirmé)
 
     Args:
-        current_user: Utilisateur actif
+        current_user: Utilisateur actuel
 
     Returns:
         Utilisateur vérifié
 
     Raises:
-        HTTPException: Si l'email n'est pas vérifié
+        HTTPException: Si l'utilisateur n'est pas vérifié
     """
     if not current_user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Vérification email requise"
+            detail="Email non vérifié. Vérifiez votre boîte email."
         )
     return current_user
 
@@ -185,154 +212,100 @@ async def get_current_superuser(
         current_user: User = Depends(get_current_active_user)
 ) -> User:
     """
-    Vérifie que l'utilisateur actuel est un superuser
+    Vérifie que l'utilisateur actuel est un super-utilisateur
 
     Args:
-        current_user: Utilisateur actif
+        current_user: Utilisateur actuel
 
     Returns:
-        Superutilisateur
+        Super-utilisateur
 
     Raises:
-        HTTPException: Si l'utilisateur n'est pas superuser
+        HTTPException: Si l'utilisateur n'est pas un super-utilisateur
     """
     if not current_user.is_superuser:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permissions administrateur requises"
+            detail="Privilèges de super-utilisateur requis"
         )
     return current_user
 
 
-# === DÉPENDANCES OPTIONNELLES ===
-
-async def get_current_user_optional(
-        db: AsyncSession = Depends(get_database),
-        credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-) -> Optional[User]:
-    """
-    Récupère l'utilisateur actuel si authentifié, None sinon
-
-    Args:
-        db: Session de base de données
-        credentials: Credentials optionnels
-
-    Returns:
-        Utilisateur authentifié ou None
-    """
-    if not credentials:
-        return None
-
-    try:
-        user = await auth_service.get_current_user(db, credentials.credentials)
-        return user if user.is_active else None
-    except:
-        return None
-
-
-# === DÉPENDANCES DE VALIDATION DE RESSOURCES ===
+# === DÉPENDANCES DE VALIDATION D'ACCÈS ===
 
 async def validate_user_access(
         target_user_id: UUID,
         current_user: User = Depends(get_current_active_user)
-) -> User:
+) -> bool:
     """
-    Valide que l'utilisateur actuel peut accéder aux données d'un autre utilisateur
+    Valide que l'utilisateur peut accéder aux données d'un autre utilisateur
 
     Args:
         target_user_id: ID de l'utilisateur cible
         current_user: Utilisateur actuel
 
     Returns:
-        Utilisateur actuel si autorisé
+        True si l'accès est autorisé
 
     Raises:
-        HTTPException: Si l'accès n'est pas autorisé
+        HTTPException: Si l'accès est refusé
     """
-    # L'utilisateur peut accéder à ses propres données ou être admin
-    if current_user.id != target_user_id and not current_user.is_superuser:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Accès non autorisé à cette ressource"
-        )
-    return current_user
+    # L'utilisateur peut accéder à ses propres données
+    if current_user.id == target_user_id:
+        return True
 
+    # Les super-utilisateurs peuvent accéder à tout
+    if current_user.is_superuser:
+        return True
 
-def create_game_access_validator(require_host: bool = False):
-    """
-    Crée un validateur d'accès aux parties
+    # TODO: Ajouter d'autres règles d'accès (amis, parties partagées, etc.)
 
-    Args:
-        require_host: Si True, nécessite d'être l'hôte de la partie
-
-    Returns:
-        Fonction de validation
-    """
-
-    async def validate_game_access(
-            game_id: UUID,
-            current_user: User = Depends(get_current_active_user),
-            db: AsyncSession = Depends(get_database)
-    ) -> User:
-        """Valide l'accès à une partie"""
-        # TODO: Implémenter la validation d'accès aux parties
-        # Une fois que le service de jeu est complètement intégré
-
-        # Pour l'instant, permet l'accès si l'utilisateur est authentifié
-        return current_user
-
-    return validate_game_access
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Accès non autorisé aux données de cet utilisateur"
+    )
 
 
 # === DÉPENDANCES DE PAGINATION ===
 
 class PaginationParams:
-    """Paramètres de pagination"""
+    """Paramètres de pagination standardisés"""
 
     def __init__(
             self,
-            page: int = 1,
-            page_size: int = 20,
-            sort_by: Optional[str] = None,
-            sort_order: str = "desc"
+            skip: int = Query(0, ge=0, description="Nombre d'éléments à ignorer"),
+            limit: int = Query(20, ge=1, le=100, description="Nombre d'éléments à retourner")
     ):
-        # Validation des paramètres
-        self.page = max(1, page)
-        self.page_size = min(max(1, page_size), 100)  # Limite à 100
-        self.sort_by = sort_by
-        self.sort_order = sort_order if sort_order in ["asc", "desc"] else "desc"
+        self.skip = skip
+        self.limit = limit
 
     @property
     def offset(self) -> int:
-        """Calcule l'offset pour la pagination"""
-        return (self.page - 1) * self.page_size
+        """Alias pour skip (compatibilité SQLAlchemy)"""
+        return self.skip
 
 
 async def get_pagination_params(
-        page: int = 1,
-        page_size: int = 20,
-        sort_by: Optional[str] = None,
-        sort_order: str = "desc"
+        skip: int = Query(0, ge=0, description="Nombre d'éléments à ignorer"),
+        limit: int = Query(20, ge=1, le=100, description="Nombre d'éléments à retourner")
 ) -> PaginationParams:
     """
     Dépendance pour les paramètres de pagination
 
     Args:
-        page: Numéro de page (commence à 1)
-        page_size: Taille de la page (max 100)
-        sort_by: Champ de tri
-        sort_order: Ordre de tri (asc/desc)
+        skip: Nombre d'éléments à ignorer
+        limit: Nombre d'éléments à retourner
 
     Returns:
         Paramètres de pagination validés
     """
-    return PaginationParams(page, page_size, sort_by, sort_order)
+    return PaginationParams(skip, limit)
 
 
 # === DÉPENDANCES DE RECHERCHE ===
 
 class SearchParams:
-    """Paramètres de recherche"""
+    """Paramètres de recherche standardisés"""
 
     def __init__(
             self,
@@ -348,10 +321,10 @@ class SearchParams:
 
 
 async def get_search_params(
-        q: Optional[str] = None,
-        category: Optional[str] = None,
-        status: Optional[str] = None,
-        limit: int = 20
+        q: Optional[str] = Query(None, description="Terme de recherche"),
+        category: Optional[str] = Query(None, description="Catégorie"),
+        status: Optional[str] = Query(None, description="Statut"),
+        limit: int = Query(20, ge=1, le=100, description="Limite de résultats")
 ) -> SearchParams:
     """
     Dépendance pour les paramètres de recherche
@@ -395,7 +368,6 @@ async def get_cache_key(
         cache_parts.append(f"user:{current_user.id}")
 
     # Hash de la clé pour éviter les clés trop longues
-    import hashlib
     cache_key = "|".join(cache_parts)
     return hashlib.md5(cache_key.encode()).hexdigest()
 
@@ -481,8 +453,6 @@ async def get_request_context(
     Returns:
         Contexte complet de la requête
     """
-    import time
-
     return {
         'request_id': client_info.get('request_id') or f"req_{int(time.time())}",
         'method': request.method,
@@ -495,3 +465,187 @@ async def get_request_context(
         'is_admin': current_user.is_superuser if current_user else False,
         'timestamp': time.time()
     }
+
+
+# === DÉPENDANCES DE VALIDATION D'ENTRÉE ===
+
+async def validate_uuid(
+        uuid_str: str,
+        field_name: str = "ID"
+) -> UUID:
+    """
+    Valide et convertit une chaîne UUID
+
+    Args:
+        uuid_str: Chaîne UUID à valider
+        field_name: Nom du champ pour l'erreur
+
+    Returns:
+        UUID validé
+
+    Raises:
+        HTTPException: Si l'UUID est invalide
+    """
+    try:
+        return UUID(uuid_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field_name} invalide: format UUID requis"
+        )
+
+
+# === DÉPENDANCES SPÉCIFIQUES AU JEU ===
+
+async def validate_game_access(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> bool:
+    """
+    Valide que l'utilisateur peut accéder à une partie
+
+    Args:
+        game_id: ID de la partie
+        current_user: Utilisateur actuel
+        db: Session de base de données
+
+    Returns:
+        True si l'accès est autorisé
+
+    Raises:
+        HTTPException: Si l'accès est refusé
+    """
+    # TODO: Implémenter la logique de validation d'accès aux parties
+    # - Créateur de la partie
+    # - Participant à la partie
+    # - Partie publique
+    # - Admin
+    return True
+
+
+async def validate_game_modification(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> bool:
+    """
+    Valide que l'utilisateur peut modifier une partie
+
+    Args:
+        game_id: ID de la partie
+        current_user: Utilisateur actuel
+        db: Session de base de données
+
+    Returns:
+        True si la modification est autorisée
+
+    Raises:
+        HTTPException: Si la modification est refusée
+    """
+    # TODO: Implémenter la logique de validation de modification
+    # - Créateur de la partie
+    # - Admin
+    # - Modérateur (si implémenté)
+    return True
+
+
+# === DÉPENDANCES DE SÉCURITÉ AVANCÉE ===
+
+async def check_api_key(
+        api_key: Optional[str] = Query(None, description="Clé API (optionnelle)")
+) -> Optional[str]:
+    """
+    Vérifie une clé API optionnelle pour les accès publics
+
+    Args:
+        api_key: Clé API
+
+    Returns:
+        Clé API validée ou None
+    """
+    # TODO: Implémenter la validation des clés API
+    return api_key
+
+
+async def require_api_key(
+        api_key: str = Query(..., description="Clé API requise")
+) -> str:
+    """
+    Requiert une clé API valide
+
+    Args:
+        api_key: Clé API
+
+    Returns:
+        Clé API validée
+
+    Raises:
+        HTTPException: Si la clé API est invalide
+    """
+    # TODO: Implémenter la validation stricte des clés API
+    if not api_key or len(api_key) < 32:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Clé API invalide ou manquante"
+        )
+    return api_key
+
+
+# === DÉPENDANCES DE FEATURE FLAGS ===
+
+async def check_feature_flag(
+        feature_name: str,
+        current_user: Optional[User] = Depends(get_current_user_optional)
+) -> bool:
+    """
+    Vérifie si une fonctionnalité est activée pour l'utilisateur
+
+    Args:
+        feature_name: Nom de la fonctionnalité
+        current_user: Utilisateur actuel
+
+    Returns:
+        True si la fonctionnalité est activée
+    """
+    # TODO: Implémenter un système de feature flags
+    # - Flags globaux
+    # - Flags par utilisateur
+    # - Flags par rôle
+    # - Tests A/B
+
+    # Pour l'instant, tout est activé
+    return True
+
+
+# === DÉPENDANCES DE LOCALISATION ===
+
+async def get_user_locale(
+        request: Request,
+        current_user: Optional[User] = Depends(get_current_user_optional)
+) -> str:
+    """
+    Détermine la locale de l'utilisateur
+
+    Args:
+        request: Requête FastAPI
+        current_user: Utilisateur actuel
+
+    Returns:
+        Code de locale (ex: 'fr-FR', 'en-US')
+    """
+    # Priorité :
+    # 1. Préférence utilisateur (si connecté)
+    # 2. Header Accept-Language
+    # 3. Défaut français
+
+    if current_user and hasattr(current_user, 'preferred_locale'):
+        return current_user.preferred_locale
+
+    accept_language = request.headers.get("Accept-Language", "")
+    if "fr" in accept_language.lower():
+        return "fr-FR"
+    elif "en" in accept_language.lower():
+        return "en-US"
+
+    return "fr-FR"  # Défaut français pour Quantum Mastermind

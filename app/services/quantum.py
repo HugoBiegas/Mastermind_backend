@@ -1,765 +1,582 @@
 """
 Service quantique pour Quantum Mastermind
-Implémentation des algorithmes quantiques avec Qiskit
+Implémentation des algorithmes quantiques avec Qiskit 2.0.2
 """
-import time
+import json
+import math
+import random
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# Imports Qiskit 2.0.2 compatibles
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import Aer
+from qiskit.primitives import Sampler
+from qiskit.quantum_info import Statevector
 import numpy as np
-import random
-import math
 
-try:
-    from qiskit import QuantumCircuit, execute, Aer, transpile
-    from qiskit.quantum_info import Statevector
-    from qiskit.extensions import UnitaryGate
-    from qiskit.circuit.library import GroverOperator
-
-    QISKIT_AVAILABLE = True
-except ImportError:
-    QISKIT_AVAILABLE = False
-    print("Qiskit non disponible - Utilisation du simulateur de base")
-
-from app.core.config import quantum_config
-from app.schemas.quantum import (
-    QuantumCircuit as QuantumCircuitSchema,
-    QuantumMeasurement, GroverSearch, QuantumSuperposition,
-    QuantumEntanglement, QuantumResult, MeasurementResult,
-    GroverResult, QuantumMastermindSolution, QuantumHint
+from app.core.config import settings, quantum_config
+from app.models.game import Game, GameParticipation
+from app.models.user import User
+from app.schemas.quantum import QuantumHint, QuantumHintType
+from app.utils.exceptions import (
+    EntityNotFoundError, GameError, QuantumError,
+    ValidationError
 )
-from app.utils.exceptions import QuantumError
 
 
 class QuantumService:
     """Service pour les opérations quantiques"""
 
     def __init__(self):
-        self.backend_name = quantum_config.QISKIT_BACKEND if QISKIT_AVAILABLE else 'simulator'
-        self.backend = None
-        if QISKIT_AVAILABLE:
-            self.backend = Aer.get_backend(self.backend_name)
+        # Configuration du backend quantique
+        self.backend = Aer.get_backend(settings.QISKIT_BACKEND)
+        self.sampler = Sampler()
 
-        # Configuration par défaut
-        self.default_shots = quantum_config.QUANTUM_SHOTS
-        self.max_qubits = quantum_config.MAX_QUBITS
+        # Paramètres par défaut
+        self.default_shots = quantum_config.DEFAULT_SHOTS
+        self.max_qubits = quantum_config.MAX_QUBITS_PER_CIRCUIT
 
-        # Cache des circuits pour optimisation
-        self._circuit_cache = {}
+    # === GÉNÉRATION DE HINTS QUANTIQUES ===
 
-    # === MÉTHODES DE CONFIGURATION ===
-
-    def get_backend_info(self) -> Dict[str, Any]:
-        """Retourne les informations du backend quantique"""
-        if not QISKIT_AVAILABLE:
-            return {
-                'name': 'Basic Simulator',
-                'available': False,
-                'max_qubits': 4,
-                'simulator': True,
-                'error': 'Qiskit non disponible'
-            }
-
-        return {
-            'name': self.backend.name(),
-            'available': True,
-            'max_qubits': self.backend.configuration().n_qubits,
-            'simulator': self.backend.configuration().simulator,
-            'basis_gates': self.backend.configuration().basis_gates,
-            'coupling_map': getattr(self.backend.configuration(), 'coupling_map', None)
-        }
-
-    # === GÉNÉRATION DE SOLUTION QUANTIQUE ===
-
-    async def generate_quantum_mastermind_solution(
-            self,
-            difficulty: str = 'normal',
-            seed: Optional[str] = None
-    ) -> QuantumMastermindSolution:
+    async def generate_quantum_hint(
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        player_id: UUID,
+        hint_type: str = "grover"
+    ) -> QuantumHint:
         """
-        Génère une solution de Mastermind quantique
+        Génère un hint quantique pour aider le joueur
 
         Args:
-            difficulty: Niveau de difficulté
-            seed: Graine pour la reproductibilité
+            db: Session de base de données
+            game_id: ID de la partie
+            player_id: ID du joueur
+            hint_type: Type de hint quantique
 
         Returns:
-            Solution quantique complète
+            Hint quantique généré
+
+        Raises:
+            EntityNotFoundError: Si la partie ou le joueur n'existe pas
+            GameError: Si le hint ne peut pas être généré
         """
-        if seed:
-            random.seed(int(seed, 16) % (2 ** 32))
-            np.random.seed(int(seed, 16) % (2 ** 32))
-
-        # Définition des couleurs selon la difficulté
-        color_sets = {
-            'easy': ['red', 'blue', 'green', 'yellow'],
-            'normal': ['red', 'blue', 'green', 'yellow', 'orange', 'purple'],
-            'hard': ['red', 'blue', 'green', 'yellow', 'orange', 'purple', 'black'],
-            'expert': ['red', 'blue', 'green', 'yellow', 'orange', 'purple', 'black', 'white']
-        }
-
-        colors = color_sets.get(difficulty, color_sets['normal'])
-
-        # Génération de la solution classique
-        classical_solution = [random.choice(colors) for _ in range(4)]
-
-        # Génération de l'encodage quantique
-        quantum_encoding = await self._create_quantum_encoding(classical_solution, colors)
-
-        # Création de la carte d'intrication
-        entanglement_map = await self._create_entanglement_map(difficulty)
-
-        # États de superposition par position
-        superposition_states = await self._create_superposition_states(
-            classical_solution, colors, difficulty
+        # Vérifications préliminaires
+        game, participation = await self._validate_quantum_request(
+            db, game_id, player_id
         )
 
-        return QuantumMastermindSolution(
-            classical_solution=classical_solution,
-            quantum_encoding=quantum_encoding,
-            entanglement_map=entanglement_map,
-            superposition_states=superposition_states,
-            generation_seed=seed or random.randint(0, 2 ** 32 - 1)
-        )
+        # Vérifier que les hints quantiques sont activés
+        if not game.get_setting("quantum_enabled", True):
+            raise GameError("Les fonctionnalités quantiques sont désactivées pour cette partie")
 
-    # === ALGORITHMES QUANTIQUES ===
+        # Calculer le coût
+        hint_cost = self._calculate_hint_cost(hint_type, game.difficulty)
 
-    async def execute_grover_search(
-            self,
-            search_params: GroverSearch
-    ) -> GroverResult:
-        """
-        Exécute l'algorithme de Grover pour la recherche
-
-        Args:
-            search_params: Paramètres de recherche
-
-        Returns:
-            Résultats de la recherche de Grover
-        """
-        start_time = time.time()
+        # Vérifier si le joueur a assez de points (si applicable)
+        # Pour l'instant, on autorise toujours
 
         try:
-            if not QISKIT_AVAILABLE:
-                return await self._simulate_grover_search(search_params)
+            # Générer le hint selon le type
+            if hint_type == "grover":
+                hint_data = await self._generate_grover_hint(game, participation)
+            elif hint_type == "superposition":
+                hint_data = await self._generate_superposition_hint(game, participation)
+            elif hint_type == "entanglement":
+                hint_data = await self._generate_entanglement_hint(game, participation)
+            elif hint_type == "interference":
+                hint_data = await self._generate_interference_hint(game, participation)
+            else:
+                raise ValidationError(f"Type de hint non supporté: {hint_type}")
 
-            # Calcul du nombre optimal d'itérations
-            n_items = search_params.database_size
-            n_targets = len(search_params.target_items)
-            optimal_iterations = int(np.pi * np.sqrt(n_items / n_targets) / 4)
+            # Mettre à jour les statistiques
+            participation.quantum_hints_used += 1
+            await db.commit()
 
-            iterations = search_params.iterations or optimal_iterations
-            n_qubits = int(np.log2(n_items))
+            return QuantumHint(
+                hint_type=QuantumHintType(hint_type),
+                hint_data=hint_data,
+                cost_points=hint_cost,
+                confidence=hint_data.get("confidence", 0.8),
+                quantum_state=hint_data.get("quantum_state"),
+                measurement_results=hint_data.get("measurements", []),
+                description=hint_data.get("description", "Hint quantique généré")
+            )
 
-            # Création du circuit de Grover
+        except Exception as e:
+            raise QuantumError(f"Erreur lors de la génération du hint quantique: {str(e)}")
+
+    # === ALGORITHMES QUANTIQUES SPÉCIFIQUES ===
+
+    async def _generate_grover_hint(
+        self,
+        game: Game,
+        participation: GameParticipation
+    ) -> Dict[str, Any]:
+        """
+        Génère un hint basé sur l'algorithme de Grover
+
+        L'algorithme de Grover permet de rechercher efficacement dans un espace
+        de solutions non structuré. Ici, on l'utilise pour donner des indices
+        sur les couleurs les plus probables.
+        """
+        try:
+            solution = json.loads(game.classical_solution)
+            combination_length = game.combination_length
+            color_count = game.color_count
+
+            # Créer un circuit quantique pour Grover
+            n_qubits = math.ceil(math.log2(color_count))
+            if n_qubits > self.max_qubits:
+                n_qubits = min(4, self.max_qubits)  # Limitation
+
             qc = QuantumCircuit(n_qubits, n_qubits)
 
             # Initialisation en superposition
-            qc.h(range(n_qubits))
-
-            # Opérateur Oracle pour marquer les éléments cibles
-            oracle = self._create_oracle(search_params.target_items, n_qubits)
-
-            # Opérateur de diffusion
-            diffuser = self._create_diffuser(n_qubits)
-
-            # Itérations de Grover
-            for _ in range(iterations):
-                qc.append(oracle, range(n_qubits))
-                qc.append(diffuser, range(n_qubits))
-
-            # Mesure
-            qc.measure_all()
-
-            # Exécution
-            job = execute(qc, self.backend, shots=self.default_shots)
-            result = job.result()
-            counts = result.get_counts(qc)
-
-            # Analyse des résultats
-            found_items = []
-            total_success_prob = 0
-
-            for bitstring, count in counts.items():
-                item_index = int(bitstring, 2)
-                probability = count / self.default_shots
-
-                if item_index in search_params.target_items:
-                    found_items.append(item_index)
-                    total_success_prob += probability
-
-            execution_time = time.time() - start_time
-
-            return GroverResult(
-                found_items=found_items,
-                success_probability=total_success_prob,
-                iterations_performed=iterations,
-                optimal_iterations=optimal_iterations,
-                amplification_factor=total_success_prob / (n_targets / n_items),
-                execution_details={
-                    'circuit_depth': qc.depth(),
-                    'execution_time': execution_time,
-                    'shots_used': self.default_shots,
-                    'measurement_counts': counts
-                }
-            )
-
-        except Exception as e:
-            raise QuantumError(f"Erreur lors de l'exécution de Grover: {str(e)}")
-
-    async def create_quantum_superposition(
-            self,
-            superposition_params: QuantumSuperposition
-    ) -> QuantumResult:
-        """
-        Crée un état de superposition quantique
-
-        Args:
-            superposition_params: Paramètres de superposition
-
-        Returns:
-            Résultat de l'opération quantique
-        """
-        start_time = time.time()
-
-        try:
-            if not QISKIT_AVAILABLE:
-                return await self._simulate_superposition(superposition_params)
-
-            n_qubits = len(superposition_params.qubits)
-            qc = QuantumCircuit(n_qubits, n_qubits)
-
-            # Application des portes Hadamard pour la superposition
-            for i, qubit in enumerate(superposition_params.qubits):
+            for i in range(n_qubits):
                 qc.h(i)
 
-            # Application des poids si spécifiés
-            if superposition_params.weights:
-                # Normalisation des poids en angles de rotation
-                weights = superposition_params.weights
-                for i, weight in enumerate(weights):
-                    if weight != 0.5:  # Éviter les rotations inutiles
-                        angle = 2 * np.arccos(np.sqrt(weight))
-                        qc.ry(angle, i)
+            # Oracle de Grover (simplifié pour la démonstration)
+            # En réalité, on marquerait les états correspondant aux bonnes couleurs
+            target_color = random.choice(solution)  # Hint sur une couleur aléatoire
+
+            # Simulation d'une rotation oracle
+            qc.barrier()
+            if target_color % 2 == 0:  # Condition arbitraire pour la démonstration
+                qc.z(0)
+
+            # Diffuseur (amplification d'amplitude)
+            for i in range(n_qubits):
+                qc.h(i)
+                qc.z(i)
+
+            # Rotation collective
+            qc.h(n_qubits - 1)
+            if n_qubits > 1:
+                qc.cx(range(n_qubits - 1), n_qubits - 1)
+            qc.h(n_qubits - 1)
+
+            for i in range(n_qubits):
+                qc.z(i)
+                qc.h(i)
 
             # Mesure
             qc.measure_all()
 
-            # Exécution
-            job = execute(qc, self.backend, shots=self.default_shots)
+            # Exécution sur le simulateur
+            transpiled_qc = transpile(qc, self.backend)
+            job = self.backend.run(transpiled_qc, shots=self.default_shots)
             result = job.result()
-            counts = result.get_counts(qc)
+            counts = result.get_counts()
 
-            # Calcul des probabilités
-            probabilities = {
-                state: count / self.default_shots
-                for state, count in counts.items()
-            }
+            # Analyser les résultats
+            most_probable_states = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:3]
 
-            execution_time = time.time() - start_time
+            # Convertir en conseils de couleurs
+            suggested_colors = []
+            for state, count in most_probable_states:
+                color_value = int(state, 2) % color_count
+                probability = count / self.default_shots
+                suggested_colors.append({
+                    "color": color_value,
+                    "probability": probability,
+                    "quantum_state": state
+                })
 
-            return QuantumResult(
-                operation_type='superposition',
-                success=True,
-                result_data={
-                    'superposition_created': True,
-                    'qubits_used': n_qubits,
-                    'uniform_superposition': superposition_params.weights is None
-                },
-                measurements=counts,
-                probabilities=probabilities,
-                execution_time=execution_time,
-                shots_used=self.default_shots
-            )
-
-        except Exception as e:
-            raise QuantumError(f"Erreur lors de la création de superposition: {str(e)}")
-
-    async def create_quantum_entanglement(
-            self,
-            entanglement_params: QuantumEntanglement
-    ) -> QuantumResult:
-        """
-        Crée des états intriqués
-
-        Args:
-            entanglement_params: Paramètres d'intrication
-
-        Returns:
-            Résultat de l'opération quantique
-        """
-        start_time = time.time()
-
-        try:
-            if not QISKIT_AVAILABLE:
-                return await self._simulate_entanglement(entanglement_params)
-
-            # Calcul du nombre total de qubits
-            all_qubits = set()
-            for pair in entanglement_params.qubit_pairs:
-                all_qubits.update(pair)
-
-            n_qubits = len(all_qubits)
-            qc = QuantumCircuit(n_qubits, n_qubits)
-
-            # Création des états intriqués selon le type
-            if entanglement_params.entanglement_type == 'bell':
-                for pair in entanglement_params.qubit_pairs:
-                    qc.h(pair[0])
-                    qc.cx(pair[0], pair[1])
-
-            elif entanglement_params.entanglement_type == 'ghz':
-                # État GHZ pour plusieurs qubits
-                qubits = list(all_qubits)
-                qc.h(qubits[0])
-                for i in range(1, len(qubits)):
-                    qc.cx(qubits[0], qubits[i])
-
-            # Mesure
-            qc.measure_all()
-
-            # Exécution
-            job = execute(qc, self.backend, shots=self.default_shots)
-            result = job.result()
-            counts = result.get_counts(qc)
-
-            # Analyse de l'intrication
-            entanglement_fidelity = self._calculate_entanglement_fidelity(
-                counts, entanglement_params.entanglement_type
-            )
-
-            execution_time = time.time() - start_time
-
-            return QuantumResult(
-                operation_type='entanglement',
-                success=True,
-                result_data={
-                    'entanglement_type': entanglement_params.entanglement_type,
-                    'qubit_pairs': entanglement_params.qubit_pairs,
-                    'entanglement_fidelity': entanglement_fidelity
-                },
-                measurements=counts,
-                probabilities={
-                    state: count / self.default_shots
-                    for state, count in counts.items()
-                },
-                execution_time=execution_time,
-                shots_used=self.default_shots
-            )
-
-        except Exception as e:
-            raise QuantumError(f"Erreur lors de la création d'intrication: {str(e)}")
-
-    async def perform_quantum_measurement(
-            self,
-            measurement_params: QuantumMeasurement
-    ) -> MeasurementResult:
-        """
-        Effectue une mesure quantique
-
-        Args:
-            measurement_params: Paramètres de mesure
-
-        Returns:
-            Résultat de la mesure
-        """
-        start_time = time.time()
-
-        try:
-            if not QISKIT_AVAILABLE:
-                return await self._simulate_measurement(measurement_params)
-
-            circuit = measurement_params.circuit
-            qubit_index = measurement_params.qubit_index
-            basis = measurement_params.basis
-
-            # Conversion du schéma en circuit Qiskit
-            qc = self._schema_to_qiskit_circuit(circuit)
-
-            # Application de la base de mesure
-            if basis == 'x':
-                qc.h(qubit_index)
-            elif basis == 'y':
-                qc.sdg(qubit_index)
-                qc.h(qubit_index)
-
-            # Mesure du qubit spécifique
-            qc.measure(qubit_index, qubit_index)
-
-            # Exécution
-            job = execute(qc, self.backend, shots=self.default_shots)
-            result = job.result()
-            counts = result.get_counts(qc)
-
-            # Analyse des résultats
-            measured_0 = counts.get('0', 0)
-            measured_1 = counts.get('1', 0)
-
-            probability_0 = measured_0 / self.default_shots
-            probability_1 = measured_1 / self.default_shots
-
-            # Détermination du résultat de mesure
-            measured_value = 1 if probability_1 > probability_0 else 0
-            probability = probability_1 if measured_value == 1 else probability_0
-
-            execution_time = time.time() - start_time
-
-            return MeasurementResult(
-                measured_value=measured_value,
-                probability=probability,
-                measurement_basis=basis,
-                collapse_occurred=True,
-                state_before={'superposition': True},
-                state_after={'classical': measured_value}
-            )
-
-        except Exception as e:
-            raise QuantumError(f"Erreur lors de la mesure quantique: {str(e)}")
-
-    # === MÉTHODES POUR LE MASTERMIND QUANTIQUE ===
-
-    async def analyze_quantum_attempt(
-            self,
-            solution: QuantumMastermindSolution,
-            attempt: List[str]
-    ) -> Dict[str, Any]:
-        """
-        Analyse une tentative avec les données quantiques
-
-        Args:
-            solution: Solution quantique
-            attempt: Tentative du joueur
-
-        Returns:
-            Analyse quantique de la tentative
-        """
-        try:
-            # Calcul des probabilités pour chaque position
-            position_probabilities = {}
-
-            for pos in range(4):
-                attempted_color = attempt[pos]
-                correct_color = solution.classical_solution[pos]
-
-                # Probabilité basée sur la superposition
-                if pos in solution.superposition_states:
-                    colors_in_superposition = solution.superposition_states[pos]
-                    if attempted_color in colors_in_superposition:
-                        prob = 1.0 / len(colors_in_superposition)
-                    else:
-                        prob = 0.0
-                else:
-                    prob = 1.0 if attempted_color == correct_color else 0.0
-
-                position_probabilities[pos] = prob
-
-            # Calcul de l'avantage quantique
-            quantum_advantage = sum(position_probabilities.values()) / 4
-
-            # Suggestions d'amélioration
-            suggestions = []
-            for pos, prob in position_probabilities.items():
-                if prob < 0.5:
-                    if pos in solution.superposition_states:
-                        suggestions.append(
-                            f"Position {pos}: Considérez les couleurs en superposition"
-                        )
-                    else:
-                        suggestions.append(
-                            f"Position {pos}: Mesure quantique recommandée"
-                        )
+            hint_message = f"L'algorithme de Grover suggère ces couleurs : {[c['color'] for c in suggested_colors[:2]]}"
 
             return {
-                'position_probabilities': position_probabilities,
-                'quantum_advantage': quantum_advantage,
-                'suggestions': suggestions,
-                'entanglement_detected': bool(solution.entanglement_map),
-                'superposition_positions': list(solution.superposition_states.keys())
+                "type": "grover_search",
+                "suggested_colors": suggested_colors,
+                "description": hint_message,
+                "confidence": 0.75,
+                "quantum_state": str(qc),
+                "measurements": counts,
+                "algorithm_info": {
+                    "name": "Algorithme de Grover",
+                    "description": "Recherche quantique dans l'espace des solutions",
+                    "iterations": 1,
+                    "qubits_used": n_qubits
+                }
             }
 
         except Exception as e:
-            raise QuantumError(f"Erreur lors de l'analyse quantique: {str(e)}")
+            raise QuantumError(f"Erreur dans l'algorithme de Grover: {str(e)}")
 
-    async def generate_quantum_hint(
-            self,
-            solution: QuantumMastermindSolution,
-            hint_type: str,
-            position: Optional[int] = None
-    ) -> QuantumHint:
+    async def _generate_superposition_hint(
+        self,
+        game: Game,
+        participation: GameParticipation
+    ) -> Dict[str, Any]:
         """
-        Génère un indice quantique
+        Génère un hint basé sur la superposition quantique
 
-        Args:
-            solution: Solution quantique
-            hint_type: Type d'indice
-            position: Position pour l'indice
-
-        Returns:
-            Indice quantique
+        Utilise la superposition pour explorer plusieurs possibilités simultanément
         """
         try:
-            if hint_type == 'grover' and position is not None:
-                # Utilise Grover pour trouver la couleur
-                colors = ['red', 'blue', 'green', 'yellow', 'orange', 'purple']
-                target_color = solution.classical_solution[position]
-                target_index = colors.index(target_color)
+            solution = json.loads(game.classical_solution)
+            combination_length = game.combination_length
 
-                grover_params = GroverSearch(
-                    database_size=len(colors),
-                    target_items=[target_index]
-                )
+            # Créer un circuit en superposition
+            n_qubits = min(combination_length, self.max_qubits)
+            qc = QuantumCircuit(n_qubits, n_qubits)
 
-                grover_result = await self.execute_grover_search(grover_params)
+            # Mettre tous les qubits en superposition
+            for i in range(n_qubits):
+                qc.h(i)
 
-                confidence = grover_result.success_probability
+            # Ajouter des rotations basées sur la solution (sans la révéler complètement)
+            for i, color in enumerate(solution[:n_qubits]):
+                # Rotation conditionnelle qui encode subtilement l'information
+                angle = (color / game.color_count) * np.pi / 2
+                qc.ry(angle, i)
 
-                return QuantumHint(
-                    hint_type=hint_type,
-                    position=position,
-                    revealed_info={'color': target_color, 'method': 'grover'},
-                    confidence=confidence,
-                    quantum_cost=quantum_config.GROVER_HINT_POINTS
-                )
+            # Mesure
+            qc.measure_all()
 
-            elif hint_type == 'measurement':
-                # Mesure quantique directe
-                if position is None:
-                    position = random.randint(0, 3)
+            # Exécution
+            transpiled_qc = transpile(qc, self.backend)
+            job = self.backend.run(transpiled_qc, shots=self.default_shots // 2)
+            result = job.result()
+            counts = result.get_counts()
 
-                revealed_color = solution.classical_solution[position]
-                confidence = 0.9  # Mesure directe haute confiance
+            # Analyser la distribution des états
+            position_hints = []
+            for i in range(n_qubits):
+                zeros = sum(count for state, count in counts.items() if state[-(i+1)] == '0')
+                ones = sum(count for state, count in counts.items() if state[-(i+1)] == '1')
+                total = zeros + ones
 
-                return QuantumHint(
-                    hint_type=hint_type,
-                    position=position,
-                    revealed_info={'color': revealed_color, 'method': 'measurement'},
-                    confidence=confidence,
-                    quantum_cost=quantum_config.MEASUREMENT_COST
-                )
+                if total > 0:
+                    probability_one = ones / total
+                    if probability_one > 0.6:
+                        hint = "Cette position tend vers les couleurs paires"
+                    elif probability_one < 0.4:
+                        hint = "Cette position tend vers les couleurs impaires"
+                    else:
+                        hint = "Cette position est en superposition équilibrée"
 
-            elif hint_type == 'superposition':
-                # Révèle les états de superposition
-                pos = position or random.choice(list(solution.superposition_states.keys()))
-                superposition_colors = solution.superposition_states.get(pos, [])
+                    position_hints.append({
+                        "position": i,
+                        "hint": hint,
+                        "probability_distribution": {"0": zeros/total, "1": ones/total}
+                    })
 
-                return QuantumHint(
-                    hint_type=hint_type,
-                    position=pos,
-                    revealed_info={'possible_colors': superposition_colors},
-                    confidence=0.8,
-                    quantum_cost=quantum_config.SUPERPOSITION_POINTS
-                )
-
-            else:
-                raise QuantumError(f"Type d'indice non supporté: {hint_type}")
-
-        except Exception as e:
-            raise QuantumError(f"Erreur lors de la génération d'indice: {str(e)}")
-
-    # === MÉTHODES PRIVÉES ===
-
-    async def _create_quantum_encoding(
-            self,
-            solution: List[str],
-            available_colors: List[str]
-    ) -> Dict[str, Any]:
-        """Crée l'encodage quantique de la solution"""
-        # Encodage des couleurs en qubits
-        color_to_qubit = {color: i for i, color in enumerate(available_colors)}
-
-        encoding = {
-            'color_map': color_to_qubit,
-            'position_encodings': {},
-            'quantum_gates': []
-        }
-
-        for pos, color in enumerate(solution):
-            qubit_value = color_to_qubit[color]
-            encoding['position_encodings'][pos] = {
-                'color': color,
-                'qubit_representation': format(qubit_value, '03b'),
-                'amplitude': 1.0
+            return {
+                "type": "superposition",
+                "position_hints": position_hints,
+                "description": "Analyse par superposition quantique des positions",
+                "confidence": 0.65,
+                "quantum_state": str(qc),
+                "measurements": counts,
+                "algorithm_info": {
+                    "name": "Superposition Quantique",
+                    "description": "Exploration simultanée de multiples états",
+                    "qubits_used": n_qubits
+                }
             }
 
-        return encoding
+        except Exception as e:
+            raise QuantumError(f"Erreur dans l'algorithme de superposition: {str(e)}")
 
-    async def _create_entanglement_map(self, difficulty: str) -> Dict[int, List[int]]:
-        """Crée la carte d'intrication selon la difficulté"""
-        entanglement_map = {}
+    async def _generate_entanglement_hint(
+        self,
+        game: Game,
+        participation: GameParticipation
+    ) -> Dict[str, Any]:
+        """
+        Génère un hint basé sur l'intrication quantique
 
-        if difficulty in ['hard', 'expert']:
-            # Intrication entre positions adjacentes
-            entanglement_map[0] = [1]
-            entanglement_map[2] = [3]
+        Utilise l'intrication pour révéler des corrélations entre positions
+        """
+        try:
+            solution = json.loads(game.classical_solution)
+            combination_length = min(game.combination_length, self.max_qubits // 2)
 
-        if difficulty == 'expert':
-            # Intrication croisée
-            entanglement_map[1] = [2]
+            if combination_length < 2:
+                raise QuantumError("L'intrication nécessite au moins 2 positions")
 
-        return entanglement_map
+            # Créer un circuit avec intrication
+            qc = QuantumCircuit(combination_length * 2, combination_length * 2)
 
-    async def _create_superposition_states(
-            self,
-            solution: List[str],
-            available_colors: List[str],
-            difficulty: str
-    ) -> Dict[int, List[str]]:
-        """Crée les états de superposition par position"""
-        superposition_states = {}
+            # Créer des paires intriquées
+            for i in range(combination_length):
+                qubit1 = i * 2
+                qubit2 = i * 2 + 1
 
-        # Probabilité de superposition selon la difficulté
-        superposition_prob = {
-            'easy': 0.1,
-            'normal': 0.2,
-            'hard': 0.3,
-            'expert': 0.4
-        }.get(difficulty, 0.2)
+                # État de Bell
+                qc.h(qubit1)
+                qc.cx(qubit1, qubit2)
 
-        for pos in range(4):
-            if random.random() < superposition_prob:
-                # Cette position est en superposition
-                n_colors = random.randint(2, min(3, len(available_colors)))
-                colors_in_superposition = random.sample(available_colors, n_colors)
+                # Rotation basée sur la solution
+                if i < len(solution):
+                    color = solution[i]
+                    angle = (color / game.color_count) * np.pi
+                    qc.rz(angle, qubit1)
 
-                # S'assurer que la vraie couleur est dans la superposition
-                if solution[pos] not in colors_in_superposition:
-                    colors_in_superposition[0] = solution[pos]
+            # Mesure
+            qc.measure_all()
 
-                superposition_states[pos] = colors_in_superposition
+            # Exécution
+            transpiled_qc = transpile(qc, self.backend)
+            job = self.backend.run(transpiled_qc, shots=self.default_shots // 3)
+            result = job.result()
+            counts = result.get_counts()
 
-        return superposition_states
+            # Analyser les corrélations
+            correlations = []
+            for i in range(combination_length):
+                qubit1_pos = i * 2
+                qubit2_pos = i * 2 + 1
 
-    def _create_oracle(self, target_items: List[int], n_qubits: int):
-        """Crée l'opérateur Oracle pour Grover"""
-        if not QISKIT_AVAILABLE:
-            return None
+                same_state_count = 0
+                total_count = 0
 
-        oracle_qc = QuantumCircuit(n_qubits)
+                for state, count in counts.items():
+                    if len(state) > max(qubit1_pos, qubit2_pos):
+                        bit1 = state[-(qubit1_pos+1)]
+                        bit2 = state[-(qubit2_pos+1)]
+                        total_count += count
+                        if bit1 == bit2:
+                            same_state_count += count
 
-        for target in target_items:
-            # Marquage des états cibles
-            target_binary = format(target, f'0{n_qubits}b')
+                if total_count > 0:
+                    correlation = same_state_count / total_count
+                    if correlation > 0.7:
+                        hint = "Ces positions sont fortement corrélées (couleurs similaires)"
+                    elif correlation < 0.3:
+                        hint = "Ces positions sont anti-corrélées (couleurs opposées)"
+                    else:
+                        hint = "Corrélation faible entre ces positions"
 
-            # Application de X aux qubits qui doivent être 0
-            for i, bit in enumerate(target_binary):
-                if bit == '0':
-                    oracle_qc.x(i)
+                    correlations.append({
+                        "position": i,
+                        "correlation_strength": correlation,
+                        "hint": hint
+                    })
 
-            # Application de la porte Z multi-contrôlée
-            if n_qubits == 1:
-                oracle_qc.z(0)
-            else:
-                oracle_qc.mcz(list(range(n_qubits - 1)), n_qubits - 1)
+            return {
+                "type": "entanglement",
+                "correlations": correlations,
+                "description": "Analyse des corrélations par intrication quantique",
+                "confidence": 0.70,
+                "quantum_state": str(qc),
+                "measurements": counts,
+                "algorithm_info": {
+                    "name": "Intrication Quantique",
+                    "description": "Révélation de corrélations cachées entre positions",
+                    "entangled_pairs": combination_length
+                }
+            }
 
-            # Restauration
-            for i, bit in enumerate(target_binary):
-                if bit == '0':
-                    oracle_qc.x(i)
+        except Exception as e:
+            raise QuantumError(f"Erreur dans l'algorithme d'intrication: {str(e)}")
 
-        return oracle_qc.to_gate()
+    async def _generate_interference_hint(
+        self,
+        game: Game,
+        participation: GameParticipation
+    ) -> Dict[str, Any]:
+        """
+        Génère un hint basé sur l'interférence quantique
 
-    def _create_diffuser(self, n_qubits: int):
-        """Crée l'opérateur de diffusion pour Grover"""
-        if not QISKIT_AVAILABLE:
-            return None
+        Utilise les interférences pour amplifier les bonnes réponses
+        """
+        try:
+            solution = json.loads(game.classical_solution)
 
-        diffuser_qc = QuantumCircuit(n_qubits)
+            # Circuit d'interférence simple
+            n_qubits = min(3, self.max_qubits)  # Limiter pour la démonstration
+            qc = QuantumCircuit(n_qubits, n_qubits)
 
-        # 2|s><s| - I
-        diffuser_qc.h(range(n_qubits))
-        diffuser_qc.x(range(n_qubits))
+            # Superposition initiale
+            for i in range(n_qubits):
+                qc.h(i)
 
-        if n_qubits == 1:
-            diffuser_qc.z(0)
-        else:
-            diffuser_qc.mcz(list(range(n_qubits - 1)), n_qubits - 1)
+            # Interférence basée sur la solution
+            for i, color in enumerate(solution[:n_qubits]):
+                # Phase qui dépend de la couleur
+                phase = (color / game.color_count) * 2 * np.pi
+                qc.p(phase, i)
 
-        diffuser_qc.x(range(n_qubits))
-        diffuser_qc.h(range(n_qubits))
+            # Interférence entre qubits
+            for i in range(n_qubits - 1):
+                qc.cx(i, i + 1)
+                qc.h(i)
 
-        return diffuser_qc.to_gate()
+            # Mesure
+            qc.measure_all()
 
-    def _calculate_entanglement_fidelity(
-            self,
-            counts: Dict[str, int],
-            entanglement_type: str
-    ) -> float:
-        """Calcule la fidélité de l'intrication"""
-        total_shots = sum(counts.values())
+            # Exécution
+            transpiled_qc = transpile(qc, self.backend)
+            job = self.backend.run(transpiled_qc, shots=self.default_shots)
+            result = job.result()
+            counts = result.get_counts()
 
-        if entanglement_type == 'bell':
-            # Pour un état de Bell, on s'attend à voir seulement |00> et |11>
-            bell_counts = counts.get('00', 0) + counts.get('11', 0)
-            return bell_counts / total_shots
+            # Analyser les patterns d'interférence
+            interference_patterns = []
+            most_common = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:3]
 
-        return 0.5  # Valeur par défaut
+            for state, count in most_common:
+                probability = count / self.default_shots
+                pattern_info = {
+                    "quantum_state": state,
+                    "probability": probability,
+                    "interpretation": self._interpret_interference_pattern(state, game.color_count)
+                }
+                interference_patterns.append(pattern_info)
 
-    def _schema_to_qiskit_circuit(self, circuit_schema) -> 'QuantumCircuit':
-        """Convertit un schéma de circuit en circuit Qiskit"""
-        if not QISKIT_AVAILABLE:
-            raise QuantumError("Qiskit non disponible")
+            hint_message = "Les interférences quantiques révèlent des patterns dans la solution"
 
-        qc = QuantumCircuit(circuit_schema.num_qubits, circuit_schema.num_qubits)
+            return {
+                "type": "interference",
+                "patterns": interference_patterns,
+                "description": hint_message,
+                "confidence": 0.60,
+                "quantum_state": str(qc),
+                "measurements": counts,
+                "algorithm_info": {
+                    "name": "Interférence Quantique",
+                    "description": "Amplification des bonnes réponses par interférence",
+                    "qubits_used": n_qubits
+                }
+            }
 
-        for gate in circuit_schema.gates:
-            gate_type = gate['type']
-            qubits = gate['qubits']
+        except Exception as e:
+            raise QuantumError(f"Erreur dans l'algorithme d'interférence: {str(e)}")
 
-            if gate_type == 'H':
-                qc.h(qubits[0])
-            elif gate_type == 'X':
-                qc.x(qubits[0])
-            elif gate_type == 'CNOT':
-                qc.cx(qubits[0], qubits[1])
-            # Ajouter d'autres portes selon les besoins
+    # === MÉTHODES UTILITAIRES ===
 
-        return qc
+    def _interpret_interference_pattern(self, state: str, color_count: int) -> str:
+        """Interprète un pattern d'interférence"""
+        # Conversion basique du state binaire en suggestion
+        binary_value = int(state, 2)
+        suggested_color = binary_value % color_count
 
-    # === MÉTHODES DE SIMULATION (FALLBACK) ===
+        patterns = [
+            f"Pattern suggère la couleur {suggested_color}",
+            f"Interférence constructive autour de la couleur {suggested_color}",
+            f"Amplitude maximale pour la couleur {suggested_color}"
+        ]
 
-    async def _simulate_grover_search(self, search_params: GroverSearch) -> GroverResult:
-        """Simulation basique de Grover sans Qiskit"""
-        # Simulation probabiliste
-        target_prob = 0.8  # Probabilité de succès simulée
+        return random.choice(patterns)
 
-        return GroverResult(
-            found_items=search_params.target_items,
-            success_probability=target_prob,
-            iterations_performed=3,
-            optimal_iterations=3,
-            amplification_factor=target_prob / (len(search_params.target_items) / search_params.database_size),
-            execution_details={'simulated': True}
-        )
+    def _calculate_hint_cost(self, hint_type: str, difficulty) -> int:
+        """Calcule le coût en points d'un hint"""
+        base_costs = {
+            "grover": 50,
+            "superposition": 25,
+            "entanglement": 35,
+            "interference": 30
+        }
 
-    async def _simulate_superposition(self, params: QuantumSuperposition) -> QuantumResult:
-        """Simulation de superposition"""
-        return QuantumResult(
-            operation_type='superposition',
-            success=True,
-            result_data={'simulated': True},
-            execution_time=0.1,
-            shots_used=1024
-        )
+        base_cost = base_costs.get(hint_type, 25)
 
-    async def _simulate_entanglement(self, params: QuantumEntanglement) -> QuantumResult:
-        """Simulation d'intrication"""
-        return QuantumResult(
-            operation_type='entanglement',
-            success=True,
-            result_data={'simulated': True},
-            execution_time=0.1,
-            shots_used=1024
-        )
+        # Multiplicateur selon la difficulté
+        difficulty_multipliers = {
+            "easy": 0.5,
+            "normal": 1.0,
+            "hard": 1.5,
+            "expert": 2.0
+        }
 
-    async def _simulate_measurement(self, params: QuantumMeasurement) -> MeasurementResult:
-        """Simulation de mesure"""
-        measured_value = random.randint(0, 1)
-        return MeasurementResult(
-            measured_value=measured_value,
-            probability=0.5,
-            measurement_basis=params.basis,
-            collapse_occurred=True
-        )
+        multiplier = difficulty_multipliers.get(str(difficulty), 1.0)
+        return int(base_cost * multiplier)
+
+    async def _validate_quantum_request(
+        self,
+        db: AsyncSession,
+        game_id: UUID,
+        player_id: UUID
+    ) -> Tuple[Game, GameParticipation]:
+        """Valide une requête quantique"""
+
+        # Récupérer la partie
+        from app.services.game import game_service
+        game = await game_service._get_game_with_participations(db, game_id)
+        if not game:
+            raise EntityNotFoundError("Partie non trouvée", "Game", game_id)
+
+        # Vérifier que la partie est active
+        if not game.is_active:
+            raise GameError("La partie n'est pas active")
+
+        # Récupérer la participation
+        participation = await game_service._get_participation(db, game_id, player_id)
+        if not participation:
+            raise EntityNotFoundError("Participation non trouvée")
+
+        return game, participation
+
+    # === MÉTHODES DE DIAGNOSTIC ===
+
+    async def test_quantum_backend(self) -> Dict[str, Any]:
+        """Teste le backend quantique"""
+        try:
+            # Circuit de test simple
+            qc = QuantumCircuit(2, 2)
+            qc.h(0)
+            qc.cx(0, 1)
+            qc.measure_all()
+
+            # Exécution
+            transpiled_qc = transpile(qc, self.backend)
+            job = self.backend.run(transpiled_qc, shots=100)
+            result = job.result()
+            counts = result.get_counts()
+
+            return {
+                "status": "healthy",
+                "backend": str(self.backend),
+                "test_results": counts,
+                "qiskit_version": "2.0.2",
+                "available_algorithms": ["grover", "superposition", "entanglement", "interference"]
+            }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "backend": str(self.backend)
+            }
+
+    def get_quantum_info(self) -> Dict[str, Any]:
+        """Retourne les informations sur les capacités quantiques"""
+        return {
+            "backend": settings.QISKIT_BACKEND,
+            "max_qubits": self.max_qubits,
+            "default_shots": self.default_shots,
+            "supported_hints": [
+                {
+                    "type": "grover",
+                    "name": "Algorithme de Grover",
+                    "description": "Recherche quantique optimisée",
+                    "cost": 50
+                },
+                {
+                    "type": "superposition",
+                    "name": "Superposition Quantique",
+                    "description": "Exploration d'états multiples",
+                    "cost": 25
+                },
+                {
+                    "type": "entanglement",
+                    "name": "Intrication Quantique",
+                    "description": "Révélation de corrélations",
+                    "cost": 35
+                },
+                {
+                    "type": "interference",
+                    "name": "Interférence Quantique",
+                    "description": "Amplification de patterns",
+                    "cost": 30
+                }
+            ]
+        }
 
 
-# Instance globale du service
+# Instance globale du service quantique
 quantum_service = QuantumService()

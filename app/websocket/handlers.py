@@ -11,13 +11,15 @@ from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.services.auth import auth_service
 from app.services.game import game_service
 from app.services.quantum import quantum_service
 from app.websocket.manager import (
     websocket_manager, WebSocketMessage, EventType
 )
 from app.utils.exceptions import (
-    WebSocketMessageError, GameError, EntityNotFoundError
+    WebSocketMessageError, GameError, EntityNotFoundError,
+    AuthenticationError
 )
 
 
@@ -26,15 +28,36 @@ class WebSocketMessageHandler:
 
     def __init__(self):
         self.handlers = {
+            # Authentification
             EventType.AUTHENTICATE: self._handle_authenticate,
+
+            # Gestion des rooms
             EventType.JOIN_GAME_ROOM: self._handle_join_game_room,
             EventType.LEAVE_GAME_ROOM: self._handle_leave_game_room,
+
+            # Chat
             EventType.CHAT_MESSAGE: self._handle_chat_message,
+
+            # Système
             EventType.HEARTBEAT: self._handle_heartbeat,
+
+            # Gameplay (handlers personnalisés)
             "make_attempt": self._handle_make_attempt,
             "get_quantum_hint": self._handle_get_quantum_hint,
             "start_game": self._handle_start_game,
             "get_game_state": self._handle_get_game_state,
+            "pause_game": self._handle_pause_game,
+            "resume_game": self._handle_resume_game,
+            "surrender_game": self._handle_surrender_game,
+
+            # Invitations et social
+            "invite_player": self._handle_invite_player,
+            "accept_invitation": self._handle_accept_invitation,
+            "decline_invitation": self._handle_decline_invitation,
+
+            # Spectateur
+            "watch_game": self._handle_watch_game,
+            "unwatch_game": self._handle_unwatch_game,
         }
 
     async def handle_message(
@@ -60,6 +83,9 @@ class WebSocketMessageHandler:
             if not message_type:
                 raise WebSocketMessageError("Type de message manquant")
 
+            # Mise à jour du heartbeat
+            await websocket_manager.update_heartbeat(connection_id)
+
             # Recherche du handler approprié
             handler = self.handlers.get(message_type)
             if not handler:
@@ -71,10 +97,12 @@ class WebSocketMessageHandler:
 
         except json.JSONDecodeError:
             await self._send_error(connection_id, "Message JSON invalide")
+        except WebSocketMessageError as e:
+            await self._send_error(connection_id, str(e))
         except Exception as e:
             await self._send_error(connection_id, f"Erreur de traitement: {str(e)}")
 
-    # === HANDLERS DE MESSAGES ===
+    # === HANDLERS DE SYSTÈME ===
 
     async def _handle_authenticate(
             self,
@@ -82,7 +110,7 @@ class WebSocketMessageHandler:
             data: Dict[str, Any],
             db: AsyncSession
     ) -> None:
-        """Gère l'authentification d'une connexion"""
+        """Gère l'authentification d'une connexion WebSocket"""
         token = data.get("token")
         if not token:
             await self._send_error(connection_id, "Token manquant")
@@ -92,8 +120,40 @@ class WebSocketMessageHandler:
             connection_id, token, db
         )
 
-        if not success:
+        if success:
+            # Récupérer les informations de connexion
+            connection_info = websocket_manager.get_connection_info(connection_id)
+
+            success_message = WebSocketMessage(
+                type=EventType.AUTHENTICATION_SUCCESS,
+                data={
+                    "user_id": connection_info.get("user_id"),
+                    "username": connection_info.get("username"),
+                    "authenticated_at": connection_info.get("connected_at")
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, success_message)
+        else:
             await self._send_error(connection_id, "Authentification échouée")
+
+    async def _handle_heartbeat(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère les pings de heartbeat"""
+        response = WebSocketMessage(
+            type=EventType.HEARTBEAT,
+            data={
+                "pong": True,
+                "timestamp": data.get("timestamp"),
+                "server_timestamp": time.time()
+            }
+        )
+        await websocket_manager.send_to_connection(connection_id, response)
+
+    # === HANDLERS DE GAME ROOM ===
 
     async def _handle_join_game_room(
             self,
@@ -107,20 +167,39 @@ class WebSocketMessageHandler:
             await self._send_error(connection_id, "ID de room manquant")
             return
 
-        # Vérification que la partie existe
-        try:
-            if room_id.startswith("game_"):
-                game_id = UUID(room_id.replace("game_", ""))
-                game_state = await game_service.get_game_state(db, game_id)
-                if not game_state:
-                    await self._send_error(connection_id, "Partie non trouvée")
-                    return
-        except (ValueError, EntityNotFoundError):
-            await self._send_error(connection_id, "Partie invalide")
+        # Vérifier que la connexion est authentifiée
+        if not await self._require_authentication(connection_id):
             return
 
+        # Rejoindre la room
         success = await websocket_manager.join_game_room(connection_id, room_id)
-        if not success:
+
+        if success:
+            # Envoyer les informations de la room
+            room_info = await websocket_manager.get_room_info(room_id)
+
+            response = WebSocketMessage(
+                type=EventType.JOIN_GAME_ROOM,
+                data={
+                    "room_id": room_id,
+                    "success": True,
+                    "room_info": room_info
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, response)
+
+            # Charger l'état du jeu si il existe
+            try:
+                game_state = await game_service.get_game_state(db, UUID(room_id))
+                if game_state:
+                    state_message = WebSocketMessage(
+                        type=EventType.GAME_STATE_UPDATE,
+                        data=game_state
+                    )
+                    await websocket_manager.send_to_connection(connection_id, state_message)
+            except:
+                pass  # Pas grave si le jeu n'existe pas encore
+        else:
             await self._send_error(connection_id, "Impossible de rejoindre la room")
 
     async def _handle_leave_game_room(
@@ -135,70 +214,18 @@ class WebSocketMessageHandler:
             await self._send_error(connection_id, "ID de room manquant")
             return
 
-        await websocket_manager.leave_game_room(connection_id, room_id)
+        success = await websocket_manager.leave_game_room(connection_id, room_id)
 
-    async def _handle_chat_message(
-            self,
-            connection_id: str,
-            data: Dict[str, Any],
-            db: AsyncSession
-    ) -> None:
-        """Gère les messages de chat"""
-        connection = websocket_manager.connections.get(connection_id)
-        if not connection or not connection.is_authenticated:
-            await self._send_error(connection_id, "Non authentifié")
-            return
-
-        message_text = data.get("message", "").strip()
-        room_id = data.get("room_id")
-
-        if not message_text or not room_id:
-            await self._send_error(connection_id, "Message ou room_id manquant")
-            return
-
-        # Validation de la longueur du message
-        if len(message_text) > 500:
-            await self._send_error(connection_id, "Message trop long")
-            return
-
-        # Filtrage basique des messages
-        if self._is_message_inappropriate(message_text):
-            await self._send_error(connection_id, "Message inapproprié")
-            return
-
-        # Diffusion du message dans la room
-        chat_message = WebSocketMessage(
-            type=EventType.CHAT_BROADCAST,
+        response = WebSocketMessage(
+            type=EventType.LEAVE_GAME_ROOM,
             data={
                 "room_id": room_id,
-                "user_id": str(connection.user_id),
-                "username": connection.username,
-                "message": message_text,
-                "timestamp": data.get("timestamp")
+                "success": success
             }
         )
+        await websocket_manager.send_to_connection(connection_id, response)
 
-        await websocket_manager.send_to_room(room_id, chat_message, exclude_user_id=connection.user_id)
-
-    async def _handle_heartbeat(
-            self,
-            connection_id: str,
-            data: Dict[str, Any],
-            db: AsyncSession
-    ) -> None:
-        """Gère les heartbeats de connexion"""
-        connection = websocket_manager.connections.get(connection_id)
-        if connection:
-            import time
-            connection.last_heartbeat = time.time()
-
-        # Réponse heartbeat
-        response = WebSocketMessage(
-            type=EventType.HEARTBEAT,
-            data={"status": "alive", "server_time": time.time()}
-        )
-
-        await websocket_manager._send_to_connection(connection_id, response)
+    # === HANDLERS DE GAMEPLAY ===
 
     async def _handle_make_attempt(
             self,
@@ -206,69 +233,62 @@ class WebSocketMessageHandler:
             data: Dict[str, Any],
             db: AsyncSession
     ) -> None:
-        """Gère les tentatives de jeu"""
-        connection = websocket_manager.connections.get(connection_id)
-        if not connection or not connection.is_authenticated:
-            await self._send_error(connection_id, "Non authentifié")
+        """Gère une tentative de jeu"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        game_id = data.get("game_id")
+        combination = data.get("combination")
+
+        if not game_id or not combination:
+            await self._send_error(connection_id, "Données de tentative manquantes")
             return
 
         try:
-            game_id = UUID(data.get("game_id"))
-            guess = data.get("guess")
-            use_quantum = data.get("use_quantum_measurement", False)
-            measured_position = data.get("measured_position")
-
-            if not guess or len(guess) != 4:
-                await self._send_error(connection_id, "Tentative invalide")
+            # Récupérer l'utilisateur
+            user_id = await self._get_user_id(connection_id)
+            if not user_id:
+                await self._send_error(connection_id, "Utilisateur non trouvé")
                 return
 
-            # Création de l'objet tentative
-            from app.schemas.game import AttemptCreate
-            attempt_data = AttemptCreate(
-                guess=guess,
-                use_quantum_measurement=use_quantum,
-                measured_position=measured_position
+            # Traiter la tentative
+            result = await game_service.make_attempt_websocket(
+                db, UUID(game_id), user_id, combination
             )
 
-            # Exécution de la tentative
-            result = await game_service.make_attempt(
-                db, game_id, connection.user_id, attempt_data
-            )
-
-            # Envoi du résultat au joueur
-            attempt_result = WebSocketMessage(
+            # Envoyer le résultat au joueur
+            response = WebSocketMessage(
                 type=EventType.ATTEMPT_RESULT,
-                data={
-                    "game_id": str(game_id),
-                    "player_id": str(connection.user_id),
-                    **result
-                }
+                data=result
             )
+            await websocket_manager.send_to_connection(connection_id, response)
 
-            await websocket_manager._send_to_connection(connection_id, attempt_result)
-
-            # Notification aux autres joueurs
-            attempt_notification = WebSocketMessage(
+            # Broadcaster la tentative aux autres joueurs de la room
+            attempt_broadcast = WebSocketMessage(
                 type=EventType.ATTEMPT_MADE,
                 data={
-                    "game_id": str(game_id),
-                    "player_id": str(connection.user_id),
-                    "username": connection.username,
-                    "attempt_number": result["attempt_number"],
-                    "is_correct": result["is_correct"]
+                    "game_id": game_id,
+                    "player_id": str(user_id),
+                    "attempt_number": result.get("attempt_number"),
+                    "black_pegs": result.get("black_pegs"),
+                    "white_pegs": result.get("white_pegs"),
+                    "is_solution": result.get("is_solution", False)
                 }
             )
-
-            room_id = f"game_{game_id}"
-            await websocket_manager.send_to_room(
-                room_id, attempt_notification, exclude_user_id=connection.user_id
+            await websocket_manager.broadcast_to_room(
+                game_id, attempt_broadcast, exclude_connection=connection_id
             )
 
-            # Si la partie est terminée, diffuser l'événement
-            if result["is_correct"] or result["remaining_attempts"] == 0:
-                await self._handle_game_end(db, game_id, connection.user_id, result["is_correct"])
+            # Si la partie est terminée, envoyer l'état final
+            if result.get("game_finished"):
+                final_state = await game_service.get_game_state(db, UUID(game_id))
+                final_message = WebSocketMessage(
+                    type=EventType.GAME_FINISHED,
+                    data=final_state
+                )
+                await websocket_manager.broadcast_to_room(game_id, final_message)
 
-        except (ValueError, EntityNotFoundError, GameError) as e:
+        except (GameError, EntityNotFoundError) as e:
             await self._send_error(connection_id, str(e))
         except Exception as e:
             await self._send_error(connection_id, f"Erreur lors de la tentative: {str(e)}")
@@ -279,47 +299,54 @@ class WebSocketMessageHandler:
             data: Dict[str, Any],
             db: AsyncSession
     ) -> None:
-        """Gère les demandes d'indices quantiques"""
-        connection = websocket_manager.connections.get(connection_id)
-        if not connection or not connection.is_authenticated:
-            await self._send_error(connection_id, "Non authentifié")
+        """Gère une demande de hint quantique"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        game_id = data.get("game_id")
+        hint_type = data.get("hint_type", "grover")
+
+        if not game_id:
+            await self._send_error(connection_id, "ID de jeu manquant")
             return
 
         try:
-            game_id = UUID(data.get("game_id"))
-            hint_type = data.get("hint_type")
-            position = data.get("position")
-
-            if not hint_type:
-                await self._send_error(connection_id, "Type d'indice manquant")
+            user_id = await self._get_user_id(connection_id)
+            if not user_id:
+                await self._send_error(connection_id, "Utilisateur non trouvé")
                 return
 
-            # Obtention de l'indice
-            hint = await game_service.get_quantum_hint(
-                db, game_id, connection.user_id, hint_type, position
+            # Générer le hint quantique
+            hint = await quantum_service.generate_quantum_hint(
+                db, UUID(game_id), user_id, hint_type
             )
 
-            # Envoi de l'indice
-            hint_message = WebSocketMessage(
+            response = WebSocketMessage(
                 type=EventType.QUANTUM_HINT_USED,
                 data={
-                    "game_id": str(game_id),
-                    "hint": {
-                        "type": hint.hint_type,
-                        "position": hint.position,
-                        "revealed_info": hint.revealed_info,
-                        "confidence": hint.confidence,
-                        "quantum_cost": hint.quantum_cost
-                    }
+                    "game_id": game_id,
+                    "hint": hint.model_dump(),
+                    "cost": hint.cost_points
                 }
             )
+            await websocket_manager.send_to_connection(connection_id, response)
 
-            await websocket_manager._send_to_connection(connection_id, hint_message)
+            # Broadcaster l'utilisation du hint (sans révéler le contenu)
+            hint_broadcast = WebSocketMessage(
+                type=EventType.QUANTUM_HINT_USED,
+                data={
+                    "game_id": game_id,
+                    "player_id": str(user_id),
+                    "hint_type": hint_type,
+                    "points_spent": hint.cost_points
+                }
+            )
+            await websocket_manager.broadcast_to_room(
+                game_id, hint_broadcast, exclude_connection=connection_id
+            )
 
-        except (ValueError, EntityNotFoundError, GameError) as e:
-            await self._send_error(connection_id, str(e))
         except Exception as e:
-            await self._send_error(connection_id, f"Erreur lors de l'indice: {str(e)}")
+            await self._send_error(connection_id, f"Erreur lors du hint quantique: {str(e)}")
 
     async def _handle_start_game(
             self,
@@ -328,35 +355,33 @@ class WebSocketMessageHandler:
             db: AsyncSession
     ) -> None:
         """Gère le démarrage d'une partie"""
-        connection = websocket_manager.connections.get(connection_id)
-        if not connection or not connection.is_authenticated:
-            await self._send_error(connection_id, "Non authentifié")
+        if not await self._require_authentication(connection_id):
+            return
+
+        game_id = data.get("game_id")
+        if not game_id:
+            await self._send_error(connection_id, "ID de jeu manquant")
             return
 
         try:
-            game_id = UUID(data.get("game_id"))
+            user_id = await self._get_user_id(connection_id)
+            if not user_id:
+                return
 
-            # Démarrage de la partie
-            result = await game_service.start_game(
-                db, game_id, user_id=connection.user_id
-            )
+            # Démarrer le jeu
+            result = await game_service.start_game(db, UUID(game_id), user_id)
 
-            # Notification de démarrage à tous les joueurs
+            # Broadcaster le démarrage à tous les joueurs
             start_message = WebSocketMessage(
                 type=EventType.GAME_STARTED,
                 data={
-                    "game_id": str(game_id),
-                    "started_by": str(connection.user_id),
-                    "started_at": result.get("started_at"),
-                    "message": result.get("message")
+                    "game_id": game_id,
+                    "started_by": str(user_id),
+                    "game_state": result
                 }
             )
+            await websocket_manager.broadcast_to_room(game_id, start_message)
 
-            room_id = f"game_{game_id}"
-            await websocket_manager.send_to_room(room_id, start_message)
-
-        except (ValueError, EntityNotFoundError, GameError) as e:
-            await self._send_error(connection_id, str(e))
         except Exception as e:
             await self._send_error(connection_id, f"Erreur lors du démarrage: {str(e)}")
 
@@ -366,35 +391,198 @@ class WebSocketMessageHandler:
             data: Dict[str, Any],
             db: AsyncSession
     ) -> None:
-        """Gère les demandes d'état de partie"""
-        connection = websocket_manager.connections.get(connection_id)
-        if not connection or not connection.is_authenticated:
-            await self._send_error(connection_id, "Non authentifié")
+        """Gère la demande d'état de jeu"""
+        game_id = data.get("game_id")
+        if not game_id:
+            await self._send_error(connection_id, "ID de jeu manquant")
             return
 
         try:
-            game_id = UUID(data.get("game_id"))
+            game_state = await game_service.get_game_state(db, UUID(game_id))
 
-            # Récupération de l'état
-            game_state = await game_service.get_game_state(
-                db, game_id, user_id=connection.user_id
-            )
-
-            # Envoi de l'état
-            state_message = WebSocketMessage(
+            response = WebSocketMessage(
                 type=EventType.GAME_STATE_UPDATE,
+                data=game_state
+            )
+            await websocket_manager.send_to_connection(connection_id, response)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur lors de la récupération de l'état: {str(e)}")
+
+    async def _handle_pause_game(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère la pause d'une partie"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        game_id = data.get("game_id")
+        if not game_id:
+            await self._send_error(connection_id, "ID de jeu manquant")
+            return
+
+        try:
+            user_id = await self._get_user_id(connection_id)
+            await game_service.pause_game(db, UUID(game_id), user_id)
+
+            # Broadcaster la pause
+            pause_message = WebSocketMessage(
+                type="game_paused",
                 data={
-                    "game_id": str(game_id),
-                    "state": game_state
+                    "game_id": game_id,
+                    "paused_by": str(user_id)
+                }
+            )
+            await websocket_manager.broadcast_to_room(game_id, pause_message)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur lors de la pause: {str(e)}")
+
+    # === HANDLERS DE CHAT ===
+
+    async def _handle_chat_message(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère un message de chat"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        room_id = data.get("room_id")
+        message = data.get("message", "").strip()
+
+        if not room_id or not message:
+            await self._send_error(connection_id, "Données de message manquantes")
+            return
+
+        if len(message) > 500:
+            await self._send_error(connection_id, "Message trop long (max 500 caractères)")
+            return
+
+        try:
+            connection_info = websocket_manager.get_connection_info(connection_id)
+
+            chat_message = WebSocketMessage(
+                type=EventType.CHAT_BROADCAST,
+                data={
+                    "room_id": room_id,
+                    "user_id": connection_info.get("user_id"),
+                    "username": connection_info.get("username"),
+                    "message": message,
+                    "timestamp": time.time()
                 }
             )
 
-            await websocket_manager._send_to_connection(connection_id, state_message)
+            # Broadcaster le message à tous les membres de la room
+            await websocket_manager.broadcast_to_room(room_id, chat_message)
 
-        except (ValueError, EntityNotFoundError) as e:
-            await self._send_error(connection_id, str(e))
+            # TODO: Sauvegarder le message en base de données si nécessaire
+
         except Exception as e:
-            await self._send_error(connection_id, f"Erreur lors de la récupération: {str(e)}")
+            await self._send_error(connection_id, f"Erreur lors de l'envoi du message: {str(e)}")
+
+    # === HANDLERS D'INVITATION ===
+
+    async def _handle_invite_player(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère l'invitation d'un joueur"""
+        if not await self._require_authentication(connection_id):
+            return
+
+        target_username = data.get("username")
+        game_id = data.get("game_id")
+
+        if not target_username or not game_id:
+            await self._send_error(connection_id, "Données d'invitation manquantes")
+            return
+
+        try:
+            from app.repositories.user import UserRepository
+            user_repo = UserRepository()
+
+            # Trouver l'utilisateur cible
+            target_user = await user_repo.get_by_username(db, target_username)
+            if not target_user:
+                await self._send_error(connection_id, "Utilisateur non trouvé")
+                return
+
+            # Vérifier si l'utilisateur cible est connecté
+            if not websocket_manager.is_user_connected(target_user.id):
+                await self._send_error(connection_id, "Utilisateur non connecté")
+                return
+
+            inviter_info = websocket_manager.get_connection_info(connection_id)
+
+            # Envoyer l'invitation
+            invitation = WebSocketMessage(
+                type="game_invitation",
+                data={
+                    "game_id": game_id,
+                    "inviter_id": inviter_info.get("user_id"),
+                    "inviter_username": inviter_info.get("username"),
+                    "message": data.get("message", "Vous invite à rejoindre une partie")
+                }
+            )
+
+            await websocket_manager.send_to_user(target_user.id, invitation)
+
+            # Confirmer l'envoi
+            response = WebSocketMessage(
+                type="invitation_sent",
+                data={
+                    "target_username": target_username,
+                    "game_id": game_id
+                }
+            )
+            await websocket_manager.send_to_connection(connection_id, response)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur lors de l'invitation: {str(e)}")
+
+    # === HANDLERS DE SPECTATEUR ===
+
+    async def _handle_watch_game(
+            self,
+            connection_id: str,
+            data: Dict[str, Any],
+            db: AsyncSession
+    ) -> None:
+        """Gère le mode spectateur"""
+        game_id = data.get("game_id")
+        if not game_id:
+            await self._send_error(connection_id, "ID de jeu manquant")
+            return
+
+        try:
+            # Rejoindre comme spectateur
+            success = await websocket_manager.join_game_room(connection_id, f"watch_{game_id}")
+
+            if success:
+                # Envoyer l'état actuel du jeu
+                game_state = await game_service.get_spectator_view(db, UUID(game_id))
+
+                response = WebSocketMessage(
+                    type="watching_game",
+                    data={
+                        "game_id": game_id,
+                        "game_state": game_state
+                    }
+                )
+                await websocket_manager.send_to_connection(connection_id, response)
+
+        except Exception as e:
+            await self._send_error(connection_id, f"Erreur en mode spectateur: {str(e)}")
+
+    # === HANDLERS D'ERREUR ===
 
     async def _handle_unknown_message(
             self,
@@ -407,113 +595,48 @@ class WebSocketMessageHandler:
             f"Type de message non supporté: {message_type}"
         )
 
-    # === MÉTHODES UTILITAIRES ===
-
     async def _send_error(
             self,
             connection_id: str,
             error_message: str
     ) -> None:
         """Envoie un message d'erreur à une connexion"""
-        error_msg = WebSocketMessage(
+        error_response = WebSocketMessage(
             type=EventType.ERROR,
             data={
                 "error": error_message,
-                "connection_id": connection_id
+                "timestamp": time.time()
             }
         )
+        await websocket_manager.send_to_connection(connection_id, error_response)
 
-        await websocket_manager._send_to_connection(connection_id, error_msg)
+    # === MÉTHODES UTILITAIRES ===
 
-    def _is_message_inappropriate(self, message: str) -> bool:
-        """Filtrage basique des messages inappropriés"""
-        # Liste basique de mots interdits
-        forbidden_words = [
-            "spam", "hack", "cheat", "bot", "script"
-        ]
+    async def _require_authentication(self, connection_id: str) -> bool:
+        """Vérifie qu'une connexion est authentifiée"""
+        connection_info = websocket_manager.get_connection_info(connection_id)
 
-        message_lower = message.lower()
-        return any(word in message_lower for word in forbidden_words)
+        if not connection_info or not connection_info.get("is_authenticated"):
+            await self._send_error(connection_id, "Authentification requise")
+            return False
 
-    async def _handle_game_end(
-            self,
-            db: AsyncSession,
-            game_id: UUID,
-            player_id: UUID,
-            won: bool
-    ) -> None:
-        """Gère la fin d'une partie"""
-        try:
-            # Récupération de l'état final de la partie
-            final_state = await game_service.get_game_state(db, game_id)
+        return True
 
-            # Notification de fin de partie
-            end_message = WebSocketMessage(
-                type=EventType.GAME_FINISHED,
-                data={
-                    "game_id": str(game_id),
-                    "winner_id": str(player_id) if won else None,
-                    "final_state": final_state
-                }
-            )
+    async def _get_user_id(self, connection_id: str) -> Optional[UUID]:
+        """Récupère l'ID utilisateur d'une connexion"""
+        connection_info = websocket_manager.get_connection_info(connection_id)
+        if not connection_info:
+            return None
 
-            room_id = f"game_{game_id}"
-            await websocket_manager.send_to_room(room_id, end_message)
+        user_id_str = connection_info.get("user_id")
+        if user_id_str:
+            try:
+                return UUID(user_id_str)
+            except ValueError:
+                return None
 
-        except Exception as e:
-            print(f"Erreur lors de la gestion de fin de partie: {e}")
+        return None
 
 
-class WebSocketEventEmitter:
-    """Émetteur d'événements WebSocket pour les services"""
-
-    @staticmethod
-    async def emit_player_joined(game_id: UUID, player_data: Dict[str, Any]) -> None:
-        """Émet un événement de joueur qui rejoint"""
-        await websocket_manager.handle_game_event(
-            game_id,
-            EventType.PLAYER_JOINED,
-            player_data
-        )
-
-    @staticmethod
-    async def emit_player_left(game_id: UUID, player_data: Dict[str, Any]) -> None:
-        """Émet un événement de joueur qui quitte"""
-        await websocket_manager.handle_game_event(
-            game_id,
-            EventType.PLAYER_LEFT,
-            player_data
-        )
-
-    @staticmethod
-    async def emit_game_state_update(game_id: UUID, state_data: Dict[str, Any]) -> None:
-        """Émet une mise à jour d'état de partie"""
-        await websocket_manager.handle_game_event(
-            game_id,
-            EventType.GAME_STATE_UPDATE,
-            state_data
-        )
-
-    @staticmethod
-    async def emit_turn_change(game_id: UUID, turn_data: Dict[str, Any]) -> None:
-        """Émet un changement de tour"""
-        await websocket_manager.handle_game_event(
-            game_id,
-            EventType.TURN_CHANGE,
-            turn_data
-        )
-
-    @staticmethod
-    async def notify_user(user_id: UUID, notification: Dict[str, Any]) -> None:
-        """Envoie une notification à un utilisateur"""
-        message = WebSocketMessage(
-            type=EventType.NOTIFICATION,
-            data=notification
-        )
-
-        await websocket_manager.send_to_user(user_id, message)
-
-
-# Instances globales
+# Instance globale du gestionnaire de messages
 message_handler = WebSocketMessageHandler()
-event_emitter = WebSocketEventEmitter()
