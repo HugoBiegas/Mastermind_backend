@@ -5,6 +5,7 @@ Login, register, reset password, token management
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -24,9 +25,12 @@ from app.schemas.auth import (
 from app.schemas.user import UserProfile
 from app.services.auth import auth_service
 from app.utils.exceptions import (
-    AuthenticationError, ValidationError, AccountLockedError
+    AuthenticationError, ValidationError, AccountLockedError, EntityAlreadyExistsError
 )
+import logging
 
+
+logger = logging.getLogger(__name__)
 # Configuration du router
 router = APIRouter(prefix="/auth", tags=["Authentification"])
 
@@ -85,7 +89,7 @@ async def login(
     "/register",
     response_model=RegisterResponse,
     summary="Inscription utilisateur",
-    description="Crée un nouveau compte utilisateur"
+    description="Crée un nouveau compte utilisateur avec validation robuste"
 )
 async def register(
         register_data: RegisterRequest,
@@ -93,23 +97,62 @@ async def register(
         db: AsyncSession = Depends(get_database)
 ) -> RegisterResponse:
     """
-    Crée un nouveau compte utilisateur
+    Crée un nouveau compte utilisateur avec gestion d'erreurs améliorée
 
-    - **username**: Nom d'utilisateur unique
-    - **email**: Adresse email unique
-    - **password**: Mot de passe sécurisé
+    - **username**: Nom d'utilisateur unique (3-50 caractères)
+    - **email**: Adresse email unique et valide
+    - **password**: Mot de passe sécurisé (8+ caractères)
     - **password_confirm**: Confirmation du mot de passe
+    - **accept_terms**: Acceptation des conditions d'utilisation (OBLIGATOIRE)
     """
     try:
+        # Log de la tentative d'inscription
+        logger.info(f"Tentative d'inscription pour: {register_data.username}")
+
         register_response = await auth_service.register_user(
             db, register_data, client_info
         )
+
+        logger.info(f"Inscription réussie pour: {register_data.username}")
         return register_response
 
-    except (ValidationError, AuthenticationError) as e:
+    except ValidationError as e:
+        # Erreurs de validation Pydantic
+        logger.warning(f"Erreur de validation pour {register_data.username}: {e}")
         raise create_http_exception_from_error(e)
 
+    except AuthenticationError as e:
+        # Erreurs d'authentification métier
+        logger.warning(f"Erreur d'authentification pour {register_data.username}: {e}")
+        raise create_http_exception_from_error(e)
+
+    except EntityAlreadyExistsError as e:
+        # Utilisateur ou email déjà existant
+        logger.warning(f"Tentative de création d'un utilisateur existant: {e}")
+        raise create_http_exception_from_error(e)
+
+    except IntegrityError as e:
+        # Erreurs d'intégrité de base de données
+        logger.error(f"Erreur d'intégrité DB lors de l'inscription: {e}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Un utilisateur avec ces informations existe déjà"
+        )
+
+    except SQLAlchemyError as e:
+        # Erreurs de base de données génériques
+        logger.error(f"Erreur SQLAlchemy lors de l'inscription: {e}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporairement indisponible"
+        )
+
     except Exception as e:
+        # Erreur inattendue
+        logger.error(f"Erreur inattendue lors de l'inscription: {e}", exc_info=True)
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur lors de l'inscription"

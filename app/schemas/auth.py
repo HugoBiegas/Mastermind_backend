@@ -116,6 +116,10 @@ class RegisterRequest(BaseModel):
         max_length=100,
         description="Nom complet"
     )
+    accept_terms: bool = Field(
+        ...,
+        description="Acceptation des conditions d'utilisation"
+    )
 
     @field_validator('username')
     @classmethod
@@ -140,6 +144,14 @@ class RegisterRequest(BaseModel):
         """Valide que les mots de passe correspondent"""
         if 'password' in info.data and v != info.data['password']:
             raise ValueError("Les mots de passe ne correspondent pas")
+        return v
+
+    @field_validator('accept_terms')
+    @classmethod
+    def validate_accept_terms(cls, v: bool) -> bool:
+        """Valide que les conditions sont acceptées"""
+        if not v:
+            raise ValueError("Vous devez accepter les conditions d'utilisation")
         return v
 
 

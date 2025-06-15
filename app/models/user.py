@@ -3,6 +3,7 @@ Modèle utilisateur pour Quantum Mastermind
 SQLAlchemy 2.0.41 avec typing moderne et async support
 """
 from datetime import datetime, timezone, timedelta
+from ipaddress import ip_address, AddressValueError
 from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -11,7 +12,7 @@ from sqlalchemy import (
     Boolean, DateTime, String, Text, Integer,
     Index, CheckConstraint
 )
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB, INET
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -205,7 +206,7 @@ class User(Base):
     )
 
     last_ip_address: Mapped[Optional[str]] = mapped_column(
-        String(45),  # Support IPv6
+        INET,
         nullable=True
     )
 
@@ -478,6 +479,21 @@ class User(Base):
 
     def increment_login_attempts(self):
         pass
+
+    def update_last_login(self, ip: str | None) -> None:
+        """
+        Met à jour la date et l'adresse IP de dernière connexion.
+
+        Args:
+            ip (str | None): Adresse IP au format string (IPv4 ou IPv6)
+        """
+        self.last_login = datetime.now(timezone.utc)
+        if ip:
+            try:
+                self.last_ip_address = str(ip_address(ip))
+            except AddressValueError:
+                self.last_ip_address = None
+
 
 
 # === ÉVÉNEMENTS SQLAlchemy ===

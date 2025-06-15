@@ -26,7 +26,8 @@ scipy==1.15.3
 
 # === SÉCURITÉ ET AUTHENTIFICATION ===
 python-jose[cryptography]==3.4.0
-passlib[bcrypt]==1.7.4
+passlib==1.7.4
+bcrypt==3.2.2
 
 # === CACHE ET SESSIONS ===
 redis==6.2.0
