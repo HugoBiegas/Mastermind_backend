@@ -1,6 +1,7 @@
 """
 Modèle utilisateur pour Quantum Mastermind
 SQLAlchemy 2.0.41 avec typing moderne et async support
+CORRECTION: Relations synchronisées avec game.py
 """
 from datetime import datetime, timezone, timedelta
 from ipaddress import ip_address, AddressValueError
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 class User(Base):
     """
     Modèle utilisateur principal avec support SQLAlchemy 2.0
+    CORRECTION: Relations synchronisées avec les modèles de jeu
     """
     __tablename__ = "users"
 
@@ -98,28 +100,38 @@ class User(Base):
 
     # === PARAMÈTRES ET PRÉFÉRENCES ===
 
-    # Utilisation de JSONB pour PostgreSQL, JSON pour autres DB
-    preferences: Mapped[Optional[dict]] = mapped_column(
+    preferences: Mapped[dict] = mapped_column(
         JSONB,
-        nullable=True,
-        default=lambda: {}
-    )
-
-    settings: Mapped[Optional[dict]] = mapped_column(
-        JSONB,
-        nullable=True,
+        nullable=False,
         default=lambda: {
-            "theme": "dark",
             "language": "fr",
+            "theme": "dark",
             "notifications": {
                 "email": True,
                 "push": True,
-                "game_invites": True,
-                "tournaments": True
+                "game_invitations": True,
+                "game_results": True
             },
+            "game_settings": {
+                "auto_join": False,
+                "show_hints": True,
+                "sound_enabled": True
+            }
+        }
+    )
+
+    settings: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=lambda: {
             "privacy": {
-                "show_stats": True,
-                "show_online_status": True
+                "profile_visible": True,
+                "stats_visible": True,
+                "online_status_visible": True
+            },
+            "gameplay": {
+                "auto_ready": False,
+                "timeout_warnings": True
             }
         }
     )
@@ -128,40 +140,37 @@ class User(Base):
 
     total_games: Mapped[int] = mapped_column(
         Integer,
-        default=0,
-        nullable=False
+        nullable=False,
+        default=0
     )
 
     games_won: Mapped[int] = mapped_column(
         Integer,
-        default=0,
-        nullable=False
+        nullable=False,
+        default=0
     )
 
     total_score: Mapped[int] = mapped_column(
         Integer,
-        default=0,
-        nullable=False
+        nullable=False,
+        default=0
     )
 
-    best_score: Mapped[int] = mapped_column(
+    best_score: Mapped[Optional[int]] = mapped_column(
         Integer,
-        default=0,
-        nullable=False
+        nullable=True
     )
 
     quantum_points: Mapped[int] = mapped_column(
         Integer,
-        default=0,
         nullable=False,
-        comment="Points gagnés en utilisant les fonctionnalités quantiques"
+        default=0
     )
 
-    # Rang dérivé du score et des performances
     rank: Mapped[str] = mapped_column(
         String(20),
-        default="Bronze",
         nullable=False,
+        default='Bronze',
         index=True
     )
 
@@ -169,16 +178,15 @@ class User(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
         nullable=False,
+        default=lambda: datetime.now(timezone.utc),
         index=True
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-        nullable=False
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
     )
 
     last_login: Mapped[Optional[datetime]] = mapped_column(
@@ -187,17 +195,17 @@ class User(Base):
         index=True
     )
 
+    # === SÉCURITÉ ET AUDIT ===
+
     email_verified_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True
     )
 
-    # === MÉTADONNÉES DE SÉCURITÉ ===
-
     login_attempts: Mapped[int] = mapped_column(
         Integer,
-        default=0,
-        nullable=False
+        nullable=False,
+        default=0
     )
 
     locked_until: Mapped[Optional[datetime]] = mapped_column(
@@ -210,89 +218,73 @@ class User(Base):
         nullable=True
     )
 
-    # === RELATIONS ===
+    # === RELATIONS SQLALCHEMY ===
+    # CORRECTION: Relations synchronisées avec les modèles de jeu
 
-    # Jeux créés par l'utilisateur
+    # Parties créées par l'utilisateur
     created_games: Mapped[List["Game"]] = relationship(
         "Game",
         back_populates="creator",
         foreign_keys="Game.creator_id",
         cascade="all, delete-orphan",
-        lazy="dynamic"
+        lazy="select"
     )
 
-    # Participations aux jeux
+    # Participations aux parties (CORRECTION: utilise player_id)
     game_participations: Mapped[List["GameParticipation"]] = relationship(
         "GameParticipation",
         back_populates="player",
+        foreign_keys="GameParticipation.player_id",
         cascade="all, delete-orphan",
-        lazy="dynamic"
+        lazy="select"
     )
 
-    # Tentatives dans les jeux
+    # Tentatives dans les parties (CORRECTION: utilise player_id)
     game_attempts: Mapped[List["GameAttempt"]] = relationship(
         "GameAttempt",
         back_populates="player",
+        foreign_keys="GameAttempt.player_id",
         cascade="all, delete-orphan",
-        lazy="dynamic"
-    )
-
-    # === CONTRAINTES ===
-
-    __table_args__ = (
-        # Index composites pour les requêtes fréquentes
-        Index("ix_users_active_verified", "is_active", "is_verified"),
-        Index("ix_users_created_score", "created_at", "total_score"),
-        Index("ix_users_last_login", "last_login"),
-        Index("ix_users_rank_score", "rank", "total_score"),
-
-        # Contraintes de validation
-        CheckConstraint(
-            "char_length(username) >= 3",
-            name="ck_username_min_length"
-        ),
-        CheckConstraint(
-            "char_length(email) >= 5",
-            name="ck_email_min_length"
-        ),
-        CheckConstraint(
-            "total_games >= 0",
-            name="ck_total_games_positive"
-        ),
-        CheckConstraint(
-            "games_won >= 0",
-            name="ck_games_won_positive"
-        ),
-        CheckConstraint(
-            "games_won <= total_games",
-            name="ck_games_won_lte_total"
-        ),
-        CheckConstraint(
-            "total_score >= 0",
-            name="ck_total_score_positive"
-        ),
-        CheckConstraint(
-            "best_score >= 0",
-            name="ck_best_score_positive"
-        ),
-        CheckConstraint(
-            "quantum_points >= 0",
-            name="ck_quantum_points_positive"
-        ),
-        CheckConstraint(
-            "login_attempts >= 0",
-            name="ck_login_attempts_positive"
-        ),
+        lazy="select"
     )
 
     # === PROPRIÉTÉS CALCULÉES ===
 
     @property
     def win_rate(self) -> float:
-        """Taux de victoire en pourcentage"""
+        """Calcule le taux de victoire"""
         if self.total_games == 0:
             return 0.0
-        return (self.games_won / self.total_games) * 100
+        return round((self.games_won / self.total_games) * 100, 2)
+
+    @property
+    def average_score(self) -> float:
+        """Calcule le score moyen"""
+        if self.total_games == 0:
+            return 0.0
+        return round(self.total_score / self.total_games, 2)
+
+    @property
+    def is_beginner(self) -> bool:
+        """Vérifie si l'utilisateur est débutant"""
+        return self.total_games < 10
+
+    @property
+    def is_expert(self) -> bool:
+        """Vérifie si l'utilisateur est expert"""
+        return self.rank in ['Diamond', 'Master', 'Grandmaster'] and self.total_games >= 100
+
+    @property
+    def is_online(self) -> bool:
+        """Vérifie si l'utilisateur est en ligne (dernière connexion < 15 min)"""
+        if not self.last_login:
+            return False
+        return (datetime.now(timezone.utc) - self.last_login) < timedelta(minutes=15)
+
+    @property
+    def account_age_days(self) -> int:
+        """Âge du compte en jours"""
+        return (datetime.now(timezone.utc) - self.created_at).days
 
     @property
     def is_locked(self) -> bool:
@@ -302,239 +294,153 @@ class User(Base):
         return datetime.now(timezone.utc) < self.locked_until
 
     @property
-    def is_online(self) -> bool:
-        """Vérifie si l'utilisateur est considéré comme en ligne"""
-        if not self.last_login:
-            return False
-        # Considéré en ligne si dernière connexion < 15 minutes
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
-        return self.last_login > cutoff
+    def games_lost(self) -> int:
+        """Nombre de parties perdues"""
+        return max(0, self.total_games - self.games_won)
 
-    @property
-    def level(self) -> int:
-        """Calcule le niveau basé sur les points quantiques"""
-        if self.quantum_points < 100:
-            return 1
-        return min(100, int(self.quantum_points / 100) + 1)
+    # === MÉTHODES UTILITAIRES ===
 
-    @property
-    def display_name(self) -> str:
-        """Nom d'affichage (nom complet ou username)"""
-        return self.full_name or self.username
+    def update_last_login(self, ip_addr: Optional[str] = None) -> None:
+        """Met à jour la dernière connexion"""
+        self.last_login = datetime.now(timezone.utc)
+        self.login_attempts = 0  # Reset après connexion réussie
 
-    # === MÉTHODES D'INSTANCE ===
+        if ip_addr:
+            try:
+                # Validation de l'adresse IP
+                validated_ip = ip_address(ip_addr)
+                self.last_ip_address = str(validated_ip)
+            except (AddressValueError, ValueError):
+                # IP invalide, on l'ignore
+                pass
 
-    def update_score(self, points: int) -> None:
-        """
-        Met à jour le score total et le meilleur score
+    def increment_login_attempts(self) -> None:
+        """Incrémente le compteur de tentatives de connexion"""
+        self.login_attempts += 1
 
-        Args:
-            points: Points à ajouter
-        """
-        self.total_score = max(0, self.total_score + points)
-        if points > self.best_score:
-            self.best_score = points
+        # Verrouillage automatique après 5 tentatives
+        if self.login_attempts >= 5:
+            self.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
 
-    def update_rank(self) -> None:
-        """Met à jour le rang basé sur le score total"""
-        if self.total_score < 100:
-            self.rank = "Bronze"
-        elif self.total_score < 500:
-            self.rank = "Silver"
-        elif self.total_score < 1000:
-            self.rank = "Gold"
-        elif self.total_score < 2500:
-            self.rank = "Platinum"
-        elif self.total_score < 5000:
-            self.rank = "Diamond"
-        else:
-            self.rank = "Master"
+    def unlock_account(self) -> None:
+        """Déverrouille le compte"""
+        self.locked_until = None
+        self.login_attempts = 0
 
-    def record_game_result(self, won: bool, score: int = 0) -> None:
-        """
-        Enregistre le résultat d'une partie
-
-        Args:
-            won: True si le joueur a gagné
-            score: Score obtenu dans la partie
-        """
+    def update_game_stats(self, won: bool, score: int) -> None:
+        """Met à jour les statistiques de jeu"""
         self.total_games += 1
+        self.total_score += score
+
         if won:
             self.games_won += 1
 
-        if score > 0:
-            self.update_score(score)
+        # Mise à jour du meilleur score
+        if self.best_score is None or score > self.best_score:
+            self.best_score = score
 
-        self.update_rank()
-        self.updated_at = datetime.now(timezone.utc)
+        # Mise à jour automatique du rang
+        self._update_rank()
 
     def add_quantum_points(self, points: int) -> None:
-        """
-        Ajoute des points quantiques
+        """Ajoute des points quantiques"""
+        self.quantum_points += points
+        self._update_rank()
 
-        Args:
-            points: Points quantiques à ajouter
-        """
-        self.quantum_points = max(0, self.quantum_points + points)
-        self.updated_at = datetime.now(timezone.utc)
+    def _update_rank(self) -> None:
+        """Met à jour le rang basé sur les statistiques"""
+        # Logique de calcul du rang basée sur les points et performances
+        total_points = self.total_score + (self.quantum_points * 2)
 
-    def reset_login_attempts(self) -> None:
-        """Remet à zéro les tentatives de connexion"""
-        self.login_attempts = 0
-        self.locked_until = None
-
-    def lock_account(self, duration_minutes: int = 15) -> None:
-        """
-        Verrouille le compte pour une durée donnée
-
-        Args:
-            duration_minutes: Durée de verrouillage en minutes
-        """
-        self.locked_until = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
+        if total_points < 1000:
+            self.rank = 'Bronze'
+        elif total_points < 5000:
+            self.rank = 'Silver'
+        elif total_points < 15000:
+            self.rank = 'Gold'
+        elif total_points < 35000:
+            self.rank = 'Platinum'
+        elif total_points < 75000:
+            self.rank = 'Diamond'
+        elif total_points < 150000:
+            self.rank = 'Master'
+        else:
+            self.rank = 'Grandmaster'
 
     def update_preferences(self, new_preferences: dict) -> None:
-        """
-        Met à jour les préférences utilisateur
-
-        Args:
-            new_preferences: Nouvelles préférences
-        """
+        """Met à jour les préférences utilisateur"""
         if self.preferences is None:
             self.preferences = {}
 
-        self.preferences.update(new_preferences)
-        self.updated_at = datetime.now(timezone.utc)
+        # Merge profond des préférences
+        def deep_merge(base: dict, update: dict) -> dict:
+            for key, value in update.items():
+                if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                    deep_merge(base[key], value)
+                else:
+                    base[key] = value
+            return base
 
-    def update_settings(self, new_settings: dict) -> None:
-        """
-        Met à jour les paramètres utilisateur
+        deep_merge(self.preferences, new_preferences)
 
-        Args:
-            new_settings: Nouveaux paramètres
-        """
-        if self.settings is None:
-            self.settings = {
-                "theme": "dark",
-                "language": "fr",
-                "notifications": {},
-                "privacy": {}
-            }
+    def get_preference(self, key: str, default=None):
+        """Récupère une préférence spécifique"""
+        if not self.preferences:
+            return default
 
-        # Fusion récursive des paramètres
-        for key, value in new_settings.items():
-            if isinstance(value, dict) and key in self.settings:
-                self.settings[key].update(value)
-            else:
-                self.settings[key] = value
+        # Support de la notation pointée (ex: "game_settings.sound_enabled")
+        keys = key.split('.')
+        value = self.preferences
 
-        self.updated_at = datetime.now(timezone.utc)
+        try:
+            for k in keys:
+                value = value[k]
+            return value
+        except (KeyError, TypeError):
+            return default
 
-    def verify_email(self) -> None:
-        """Marque l'email comme vérifié"""
-        self.is_verified = True
-        self.email_verified_at = datetime.now(timezone.utc)
-        self.updated_at = datetime.now(timezone.utc)
-
-    def deactivate(self, reason: Optional[str] = None) -> None:
-        """
-        Désactive le compte utilisateur
-
-        Args:
-            reason: Raison de la désactivation
-        """
-        self.is_active = False
-        if reason and self.settings:
-            self.settings['deactivation_reason'] = reason
-        self.updated_at = datetime.now(timezone.utc)
-
-    def activate(self) -> None:
-        """Réactive le compte utilisateur"""
-        self.is_active = True
-        self.reset_login_attempts()
-        if self.settings and 'deactivation_reason' in self.settings:
-            del self.settings['deactivation_reason']
-        self.updated_at = datetime.now(timezone.utc)
-
-    # === MÉTHODES DE VALIDATION ===
-
-    def can_play(self) -> bool:
+    def can_play_game(self) -> bool:
         """Vérifie si l'utilisateur peut jouer"""
-        return self.is_active and not self.is_locked
+        return self.is_active and self.is_verified and not self.is_locked
 
-    def can_create_game(self) -> bool:
-        """Vérifie si l'utilisateur peut créer une partie"""
-        return self.can_play() and self.is_verified
+    def get_current_games_count(self) -> int:
+        """Retourne le nombre de parties actives"""
+        if not self.game_participations:
+            return 0
 
-    def can_use_quantum_features(self) -> bool:
-        """Vérifie si l'utilisateur peut utiliser les fonctionnalités quantiques"""
-        return self.can_play() and self.level >= 3  # Niveau minimum requis
-
-    # === REPRÉSENTATION STRING ===
+        active_statuses = ['waiting', 'ready', 'active']
+        return len([
+            p for p in self.game_participations
+            if p.status in active_statuses
+        ])
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, username='{self.username}', rank='{self.rank}')>"
 
-    def __str__(self) -> str:
-        return self.display_name
 
-    def increment_login_attempts(self):
-        pass
+# === CONTRAINTES DE TABLE ===
 
-    def update_last_login(self, ip: str | None) -> None:
-        """
-        Met à jour la date et l'adresse IP de dernière connexion.
+# Contraintes de validation
+User.__table_args__ = (
+    CheckConstraint('total_games >= 0', name='ck_users_total_games'),
+    CheckConstraint('games_won >= 0 AND games_won <= total_games', name='ck_users_games_won'),
+    CheckConstraint('total_score >= 0', name='ck_users_total_score'),
+    CheckConstraint('quantum_points >= 0', name='ck_users_quantum_points'),
+    CheckConstraint('login_attempts >= 0', name='ck_users_login_attempts'),
+    CheckConstraint(
+        "rank IN ('Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Master', 'Grandmaster')",
+        name='ck_users_rank'
+    ),
 
-        Args:
-            ip (str | None): Adresse IP au format string (IPv4 ou IPv6)
-        """
-        self.last_login = datetime.now(timezone.utc)
-        if ip:
-            try:
-                self.last_ip_address = str(ip_address(ip))
-            except AddressValueError:
-                self.last_ip_address = None
-
-
-
-# === ÉVÉNEMENTS SQLAlchemy ===
-
-from sqlalchemy import event
-
-@event.listens_for(User, 'before_insert')
-def user_before_insert(mapper, connection, target):
-    """Traitement avant insertion d'un utilisateur"""
-    # Normalisation des données
-    if target.username:
-        target.username = target.username.lower().strip()
-    if target.email:
-        target.email = target.email.lower().strip()
-
-    # Initialisation des valeurs par défaut
-    if target.preferences is None:
-        target.preferences = {}
-    if target.settings is None:
-        target.settings = {
-            "theme": "dark",
-            "language": "fr",
-            "notifications": {
-                "email": True,
-                "push": True,
-                "game_invites": True,
-                "tournaments": True
-            },
-            "privacy": {
-                "show_stats": True,
-                "show_online_status": True
-            }
-        }
+    # Index composites pour les performances
+    Index('idx_users_active_verified', 'is_active', 'is_verified'),
+    Index('idx_users_rank_score', 'rank', 'total_score'),
+    Index('idx_users_created_stats', 'created_at', 'total_games'),
+)
 
 
-@event.listens_for(User, 'before_update')
-def user_before_update(mapper, connection, target):
-    """Traitement avant mise à jour d'un utilisateur"""
-    # Mise à jour automatique du timestamp
-    target.updated_at = datetime.now(timezone.utc)
+# === EXPORTS ===
 
-    # Mise à jour du rang si le score a changé
-    if target.total_score != getattr(target, '_sa_instance_state').committed_state.get('total_score', 0):
-        target.update_rank()
+__all__ = [
+    "User"
+]

@@ -16,7 +16,7 @@ from app.schemas.auth import MessageResponse
 from app.schemas.user import (
     UserUpdate, UserPreferences, UserStats, UserSearch,
     UserPublic, UserProfile, UserList, Leaderboard,
-    UserBulkAction, UserValidation, UserValidationResult
+    UserBulkAction, UserValidation, UserValidationResult, UserSummary
 )
 from app.services.user import user_service
 from app.utils.exceptions import EntityNotFoundError, ValidationError
@@ -25,111 +25,10 @@ from app.utils.exceptions import EntityNotFoundError, ValidationError
 router = APIRouter(prefix="/users", tags=["Utilisateurs"])
 
 
-# === ROUTES SPÉCIFIQUES - DOIVENT ÊTRE EN PREMIER ===
+# =====================================================
+# ROUTES SPÉCIFIQUES - DOIVENT ÊTRE EN PREMIER
+# =====================================================
 # CORRECTION CRITIQUE : Ces routes doivent être AVANT /{user_id}
-
-@router.get(
-    "/me/stats",
-    response_model=UserStats,
-    summary="Mes statistiques",
-    description="Récupère les statistiques détaillées de l'utilisateur connecté"
-)
-async def get_my_stats(
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> UserStats:
-    """
-    Récupère les statistiques détaillées de l'utilisateur connecté
-
-    Inclut les performances, temps de jeu, classements, etc.
-    """
-    try:
-        stats = await user_service.get_user_statistics(db, current_user.id)
-        return UserStats.model_validate(stats)
-
-    except EntityNotFoundError as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération des statistiques"
-        )
-
-
-@router.get(
-    "/search",
-    response_model=UserList,
-    summary="Rechercher des utilisateurs",
-    description="Recherche d'utilisateurs avec filtres et pagination"
-)
-async def search_users(
-        search_params: UserSearch = Depends(),
-        pagination: PaginationParams = Depends(get_pagination_params),
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> UserList:
-    """
-    Recherche des utilisateurs avec filtres
-
-    - **query**: Terme de recherche (nom, email)
-    - **min_score**: Score minimum
-    - **rank**: Rang spécifique
-    - **active_only**: Utilisateurs actifs seulement
-    """
-    try:
-        users, total = await user_service.search_users(
-            db, search_params, pagination.skip, pagination.limit
-        )
-
-        user_summaries = [UserPublic.model_validate(user) for user in users]
-
-        return UserList(
-            users=user_summaries,
-            total=total,
-            page=pagination.page,
-            per_page=pagination.limit,
-            pages=(total + pagination.limit - 1) // pagination.limit
-        )
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la recherche d'utilisateurs"
-        )
-
-
-@router.get(
-    "/leaderboard",
-    response_model=Leaderboard,
-    summary="Classement des joueurs",
-    description="Récupère le classement des meilleurs joueurs"
-)
-async def get_leaderboard(
-        period: str = Query(default="all", description="Période du classement"),
-        limit: int = Query(default=50, ge=1, le=100, description="Nombre d'entrées"),
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> Leaderboard:
-    """
-    Récupère le classement des joueurs
-
-    - **period**: Période (all, month, week, day)
-    - **limit**: Nombre de joueurs à retourner
-    """
-    try:
-        leaderboard_data = await user_service.get_leaderboard(db, period, limit)
-        return Leaderboard.model_validate(leaderboard_data)
-
-    except ValidationError as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la récupération du classement"
-        )
-
 
 @router.get(
     "/me",
@@ -182,6 +81,84 @@ async def update_my_profile(
         )
 
 
+@router.delete(
+    "/me",
+    response_model=MessageResponse,
+    summary="Supprimer mon compte",
+    description="Supprime définitivement le compte de l'utilisateur connecté"
+)
+async def delete_my_account(
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> MessageResponse:
+    """
+    Supprime définitivement le compte de l'utilisateur connecté
+
+    ⚠️ ATTENTION: Cette action est irréversible !
+    """
+    try:
+        await user_service.delete_user_account(db, current_user.id)
+        return MessageResponse(
+            message="Votre compte a été supprimé avec succès",
+            details={"user_id": str(current_user.id)}
+        )
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la suppression du compte"
+        )
+
+
+@router.get(
+    "/me/stats",
+    response_model=UserStats,
+    summary="Mes statistiques",
+    description="Récupère les statistiques détaillées de l'utilisateur connecté"
+)
+async def get_my_stats(
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> UserStats:
+    """
+    Récupère les statistiques détaillées de l'utilisateur connecté
+
+    Inclut les performances, temps de jeu, classements, etc.
+    """
+    try:
+        stats = await user_service.get_user_statistics(db, current_user.id)
+        return UserStats.model_validate(stats)
+
+    except EntityNotFoundError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération des statistiques"
+        )
+
+
+@router.get(
+    "/me/preferences",
+    response_model=UserPreferences,
+    summary="Mes préférences",
+    description="Récupère les préférences de l'utilisateur connecté"
+)
+async def get_my_preferences(
+        current_user: User = Depends(get_current_active_user)
+) -> UserPreferences:
+    """
+    Récupère les préférences de l'utilisateur connecté
+
+    Inclut les paramètres de jeu, notifications, etc.
+    """
+    return UserPreferences.model_validate(current_user.preferences)
+
+
 @router.put(
     "/me/preferences",
     response_model=UserPreferences,
@@ -196,15 +173,15 @@ async def update_my_preferences(
     """
     Met à jour les préférences de l'utilisateur connecté
 
-    - **theme**: Thème de l'interface
+    - **language**: Langue de l'interface
+    - **theme**: Thème visuel
     - **notifications**: Paramètres de notifications
-    - **gameplay**: Préférences de jeu
     """
     try:
-        updated_preferences = await user_service.update_user_preferences(
+        updated_user = await user_service.update_user_preferences(
             db, current_user.id, preferences
         )
-        return UserPreferences.model_validate(updated_preferences)
+        return UserPreferences.model_validate(updated_user.preferences)
 
     except (EntityNotFoundError, ValidationError) as e:
         raise create_http_exception_from_error(e)
@@ -216,36 +193,109 @@ async def update_my_preferences(
         )
 
 
-@router.delete(
-    "/me",
-    response_model=MessageResponse,
-    summary="Supprimer mon compte",
-    description="Supprime définitivement le compte de l'utilisateur connecté"
+@router.get(
+    "/search",
+    response_model=UserList,
+    summary="Rechercher des utilisateurs",
+    description="Recherche d'utilisateurs avec filtres et pagination"
 )
-async def delete_my_account(
+async def search_users(
+        search_params: UserSearch = Depends(),
+        pagination: PaginationParams = Depends(get_pagination_params),
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
-) -> MessageResponse:
+) -> UserList:
     """
-    Supprime définitivement le compte de l'utilisateur connecté
+    Recherche des utilisateurs avec filtres
 
-    ⚠️ Cette action est irréversible
+    - **query**: Terme de recherche (nom, email)
+    - **min_score**: Score minimum
+    - **rank**: Rang spécifique
+    - **active_only**: Utilisateurs actifs seulement
     """
     try:
-        await user_service.delete_user_account(db, current_user.id)
-
-        return MessageResponse(
-            message="Compte supprimé avec succès",
-            details={"user_id": str(current_user.id)}
+        users, total = await user_service.search_users(
+            db, search_params, pagination.skip, pagination.limit
         )
 
-    except EntityNotFoundError as e:
+        user_summaries = [UserSummary.model_validate(user) for user in users]
+
+        return UserList(
+            users=user_summaries,
+            total=total,
+            page=pagination.page,
+            per_page=pagination.limit,
+            pages=(total + pagination.limit - 1) // pagination.limit
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la recherche d'utilisateurs"
+        )
+
+
+@router.get(
+    "/leaderboard",
+    response_model=Leaderboard,
+    summary="Classement des joueurs",
+    description="Récupère le classement des meilleurs joueurs"
+)
+async def get_leaderboard(
+        period: str = Query(default="all", description="Période du classement"),
+        limit: int = Query(default=50, ge=1, le=100, description="Nombre d'entrées"),
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Leaderboard:
+    """
+    Récupère le classement des joueurs
+
+    - **period**: Période (all, month, week, day)
+    - **limit**: Nombre de joueurs à retourner
+    """
+    try:
+        leaderboard_data = await user_service.get_leaderboard(db, period, limit)
+        return Leaderboard.model_validate(leaderboard_data)
+
+    except ValidationError as e:
         raise create_http_exception_from_error(e)
 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la suppression du compte"
+            detail="Erreur lors de la récupération du classement"
+        )
+
+
+@router.get(
+    "/validate",
+    response_model=UserValidationResult,
+    summary="Valider des données utilisateur",
+    description="Valide la disponibilité d'un nom d'utilisateur ou email"
+)
+async def validate_user_data(
+        validation_data: UserValidation,
+        db: AsyncSession = Depends(get_database)
+) -> UserValidationResult:
+    """
+    Valide des données utilisateur
+
+    - **field**: Champ à valider (username, email)
+    - **value**: Valeur à valider
+    """
+    try:
+        result = await user_service.validate_user_field(
+            db, validation_data.field, validation_data.value
+        )
+        return UserValidationResult.model_validate(result)
+
+    except ValidationError as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la validation"
         )
 
 
@@ -273,7 +323,7 @@ async def admin_list_users(
             db, search_params, pagination.skip, pagination.limit
         )
 
-        user_profiles = [UserProfile.model_validate(user) for user in users]
+        user_profiles = [UserSummary.model_validate(user) for user in users]
 
         return UserList(
             users=user_profiles,
@@ -326,39 +376,9 @@ async def admin_bulk_action(
         )
 
 
-@router.post(
-    "/validate",
-    response_model=UserValidationResult,
-    summary="Valider des données utilisateur",
-    description="Valide la disponibilité d'un nom d'utilisateur ou email"
-)
-async def validate_user_data(
-        validation_data: UserValidation,
-        db: AsyncSession = Depends(get_database)
-) -> UserValidationResult:
-    """
-    Valide des données utilisateur
-
-    - **field**: Champ à valider (username, email)
-    - **value**: Valeur à valider
-    """
-    try:
-        result = await user_service.validate_user_field(
-            db, validation_data.field, validation_data.value
-        )
-        return UserValidationResult.model_validate(result)
-
-    except ValidationError as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la validation"
-        )
-
-
-# === ROUTES AVEC PARAMÈTRES UUID - À LA FIN ===
+# =====================================================
+# ROUTES AVEC PARAMÈTRES UUID - À LA FIN
+# =====================================================
 # CORRECTION CRITIQUE : Ces routes doivent être EN DERNIER
 
 @router.get(
@@ -375,13 +395,10 @@ async def get_user_profile(
     """
     Récupère le profil public d'un utilisateur
 
-    Seules les informations publiques sont retournées
+    Accessible à tous les utilisateurs connectés
     """
     try:
-        user = await user_service.get_user_by_id(db, user_id)
-        if not user:
-            raise EntityNotFoundError("Utilisateur non trouvé")
-
+        user = await user_service.get_user_public_profile(db, user_id)
         return UserPublic.model_validate(user)
 
     except EntityNotFoundError as e:
@@ -397,7 +414,7 @@ async def get_user_profile(
 @router.get(
     "/{user_id}/stats",
     response_model=UserStats,
-    summary="Statistiques publiques d'un utilisateur",
+    summary="Statistiques d'un utilisateur",
     description="Récupère les statistiques publiques d'un utilisateur"
 )
 async def get_user_stats(
@@ -408,7 +425,7 @@ async def get_user_stats(
     """
     Récupère les statistiques publiques d'un utilisateur
 
-    Seules les statistiques publiques sont retournées
+    Seules les statistiques publiques sont accessibles
     """
     try:
         stats = await user_service.get_user_public_statistics(db, user_id)
@@ -425,10 +442,10 @@ async def get_user_stats(
 
 
 @router.put(
-    "/admin/{user_id}",
+    "/{user_id}",
     response_model=UserProfile,
-    summary="Modifier un utilisateur (admin)",
-    description="Modification administrative d'un utilisateur"
+    summary="Modifier un utilisateur (Admin)",
+    description="Met à jour les informations d'un utilisateur (admin seulement)"
 )
 async def admin_update_user(
         user_id: UUID,
@@ -437,9 +454,9 @@ async def admin_update_user(
         db: AsyncSession = Depends(get_database)
 ) -> UserProfile:
     """
-    Modification administrative d'un utilisateur
+    Met à jour les informations d'un utilisateur
 
-    Accès réservé aux super-utilisateurs
+    Accès réservé aux administrateurs
     """
     try:
         updated_user = await user_service.admin_update_user(
@@ -458,10 +475,10 @@ async def admin_update_user(
 
 
 @router.delete(
-    "/admin/{user_id}",
+    "/{user_id}",
     response_model=MessageResponse,
-    summary="Supprimer un utilisateur (admin)",
-    description="Suppression administrative d'un utilisateur"
+    summary="Supprimer un utilisateur (Admin)",
+    description="Supprime un utilisateur (admin seulement)"
 )
 async def admin_delete_user(
         user_id: UUID,
@@ -469,13 +486,15 @@ async def admin_delete_user(
         db: AsyncSession = Depends(get_database)
 ) -> MessageResponse:
     """
-    Suppression administrative d'un utilisateur
+    Supprime un utilisateur
 
-    Accès réservé aux super-utilisateurs
+    Accès réservé aux administrateurs
+    ⚠️ ATTENTION: Cette action est irréversible !
     """
     try:
-        await user_service.admin_delete_user(db, user_id, deleted_by=current_user.id)
-
+        await user_service.admin_delete_user(
+            db, user_id, deleted_by=current_user.id
+        )
         return MessageResponse(
             message="Utilisateur supprimé avec succès",
             details={"user_id": str(user_id), "deleted_by": str(current_user.id)}
@@ -488,4 +507,59 @@ async def admin_delete_user(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur lors de la suppression de l'utilisateur"
+        )
+
+
+@router.post(
+    "/{user_id}/moderate",
+    response_model=MessageResponse,
+    summary="Modérer un utilisateur",
+    description="Effectue des actions de modération sur un utilisateur"
+)
+async def moderate_user(
+        user_id: UUID,
+        action: str = Query(..., description="Action de modération"),
+        reason: str = Query(..., description="Raison de l'action"),
+        duration: int = Query(None, description="Durée en jours (optionnel)"),
+        current_user: User = Depends(get_current_superuser),
+        db: AsyncSession = Depends(get_database)
+) -> MessageResponse:
+    """
+    Effectue des actions de modération sur un utilisateur
+
+    Actions disponibles:
+    - warn: Avertissement
+    - mute: Réduire au silence
+    - ban: Bannir temporairement
+    - permanent_ban: Bannir définitivement
+    - unban: Lever le ban
+    - verify: Vérifier le compte
+    - lock: Verrouiller le compte
+
+    - **action**: Action à effectuer
+    - **reason**: Raison de l'action (obligatoire)
+    - **duration**: Durée en jours pour les actions temporaires
+    """
+    try:
+        await user_service.moderate_user(
+            db, user_id, action, reason, duration, current_user.id
+        )
+
+        return MessageResponse(
+            message=f"Action '{action}' effectuée sur l'utilisateur {user_id}",
+            details={
+                "action": action,
+                "reason": reason,
+                "duration": duration,
+                "moderator": str(current_user.id)
+            }
+        )
+
+    except (EntityNotFoundError, ValidationError) as e:
+        raise create_http_exception_from_error(e)
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de l'action de modération"
         )

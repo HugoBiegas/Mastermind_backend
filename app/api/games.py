@@ -33,7 +33,9 @@ from app.utils.exceptions import (
 router = APIRouter(prefix="/games", tags=["Jeux"])
 
 
-# === ROUTES SPÉCIFIQUES - DOIVENT ÊTRE EN PREMIER ===
+# =====================================================
+# ROUTES SPÉCIFIQUES - DOIVENT ÊTRE EN PREMIER
+# =====================================================
 # CORRECTION CRITIQUE : Ces routes doivent être AVANT /{game_id}
 
 @router.post(
@@ -52,22 +54,15 @@ async def create_game(
 
     - **game_type**: Type de jeu (classic, quantum, hybrid, tournament)
     - **game_mode**: Mode de jeu (solo, multiplayer, ranked, training)
-    - **difficulty**: Niveau de difficulté (easy, normal, hard, expert)
-    - **max_attempts**: Nombre maximum de tentatives (1-20)
-    - **time_limit**: Limite de temps en secondes (optionnel)
-    - **max_players**: Nombre maximum de joueurs (1-8)
-    - **room_code**: Code de room personnalisé (optionnel)
-    - **is_private**: Partie privée
-    - **password**: Mot de passe pour rejoindre (optionnel)
-    - **settings**: Paramètres personnalisés
+    - **difficulty**: Niveau de difficulté (easy, medium, hard, expert, quantum)
     """
     try:
-        game_info = await game_service.create_game(
-            db, game_data, creator_id=current_user.id
+        created_game = await game_service.create_game(
+            db, game_data, current_user.id
         )
-        return game_info
+        return created_game
 
-    except ValidationError as e:
+    except (ValidationError, GameError) as e:
         raise create_http_exception_from_error(e)
 
     except Exception as e:
@@ -78,28 +73,27 @@ async def create_game(
 
 
 @router.get(
-    "/",
+    "/search",
     response_model=GameList,
-    summary="Lister les parties",
-    description="Récupère la liste des parties selon les critères"
+    summary="Rechercher des parties",
+    description="Recherche des parties selon des critères"
 )
-async def list_games(
+async def search_games(
         pagination: PaginationParams = Depends(get_pagination_params),
         search: SearchParams = Depends(get_search_params),
         game_type: Optional[GameType] = Query(None, description="Type de jeu"),
         game_mode: Optional[GameMode] = Query(None, description="Mode de jeu"),
-        status: Optional[GameStatus] = Query(None, description="Statut de la partie"),
-        is_public: Optional[bool] = Query(None, description="Parties publiques uniquement"),
+        status: Optional[GameStatus] = Query(None, description="Statut"),
+        is_public: bool = Query(True, description="Afficher uniquement les parties publiques"),
         current_user: Optional[User] = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> GameList:
     """
-    Récupère la liste des parties selon les critères de filtrage
+    Recherche des parties selon des critères
 
-    Paramètres de filtrage:
-    - **game_type**: Type de jeu (classic, quantum, hybrid, tournament)
-    - **game_mode**: Mode de jeu (solo, multiplayer, ranked, training)
-    - **status**: Statut (waiting, active, finished, cancelled)
+    - **game_type**: Type de jeu à filtrer
+    - **game_mode**: Mode de jeu à filtrer
+    - **status**: Statut à filtrer
     - **is_public**: Afficher uniquement les parties publiques
     """
     try:
@@ -206,7 +200,9 @@ async def get_leaderboard(
         )
 
 
-# === ROUTES AVEC PARAMÈTRES UUID - À LA FIN ===
+# =====================================================
+# ROUTES AVEC PARAMÈTRES UUID - À LA FIN
+# =====================================================
 # CORRECTION CRITIQUE : Ces routes doivent être EN DERNIER
 
 @router.get(
@@ -443,7 +439,7 @@ async def make_attempt(
     "/{game_id}/quantum-hint",
     response_model=QuantumHint,
     summary="Obtenir un hint quantique",
-    description="Utilise l'algorithme de Grover pour obtenir un hint"
+    description="Utilise l'informatique quantique pour obtenir un indice"
 )
 async def get_quantum_hint(
         game_id: UUID,
@@ -452,12 +448,9 @@ async def get_quantum_hint(
         db: AsyncSession = Depends(get_database)
 ) -> QuantumHint:
     """
-    Utilise l'informatique quantique pour obtenir un hint
+    Utilise l'informatique quantique pour obtenir un indice
 
-    Types de hints disponibles:
-    - **grover**: Algorithme de Grover pour la recherche
-    - **superposition**: États de superposition quantique
-    - **entanglement**: Corrélations d'intrication
+    - **hint_type**: Type de hint (grover, superposition, entanglement)
     """
     try:
         hint = await quantum_service.generate_quantum_hint(
@@ -465,7 +458,7 @@ async def get_quantum_hint(
         )
         return hint
 
-    except (EntityNotFoundError, GameError) as e:
+    except (EntityNotFoundError, GameError, ValidationError) as e:
         raise create_http_exception_from_error(e)
 
     except Exception as e:
@@ -490,7 +483,7 @@ async def get_game_stats(
     """
     Récupère les statistiques détaillées d'une partie
 
-    Inclut les scores, temps, tentatives, utilisation quantique
+    Inclut les performances des joueurs, tentatives, temps
     """
     try:
         stats = await game_service.get_game_statistics(db, game_id)
@@ -509,7 +502,7 @@ async def get_game_stats(
 @router.post(
     "/{game_id}/moderate",
     response_model=MessageResponse,
-    summary="Modération d'une partie",
+    summary="Modérer une partie",
     description="Effectue des actions de modération sur une partie"
 )
 async def moderate_game(

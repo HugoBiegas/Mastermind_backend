@@ -1,6 +1,7 @@
 """
 Dépendances FastAPI pour Quantum Mastermind
 Injection de dépendances pour l'authentification, base de données, etc.
+CORRECTION: Implémentation complète des validations de jeu
 """
 import hashlib
 import time
@@ -10,9 +11,11 @@ from uuid import UUID
 from fastapi import Depends, HTTPException, status, Request, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.core.database import get_db
 from app.models.user import User
+from app.models.game import Game, GameParticipation, ParticipationStatus
 from app.services.auth import auth_service
 from app.utils.exceptions import (
     AuthenticationError, get_http_status_code, get_exception_details
@@ -95,7 +98,7 @@ async def get_current_user_token(
     if credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Schéma d'authentification invalide. Utilisez 'Bearer token'",
+            detail="Schéma d'authentification invalide. Bearer requis",
             headers={"WWW-Authenticate": "Bearer"}
         )
 
@@ -103,15 +106,15 @@ async def get_current_user_token(
 
 
 async def get_current_user(
-        db: AsyncSession = Depends(get_database),
-        token: str = Depends(get_current_user_token)
+        token: str = Depends(get_current_user_token),
+        db: AsyncSession = Depends(get_database)
 ) -> User:
     """
     Récupère l'utilisateur actuel à partir du token JWT
 
     Args:
-        db: Session de base de données
         token: Token JWT
+        db: Session de base de données
 
     Returns:
         Utilisateur actuel
@@ -121,42 +124,49 @@ async def get_current_user(
     """
     try:
         user = await auth_service.get_current_user(db, token)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token invalide ou utilisateur introuvable",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
         return user
+
     except AuthenticationError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=e.message,
+            detail=str(e),
             headers={"WWW-Authenticate": "Bearer"}
         )
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la vérification de l'authentification"
+            detail="Erreur lors de l'authentification"
         )
 
 
 async def get_current_user_optional(
-        db: AsyncSession = Depends(get_database),
-        credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+        db: AsyncSession = Depends(get_database)
 ) -> Optional[User]:
     """
-    Récupère l'utilisateur actuel de manière optionnelle
+    Récupère l'utilisateur actuel (optionnel)
 
     Args:
+        credentials: Credentials HTTP Bearer (optionnel)
         db: Session de base de données
-        credentials: Credentials optionnelles
 
     Returns:
-        Utilisateur actuel ou None si non authentifié
+        Utilisateur actuel ou None
     """
     if not credentials:
         return None
 
     try:
-        token = credentials.credentials
-        user = await auth_service.get_current_user(db, token)
+        user = await auth_service.get_current_user(db, credentials.credentials)
         return user
-    except:
+    except (AuthenticationError, Exception):
         return None
 
 
@@ -164,7 +174,7 @@ async def get_current_active_user(
         current_user: User = Depends(get_current_user)
 ) -> User:
     """
-    Vérifie que l'utilisateur actuel est actif
+    Récupère l'utilisateur actuel s'il est actif
 
     Args:
         current_user: Utilisateur actuel
@@ -173,12 +183,12 @@ async def get_current_active_user(
         Utilisateur actif
 
     Raises:
-        HTTPException: Si l'utilisateur est inactif
+        HTTPException: Si l'utilisateur n'est pas actif
     """
     if not current_user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Compte utilisateur inactif"
+            detail="Compte utilisateur désactivé"
         )
     return current_user
 
@@ -187,7 +197,7 @@ async def get_current_verified_user(
         current_user: User = Depends(get_current_active_user)
 ) -> User:
     """
-    Vérifie que l'utilisateur actuel est vérifié (email confirmé)
+    Récupère l'utilisateur actuel s'il est vérifié
 
     Args:
         current_user: Utilisateur actuel
@@ -201,7 +211,7 @@ async def get_current_verified_user(
     if not current_user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Email non vérifié. Vérifiez votre boîte email."
+            detail="Email non vérifié. Vérifiez votre boîte de réception."
         )
     return current_user
 
@@ -210,37 +220,107 @@ async def get_current_superuser(
         current_user: User = Depends(get_current_active_user)
 ) -> User:
     """
-    Vérifie que l'utilisateur actuel est un super-utilisateur
+    Récupère l'utilisateur actuel s'il est superutilisateur
 
     Args:
         current_user: Utilisateur actuel
 
     Returns:
-        Super-utilisateur
+        Superutilisateur
 
     Raises:
-        HTTPException: Si l'utilisateur n'est pas un super-utilisateur
+        HTTPException: Si l'utilisateur n'est pas admin
     """
     if not current_user.is_superuser:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Privilèges de super-utilisateur requis"
+            detail="Privilèges administrateur requis"
         )
     return current_user
 
 
-# === DÉPENDANCES DE VALIDATION D'ACCÈS ===
+# === DÉPENDANCES DE PAGINATION ===
 
-async def validate_user_access(
-        target_user_id: UUID,
-        current_user: User = Depends(get_current_active_user)
-) -> bool:
+class PaginationParams:
+    """Paramètres de pagination"""
+
+    def __init__(
+            self,
+            page: int = Query(default=1, ge=1, description="Numéro de page"),
+            limit: int = Query(default=20, ge=1, le=100, description="Éléments par page")
+    ):
+        self.page = page
+        self.limit = limit
+        self.skip = (page - 1) * limit
+
+
+async def get_pagination_params(
+        page: int = Query(default=1, ge=1, description="Numéro de page"),
+        limit: int = Query(default=20, ge=1, le=100, description="Éléments par page")
+) -> PaginationParams:
     """
-    Valide que l'utilisateur peut accéder aux données d'un autre utilisateur
+    Récupère les paramètres de pagination
 
     Args:
-        target_user_id: ID de l'utilisateur cible
+        page: Numéro de page
+        limit: Nombre d'éléments par page
+
+    Returns:
+        Paramètres de pagination
+    """
+    return PaginationParams(page, limit)
+
+
+# === DÉPENDANCES DE RECHERCHE ===
+
+class SearchParams:
+    """Paramètres de recherche"""
+
+    def __init__(
+            self,
+            query: Optional[str] = Query(default=None, description="Terme de recherche"),
+            sort_by: str = Query(default="created_at", description="Champ de tri"),
+            sort_order: str = Query(default="desc", regex="^(asc|desc)$", description="Ordre de tri")
+    ):
+        self.query = query
+        self.sort_by = sort_by
+        self.sort_order = sort_order
+
+
+async def get_search_params(
+        query: Optional[str] = Query(default=None, description="Terme de recherche"),
+        sort_by: str = Query(default="created_at", description="Champ de tri"),
+        sort_order: str = Query(default="desc", regex="^(asc|desc)$", description="Ordre de tri")
+) -> SearchParams:
+    """
+    Récupère les paramètres de recherche
+
+    Args:
+        query: Terme de recherche
+        sort_by: Champ de tri
+        sort_order: Ordre de tri
+
+    Returns:
+        Paramètres de recherche
+    """
+    return SearchParams(query, sort_by, sort_order)
+
+
+# === DÉPENDANCES SPÉCIFIQUES AU JEU ===
+
+async def validate_game_access(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> bool:
+    """
+    Valide que l'utilisateur peut accéder à une partie
+    CORRECTION: Implémentation complète
+
+    Args:
+        game_id: ID de la partie
         current_user: Utilisateur actuel
+        db: Session de base de données
 
     Returns:
         True si l'accès est autorisé
@@ -248,163 +328,253 @@ async def validate_user_access(
     Raises:
         HTTPException: Si l'accès est refusé
     """
-    # L'utilisateur peut accéder à ses propres données
-    if current_user.id == target_user_id:
-        return True
+    try:
+        # Récupération de la partie
+        stmt = select(Game).where(Game.id == game_id)
+        result = await db.execute(stmt)
+        game = result.scalar_one_or_none()
 
-    # Les super-utilisateurs peuvent accéder à tout
-    if current_user.is_superuser:
-        return True
+        if not game:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Partie non trouvée"
+            )
 
-    # TODO: Ajouter d'autres règles d'accès (amis, parties partagées, etc.)
+        # Accès autorisé si :
+        # 1. L'utilisateur est le créateur
+        if game.creator_id == current_user.id:
+            return True
 
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Accès non autorisé aux données de cet utilisateur"
-    )
+        # 2. L'utilisateur est admin
+        if current_user.is_superuser:
+            return True
+
+        # 3. L'utilisateur participe à la partie
+        participation_stmt = select(GameParticipation).where(
+            GameParticipation.game_id == game_id,
+            GameParticipation.player_id == current_user.id
+        )
+        participation_result = await db.execute(participation_stmt)
+        participation = participation_result.scalar_one_or_none()
+
+        if participation:
+            return True
+
+        # 4. La partie est publique et permet les spectateurs
+        if not game.is_private and game.allow_spectators:
+            return True
+
+        # Accès refusé
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès refusé à cette partie"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la validation d'accès"
+        )
 
 
-# === DÉPENDANCES DE PAGINATION ===
-
-class PaginationParams:
-    """Paramètres de pagination standardisés"""
-
-    def __init__(
-            self,
-            skip: int = Query(0, ge=0, description="Nombre d'éléments à ignorer"),
-            limit: int = Query(20, ge=1, le=100, description="Nombre d'éléments à retourner")
-    ):
-        self.skip = skip
-        self.limit = limit
-
-    @property
-    def offset(self) -> int:
-        """Alias pour skip (compatibilité SQLAlchemy)"""
-        return self.skip
-
-
-async def get_pagination_params(
-        skip: int = Query(0, ge=0, description="Nombre d'éléments à ignorer"),
-        limit: int = Query(20, ge=1, le=100, description="Nombre d'éléments à retourner")
-) -> PaginationParams:
+async def validate_game_modification(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> bool:
     """
-    Dépendance pour les paramètres de pagination
+    Valide que l'utilisateur peut modifier une partie
+    CORRECTION: Implémentation complète
 
     Args:
-        skip: Nombre d'éléments à ignorer
-        limit: Nombre d'éléments à retourner
+        game_id: ID de la partie
+        current_user: Utilisateur actuel
+        db: Session de base de données
 
     Returns:
-        Paramètres de pagination validés
+        True si la modification est autorisée
+
+    Raises:
+        HTTPException: Si la modification est refusée
     """
-    return PaginationParams(skip, limit)
+    try:
+        # Récupération de la partie
+        stmt = select(Game).where(Game.id == game_id)
+        result = await db.execute(stmt)
+        game = result.scalar_one_or_none()
+
+        if not game:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Partie non trouvée"
+            )
+
+        # Modification autorisée si :
+        # 1. L'utilisateur est le créateur
+        if game.creator_id == current_user.id:
+            return True
+
+        # 2. L'utilisateur est admin
+        if current_user.is_superuser:
+            return True
+
+        # Modification refusée
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seul le créateur ou un admin peut modifier cette partie"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la validation de modification"
+        )
 
 
-# === DÉPENDANCES DE RECHERCHE ===
-
-class SearchParams:
-    """Paramètres de recherche standardisés"""
-
-    def __init__(
-            self,
-            q: Optional[str] = None,
-            category: Optional[str] = None,
-            status: Optional[str] = None,
-            limit: int = 20
-    ):
-        self.query = q.strip() if q else None
-        self.category = category
-        self.status = status
-        self.limit = min(max(1, limit), 100)
-
-
-async def get_search_params(
-        q: Optional[str] = Query(None, description="Terme de recherche"),
-        category: Optional[str] = Query(None, description="Catégorie"),
-        status: Optional[str] = Query(None, description="Statut"),
-        limit: int = Query(20, ge=1, le=100, description="Limite de résultats")
-) -> SearchParams:
+async def validate_game_participation(
+        game_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> GameParticipation:
     """
-    Dépendance pour les paramètres de recherche
+    Valide que l'utilisateur participe activement à une partie
 
     Args:
-        q: Terme de recherche
-        category: Catégorie
-        status: Statut
-        limit: Limite de résultats
+        game_id: ID de la partie
+        current_user: Utilisateur actuel
+        db: Session de base de données
 
     Returns:
-        Paramètres de recherche validés
+        Participation de l'utilisateur
+
+    Raises:
+        HTTPException: Si la participation n'est pas valide
     """
-    return SearchParams(q, category, status, limit)
+    try:
+        # Récupération de la participation
+        stmt = select(GameParticipation).where(
+            GameParticipation.game_id == game_id,
+            GameParticipation.player_id == current_user.id
+        )
+        result = await db.execute(stmt)
+        participation = result.scalar_one_or_none()
+
+        if not participation:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vous ne participez pas à cette partie"
+            )
+
+        if participation.status == ParticipationStatus.DISCONNECTED:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vous avez quitté cette partie"
+            )
+
+        if participation.status == ParticipationStatus.ELIMINATED:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vous avez été éliminé de cette partie"
+            )
+
+        return participation
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la validation de participation"
+        )
 
 
-# === DÉPENDANCES DE CACHE ===
+async def validate_uuid(
+        uuid_str: str,
+        field_name: str = "ID"
+) -> UUID:
+    """
+    Valide et convertit une chaîne UUID
 
-async def get_cache_key(
+    Args:
+        uuid_str: Chaîne UUID à valider
+        field_name: Nom du champ pour l'erreur
+
+    Returns:
+        UUID validé
+
+    Raises:
+        HTTPException: Si l'UUID est invalide
+    """
+    try:
+        return UUID(uuid_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field_name} invalide: format UUID requis"
+        )
+
+
+# === DÉPENDANCES DE SÉCURITÉ AVANCÉE ===
+
+async def check_api_key(
+        api_key: Optional[str] = Query(default=None, description="Clé API")
+) -> bool:
+    """
+    Vérifie la clé API (si configurée)
+
+    Args:
+        api_key: Clé API fournie
+
+    Returns:
+        True si la clé est valide
+
+    Raises:
+        HTTPException: Si la clé est invalide
+    """
+    # Pour l'instant, on accepte toutes les requêtes sans clé API
+    # En production, implémenter la validation des clés API
+    return True
+
+
+async def rate_limit_check(
         request: Request,
         current_user: Optional[User] = Depends(get_current_user_optional)
-) -> str:
-    """
-    Génère une clé de cache pour la requête
-
-    Args:
-        request: Requête FastAPI
-        current_user: Utilisateur actuel (optionnel)
-
-    Returns:
-        Clé de cache unique
-    """
-    # Construction de la clé de cache
-    cache_parts = [
-        request.method,
-        str(request.url.path),
-        str(sorted(request.query_params.items())),
-    ]
-
-    if current_user:
-        cache_parts.append(f"user:{current_user.id}")
-
-    # Hash de la clé pour éviter les clés trop longues
-    cache_key = "|".join(cache_parts)
-    return hashlib.md5(cache_key.encode()).hexdigest()
-
-
-# === DÉPENDANCES DE RATE LIMITING ===
-
-async def check_rate_limit(
-        request: Request,
-        client_info: Dict[str, Any] = Depends(get_client_info)
 ) -> bool:
     """
     Vérifie les limites de taux de requêtes
 
     Args:
         request: Requête FastAPI
-        client_info: Informations client
+        current_user: Utilisateur actuel (optionnel)
 
     Returns:
         True si dans les limites
 
     Raises:
-        HTTPException: Si limite dépassée
+        HTTPException: Si les limites sont dépassées
     """
-    # TODO: Implémenter le rate limiting avec Redis
-    # Pour l'instant, toujours autoriser
+    # Pour l'instant, pas de limitation
+    # En production, implémenter un système de rate limiting
     return True
 
 
-# === DÉPENDANCES DE MONITORING ===
+# === DÉPENDANCES DE LOGGING ET MÉTRIQUES ===
 
 async def log_request_metrics(
         request: Request,
+        current_user: Optional[User] = Depends(get_current_user_optional),
         client_info: Dict[str, Any] = Depends(get_client_info)
 ) -> None:
     """
-    Log les métriques de requête pour le monitoring
+    Log les métriques de requête
 
     Args:
         request: Requête FastAPI
+        current_user: Utilisateur actuel
         client_info: Informations client
     """
     # TODO: Implémenter le logging des métriques
@@ -465,185 +635,29 @@ async def get_request_context(
     }
 
 
-# === DÉPENDANCES DE VALIDATION D'ENTRÉE ===
+# === EXPORTS ===
 
-async def validate_uuid(
-        uuid_str: str,
-        field_name: str = "ID"
-) -> UUID:
-    """
-    Valide et convertit une chaîne UUID
+__all__ = [
+    # Base
+    "get_database", "get_client_info",
 
-    Args:
-        uuid_str: Chaîne UUID à valider
-        field_name: Nom du champ pour l'erreur
+    # Authentification
+    "get_current_user", "get_current_user_optional",
+    "get_current_active_user", "get_current_verified_user", "get_current_superuser",
 
-    Returns:
-        UUID validé
+    # Pagination et recherche
+    "PaginationParams", "SearchParams",
+    "get_pagination_params", "get_search_params",
 
-    Raises:
-        HTTPException: Si l'UUID est invalide
-    """
-    try:
-        return UUID(uuid_str)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"{field_name} invalide: format UUID requis"
-        )
+    # Validation de jeu
+    "validate_game_access", "validate_game_modification", "validate_game_participation",
 
+    # Utilitaires
+    "validate_uuid", "create_http_exception_from_error",
 
-# === DÉPENDANCES SPÉCIFIQUES AU JEU ===
+    # Sécurité
+    "check_api_key", "rate_limit_check",
 
-async def validate_game_access(
-        game_id: UUID,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> bool:
-    """
-    Valide que l'utilisateur peut accéder à une partie
-
-    Args:
-        game_id: ID de la partie
-        current_user: Utilisateur actuel
-        db: Session de base de données
-
-    Returns:
-        True si l'accès est autorisé
-
-    Raises:
-        HTTPException: Si l'accès est refusé
-    """
-    # TODO: Implémenter la logique de validation d'accès aux parties
-    # - Créateur de la partie
-    # - Participant à la partie
-    # - Partie publique
-    # - Admin
-    return True
-
-
-async def validate_game_modification(
-        game_id: UUID,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> bool:
-    """
-    Valide que l'utilisateur peut modifier une partie
-
-    Args:
-        game_id: ID de la partie
-        current_user: Utilisateur actuel
-        db: Session de base de données
-
-    Returns:
-        True si la modification est autorisée
-
-    Raises:
-        HTTPException: Si la modification est refusée
-    """
-    # TODO: Implémenter la logique de validation de modification
-    # - Créateur de la partie
-    # - Admin
-    # - Modérateur (si implémenté)
-    return True
-
-
-# === DÉPENDANCES DE SÉCURITÉ AVANCÉE ===
-
-async def check_api_key(
-        api_key: Optional[str] = Query(None, description="Clé API (optionnelle)")
-) -> Optional[str]:
-    """
-    Vérifie une clé API optionnelle pour les accès publics
-
-    Args:
-        api_key: Clé API
-
-    Returns:
-        Clé API validée ou None
-    """
-    # TODO: Implémenter la validation des clés API
-    return api_key
-
-
-async def require_api_key(
-        api_key: str = Query(..., description="Clé API requise")
-) -> str:
-    """
-    Requiert une clé API valide
-
-    Args:
-        api_key: Clé API
-
-    Returns:
-        Clé API validée
-
-    Raises:
-        HTTPException: Si la clé API est invalide
-    """
-    # TODO: Implémenter la validation stricte des clés API
-    if not api_key or len(api_key) < 32:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Clé API invalide ou manquante"
-        )
-    return api_key
-
-
-# === DÉPENDANCES DE FEATURE FLAGS ===
-
-async def check_feature_flag(
-        feature_name: str,
-        current_user: Optional[User] = Depends(get_current_user_optional)
-) -> bool:
-    """
-    Vérifie si une fonctionnalité est activée pour l'utilisateur
-
-    Args:
-        feature_name: Nom de la fonctionnalité
-        current_user: Utilisateur actuel
-
-    Returns:
-        True si la fonctionnalité est activée
-    """
-    # TODO: Implémenter un système de feature flags
-    # - Flags globaux
-    # - Flags par utilisateur
-    # - Flags par rôle
-    # - Tests A/B
-
-    # Pour l'instant, tout est activé
-    return True
-
-
-# === DÉPENDANCES DE LOCALISATION ===
-
-async def get_user_locale(
-        request: Request,
-        current_user: Optional[User] = Depends(get_current_user_optional)
-) -> str:
-    """
-    Détermine la locale de l'utilisateur
-
-    Args:
-        request: Requête FastAPI
-        current_user: Utilisateur actuel
-
-    Returns:
-        Code de locale (ex: 'fr-FR', 'en-US')
-    """
-    # Priorité :
-    # 1. Préférence utilisateur (si connecté)
-    # 2. Header Accept-Language
-    # 3. Défaut français
-
-    if current_user and hasattr(current_user, 'preferred_locale'):
-        return current_user.preferred_locale
-
-    accept_language = request.headers.get("Accept-Language", "")
-    if "fr" in accept_language.lower():
-        return "fr-FR"
-    elif "en" in accept_language.lower():
-        return "en-US"
-
-    return "fr-FR"  # Défaut français pour Quantum Mastermind
+    # Logging
+    "log_request_metrics", "get_request_context"
+]

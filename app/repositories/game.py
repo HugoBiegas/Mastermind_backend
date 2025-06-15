@@ -1,8 +1,9 @@
 """
 Repository pour la gestion des jeux
 Opérations CRUD et requêtes spécialisées pour les parties et tentatives
+CORRECTION: Noms de champs synchronisés avec la BDD
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -28,36 +29,37 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
             db: AsyncSession,
             field_value: str
     ) -> Optional[Game]:
-        """Récupère un jeu par room_id (implémentation abstraite)"""
-        return await self.get_by_room_id(db, field_value)
+        """Récupère un jeu par room_code (implémentation abstraite)"""
+        return await self.get_by_room_code(db, field_value)
 
-    async def get_by_room_id(
+    async def get_by_room_code(
             self,
             db: AsyncSession,
-            room_id: str,
+            room_code: str,
             *,
             with_players: bool = True,
             with_deleted: bool = False
     ) -> Optional[Game]:
         """
-        Récupère un jeu par son ID de room
+        Récupère un jeu par son code de room
+        CORRECTION: room_code (pas room_id)
 
         Args:
             db: Session de base de données
-            room_id: ID de la room
+            room_code: Code de la room
             with_players: Charger les joueurs
             with_deleted: Inclure les jeux supprimés
 
         Returns:
             Le jeu ou None
         """
-        query = select(Game).where(Game.room_id == room_id.upper())
+        query = select(Game).where(Game.room_code == room_code.upper())
 
         if not with_deleted and hasattr(Game, 'is_deleted'):
-            query = query.where(Game.is_deleted == False)
+            query = query.where(Game.is_deleted.is_(False))
 
         if with_players:
-            query = query.options(selectinload(Game.players))
+            query = query.options(selectinload(Game.participations))
 
         result = await db.execute(query)
         return result.scalar_one_or_none()
@@ -75,338 +77,263 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
             game_id: ID du jeu
 
         Returns:
-            Le jeu complet ou None
+            Le jeu avec toutes ses relations
         """
-        query = select(Game).where(Game.id == game_id).options(
-            selectinload(Game.players),
-            selectinload(Game.attempts)
+        query = (
+            select(Game)
+            .options(
+                selectinload(Game.participations).selectinload(GameParticipation.player),
+                selectinload(Game.attempts).selectinload(GameAttempt.player),
+                selectinload(Game.creator)
+            )
+            .where(Game.id == game_id)
         )
 
         result = await db.execute(query)
         return result.scalar_one_or_none()
 
-    # === MÉTHODES DE RECHERCHE DE PARTIES ===
-
-    async def get_active_games(
+    async def search_games(
             self,
             db: AsyncSession,
-            *,
-            game_type: Optional[GameType] = None,
-            has_slots: bool = False,
-            limit: int = 50
-    ) -> List[Game]:
+            search_params: GameSearch,
+            offset: int = 0,
+            limit: int = 20
+    ) -> tuple[List[Game], int]:
         """
-        Récupère les parties actives
+        Recherche des jeux selon des critères
 
         Args:
             db: Session de base de données
-            game_type: Type de jeu à filtrer
-            has_slots: Seulement les parties avec places libres
-            limit: Nombre maximum de parties
+            search_params: Paramètres de recherche
+            offset: Décalage pour la pagination
+            limit: Limite de résultats
 
         Returns:
-            Liste des parties actives
+            Tuple (liste des jeux, total)
         """
-        query = select(Game).where(
-            Game.status.in_([GameStatus.WAITING, GameStatus.ACTIVE])
-        ).options(selectinload(Game.players))
+        # Construction de la requête de base
+        query = select(Game).options(
+            selectinload(Game.creator),
+            selectinload(Game.participations)
+        )
 
-        if game_type:
-            query = query.where(Game.game_type == game_type)
+        # Application des filtres
+        conditions = []
 
-        if has_slots:
-            # Sous-requête pour compter les joueurs actuels
-            player_count = select(func.count(GameParticipation.id)).where(
-                and_(
-                    GameParticipation.game_id == Game.id,
-                    GameParticipation.status != ParticipationStatus.DISCONNECTED
+        if search_params.game_type:
+            conditions.append(Game.game_type == search_params.game_type)
+
+        if search_params.game_mode:
+            conditions.append(Game.game_mode == search_params.game_mode)
+
+        if search_params.status:
+            conditions.append(Game.status == search_params.status)
+
+        if search_params.difficulty:
+            conditions.append(Game.difficulty == search_params.difficulty)
+
+        if search_params.creator_id:
+            conditions.append(Game.creator_id == search_params.creator_id)
+
+        if search_params.room_code:
+            conditions.append(Game.room_code.ilike(f"%{search_params.room_code}%"))
+
+        if search_params.public_only:
+            conditions.append(Game.is_private == False)
+
+        if search_params.min_players:
+            # Compter les participants actifs
+            active_participants = (
+                select(func.count(GameParticipation.id))
+                .where(
+                    and_(
+                        GameParticipation.game_id == Game.id,
+                        GameParticipation.status != ParticipationStatus.DISCONNECTED
+                    )
                 )
-            ).scalar_subquery()
+                .scalar_subquery()
+            )
+            conditions.append(active_participants >= search_params.min_players)
 
-            query = query.where(player_count < Game.max_players)
+        if search_params.max_players:
+            conditions.append(Game.max_players <= search_params.max_players)
 
-        query = query.order_by(desc(Game.created_at)).limit(limit)
+        # Application des conditions
+        if conditions:
+            query = query.where(and_(*conditions))
+
+        # Comptage total
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar()
+
+        # Application de l'ordre et pagination
+        query = query.order_by(desc(Game.created_at))
+        query = query.offset(offset).limit(limit)
 
         result = await db.execute(query)
-        return result.scalars().all()
+        games = result.scalars().all()
+
+        return list(games), total
 
     async def get_user_games(
             self,
             db: AsyncSession,
             user_id: UUID,
-            *,
-            status: Optional[GameStatus] = None,
+            status_filter: Optional[GameStatus] = None,
+            offset: int = 0,
             limit: int = 20
-    ) -> List[Game]:
+    ) -> tuple[List[Game], int]:
         """
-        Récupère les parties d'un utilisateur
+        Récupère les jeux d'un utilisateur
 
         Args:
             db: Session de base de données
             user_id: ID de l'utilisateur
-            status: Statut des parties à filtrer
-            limit: Nombre maximum de parties
+            status_filter: Filtre sur le statut
+            offset: Décalage pour la pagination
+            limit: Limite de résultats
 
         Returns:
-            Liste des parties de l'utilisateur
+            Tuple (liste des jeux, total)
         """
-        # Jointure avec GameParticipation pour récupérer les parties de l'utilisateur
-        query = select(Game).join(GameParticipation).where(
-            GameParticipation.user_id == user_id
-        ).options(selectinload(Game.players))
+        # Jeux créés ou auxquels l'utilisateur participe
+        query = (
+            select(Game)
+            .options(
+                selectinload(Game.creator),
+                selectinload(Game.participations).selectinload(GameParticipation.player)
+            )
+            .where(
+                or_(
+                    Game.creator_id == user_id,
+                    Game.participations.any(GameParticipation.player_id == user_id)
+                )
+            )
+        )
 
-        if status:
-            query = query.where(Game.status == status)
+        if status_filter:
+            query = query.where(Game.status == status_filter)
 
-        query = query.order_by(desc(Game.created_at)).limit(limit)
-
-        result = await db.execute(query)
-        return result.scalars().all()
-
-    async def search_games(
-            self,
-            db: AsyncSession,
-            search_criteria: GameSearch
-    ) -> Dict[str, Any]:
-        """
-        Recherche avancée de parties
-
-        Args:
-            db: Session de base de données
-            search_criteria: Critères de recherche
-
-        Returns:
-            Résultats de recherche paginés
-        """
-        query = select(Game).options(selectinload(Game.players))
-
-        # Filtres
-        if search_criteria.game_type:
-            query = query.where(Game.game_type == search_criteria.game_type)
-
-        if search_criteria.game_mode:
-            query = query.where(Game.game_mode == search_criteria.game_mode)
-
-        if search_criteria.status:
-            query = query.where(Game.status == search_criteria.status)
-
-        if search_criteria.difficulty:
-            query = query.where(Game.difficulty == search_criteria.difficulty)
-
-        if search_criteria.has_slots:
-            # Seulement les parties avec places libres
-            player_count = select(func.count(GameParticipation.id)).where(
-                GameParticipation.game_id == Game.id
-            ).scalar_subquery()
-            query = query.where(player_count < Game.max_players)
-
-        if search_criteria.created_by:
-            query = query.where(Game.created_by == search_criteria.created_by)
-
-        # Tri
-        if search_criteria.sort_by == 'created_at':
-            sort_field = Game.created_at
-        elif search_criteria.sort_by == 'players_count':
-            sort_field = func.count(GameParticipation.id)
-        else:
-            sort_field = Game.created_at
-
-        if search_criteria.sort_order == 'asc':
-            query = query.order_by(sort_field)
-        else:
-            query = query.order_by(desc(sort_field))
-
-        # Pagination
-        total_query = select(func.count(Game.id)).select_from(query.subquery())
-        total_result = await db.execute(total_query)
+        # Comptage total
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
         total = total_result.scalar()
 
-        offset = (search_criteria.page - 1) * search_criteria.page_size
-        query = query.offset(offset).limit(search_criteria.page_size)
+        # Application de l'ordre et pagination
+        query = query.order_by(desc(Game.created_at))
+        query = query.offset(offset).limit(limit)
 
         result = await db.execute(query)
         games = result.scalars().all()
 
-        return {
-            'games': games,
-            'total': total,
-            'page': search_criteria.page,
-            'page_size': search_criteria.page_size,
-            'total_pages': (total + search_criteria.page_size - 1) // search_criteria.page_size
-        }
+        return list(games), total
 
-    # === MÉTHODES DE VALIDATION ===
-
-    async def is_room_id_available(
+    async def get_public_games(
             self,
             db: AsyncSession,
-            room_id: str
-    ) -> bool:
+            offset: int = 0,
+            limit: int = 20
+    ) -> tuple[List[Game], int]:
         """
-        Vérifie si un ID de room est disponible
+        Récupère les jeux publics
 
         Args:
             db: Session de base de données
-            room_id: ID de room à vérifier
+            offset: Décalage pour la pagination
+            limit: Limite de résultats
 
         Returns:
-            True si disponible
+            Tuple (liste des jeux, total)
         """
-        query = select(func.count(Game.id)).where(
-            Game.room_id == room_id.upper()
+        query = (
+            select(Game)
+            .options(
+                selectinload(Game.creator),
+                selectinload(Game.participations)
+            )
+            .where(
+                and_(
+                    Game.is_private == False,
+                    Game.status.in_([GameStatus.WAITING, GameStatus.ACTIVE])
+                )
+            )
         )
 
+        # Comptage total
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar()
+
+        # Application de l'ordre et pagination
+        query = query.order_by(desc(Game.created_at))
+        query = query.offset(offset).limit(limit)
+
         result = await db.execute(query)
-        count = result.scalar()
-        return count == 0
+        games = result.scalars().all()
 
-    async def can_user_join_game(
+        return list(games), total
+
+    async def get_games_statistics(
             self,
             db: AsyncSession,
-            game_id: UUID,
-            user_id: UUID
+            time_period: str = "all"
     ) -> Dict[str, Any]:
         """
-        Vérifie si un utilisateur peut rejoindre une partie
+        Récupère les statistiques des jeux
 
         Args:
             db: Session de base de données
-            game_id: ID de la partie
-            user_id: ID de l'utilisateur
-
-        Returns:
-            Dictionnaire avec can_join et raison si impossible
-        """
-        game = await self.get_by_id(db, game_id, eager_load=['players'])
-        if not game:
-            return {'can_join': False, 'reason': 'Partie non trouvée'}
-
-        # Vérifications
-        if game.status != GameStatus.WAITING:
-            return {'can_join': False, 'reason': 'Partie déjà commencée ou terminée'}
-
-        if game.is_full:
-            return {'can_join': False, 'reason': 'Partie complète'}
-
-        # Vérifier si l'utilisateur est déjà dans la partie
-        for player in game.players:
-            if player.user_id == user_id:
-                return {'can_join': False, 'reason': 'Déjà dans la partie'}
-
-        return {'can_join': True}
-
-    # === MÉTHODES DE STATISTIQUES ===
-
-    async def get_game_statistics(
-            self,
-            db: AsyncSession,
-            *,
-            period_days: int = 30
-    ) -> Dict[str, Any]:
-        """
-        Récupère les statistiques générales des jeux
-
-        Args:
-            db: Session de base de données
-            period_days: Période en jours pour les stats
+            time_period: Période (all, month, week, day)
 
         Returns:
             Dictionnaire des statistiques
         """
-        since_date = datetime.utcnow() - timedelta(days=period_days)
+        # Calcul de la date de début selon la période
+        now = datetime.now(timezone.utc)
+        if time_period == "day":
+            start_date = now - timedelta(days=1)
+        elif time_period == "week":
+            start_date = now - timedelta(weeks=1)
+        elif time_period == "month":
+            start_date = now - timedelta(days=30)
+        else:
+            start_date = None
 
-        # Requêtes de statistiques
-        total_games_query = select(func.count(Game.id))
-        active_games_query = select(func.count(Game.id)).where(
-            Game.status.in_([GameStatus.WAITING, GameStatus.ACTIVE])
-        )
-        recent_games_query = select(func.count(Game.id)).where(
-            Game.created_at >= since_date
-        )
+        # Construction de la requête de base
+        query = select(Game)
+        if start_date:
+            query = query.where(Game.created_at >= start_date)
 
-        # Exécution des requêtes
-        total_games_result = await db.execute(total_games_query)
-        active_games_result = await db.execute(active_games_query)
-        recent_games_result = await db.execute(recent_games_query)
+        # Statistiques générales
+        stats_query = select(
+            func.count(Game.id).label('total_games'),
+            func.count(case((Game.status == GameStatus.FINISHED, 1))).label('finished_games'),
+            func.count(case((Game.status == GameStatus.ACTIVE, 1))).label('active_games'),
+            func.count(case((Game.status == GameStatus.WAITING, 1))).label('waiting_games'),
+            func.avg(Game.max_players).label('avg_players'),
+            func.count(case((Game.quantum_enabled == True, 1))).label('quantum_games')
+        ).select_from(Game)
 
-        total_games = total_games_result.scalar()
-        active_games = active_games_result.scalar()
-        recent_games = recent_games_result.scalar()
+        if start_date:
+            stats_query = stats_query.where(Game.created_at >= start_date)
 
-        # Statistiques par type de jeu
-        type_stats_query = select(
-            Game.game_type,
-            func.count(Game.id).label('count')
-        ).group_by(Game.game_type)
-
-        type_stats_result = await db.execute(type_stats_query)
-        type_stats = {row.game_type: row.count for row in type_stats_result}
-
-        return {
-            'total_games': total_games,
-            'active_games': active_games,
-            'recent_games': recent_games,
-            'games_by_type': type_stats,
-            'period_days': period_days
-        }
-
-    async def get_user_game_stats(
-            self,
-            db: AsyncSession,
-            user_id: UUID
-    ) -> Dict[str, Any]:
-        """
-        Récupère les statistiques de jeu d'un utilisateur
-
-        Args:
-            db: Session de base de données
-            user_id: ID de l'utilisateur
-
-        Returns:
-            Dictionnaire des statistiques
-        """
-        # Jointure avec GameParticipation pour les stats
-        query = select(
-            func.count(GameParticipation.id).label('total_games'),
-            func.sum(case((GameParticipation.has_won == True, 1), else_=0)).label('wins'),
-            func.avg(GameParticipation.score).label('avg_score'),
-            func.sum(GameParticipation.quantum_measurements_used).label('total_measurements'),
-            func.sum(GameParticipation.grover_hints_used).label('total_grover_hints'),
-            func.avg(GameParticipation.quantum_advantage_score).label('avg_quantum_advantage')
-        ).where(GameParticipation.user_id == user_id)
-
-        result = await db.execute(query)
-        row = result.first()
-
-        if not row or row.total_games == 0:
-            return {
-                'total_games': 0,
-                'wins': 0,
-                'losses': 0,
-                'win_rate': 0.0,
-                'avg_score': 0.0,
-                'total_measurements': 0,
-                'total_grover_hints': 0,
-                'avg_quantum_advantage': 0.0
-            }
-
-        total_games = row.total_games or 0
-        wins = row.wins or 0
+        result = await db.execute(stats_query)
+        stats = result.first()
 
         return {
-            'total_games': total_games,
-            'wins': wins,
-            'losses': total_games - wins,
-            'win_rate': (wins / total_games * 100) if total_games > 0 else 0.0,
-            'avg_score': float(row.avg_score or 0),
-            'total_measurements': row.total_measurements or 0,
-            'total_grover_hints': row.total_grover_hints or 0,
-            'avg_quantum_advantage': float(row.avg_quantum_advantage or 0)
+            'total_games': stats.total_games or 0,
+            'finished_games': stats.finished_games or 0,
+            'active_games': stats.active_games or 0,
+            'waiting_games': stats.waiting_games or 0,
+            'average_players': float(stats.avg_players or 0),
+            'quantum_games': stats.quantum_games or 0,
+            'period': time_period
         }
 
 
 class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict]):
-    """Repository pour les joueurs dans les parties"""
+    """Repository pour les participations de jeu"""
 
     def __init__(self):
         super().__init__(GameParticipation)
@@ -416,8 +343,7 @@ class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict])
             db: AsyncSession,
             field_value: Any
     ) -> Optional[GameParticipation]:
-        """Implémentation abstraite - récupère par game_id + user_id"""
-        # Cette méthode nécessiterait deux valeurs, on l'adapte
+        """Implémentation abstraite"""
         return None
 
     async def get_player_in_game(
@@ -427,7 +353,8 @@ class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict])
             user_id: UUID
     ) -> Optional[GameParticipation]:
         """
-        Récupère un joueur dans une partie spécifique
+        Récupère la participation d'un joueur dans une partie
+        CORRECTION: player_id (pas user_id)
 
         Args:
             db: Session de base de données
@@ -440,7 +367,7 @@ class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict])
         query = select(GameParticipation).where(
             and_(
                 GameParticipation.game_id == game_id,
-                GameParticipation.user_id == user_id
+                GameParticipation.player_id == user_id
             )
         )
 
@@ -475,7 +402,41 @@ class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict])
         query = query.order_by(GameParticipation.join_order)
 
         result = await db.execute(query)
-        return result.scalars().all()
+        return list(result.scalars().all())
+
+    async def get_user_active_participations(
+            self,
+            db: AsyncSession,
+            user_id: UUID
+    ) -> List[GameParticipation]:
+        """
+        Récupère les participations actives d'un utilisateur
+        CORRECTION: player_id (pas user_id)
+
+        Args:
+            db: Session de base de données
+            user_id: ID de l'utilisateur
+
+        Returns:
+            Liste des participations actives
+        """
+        query = (
+            select(GameParticipation)
+            .options(selectinload(GameParticipation.game))
+            .where(
+                and_(
+                    GameParticipation.player_id == user_id,
+                    GameParticipation.status.in_([
+                        ParticipationStatus.WAITING,
+                        ParticipationStatus.READY,
+                        ParticipationStatus.ACTIVE
+                    ])
+                )
+            )
+        )
+
+        result = await db.execute(query)
+        return list(result.scalars().all())
 
 
 class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):
@@ -502,6 +463,7 @@ class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):
     ) -> List[GameAttempt]:
         """
         Récupère les tentatives d'un joueur
+        CORRECTION: player_id (pas user_id)
 
         Args:
             db: Session de base de données
@@ -523,7 +485,7 @@ class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):
             query = query.limit(limit)
 
         result = await db.execute(query)
-        return result.scalars().all()
+        return list(result.scalars().all())
 
     async def get_game_attempts(
             self,
@@ -541,17 +503,20 @@ class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):
             limit: Nombre maximum de tentatives
 
         Returns:
-            Liste des tentatives
+            Liste des tentatives ordonnées
         """
-        query = select(GameAttempt).where(
-            GameAttempt.game_id == game_id
-        ).order_by(GameAttempt.created_at)
+        query = (
+            select(GameAttempt)
+            .options(selectinload(GameAttempt.player))
+            .where(GameAttempt.game_id == game_id)
+            .order_by(GameAttempt.created_at)
+        )
 
         if limit:
             query = query.limit(limit)
 
         result = await db.execute(query)
-        return result.scalars().all()
+        return list(result.scalars().all())
 
     async def get_latest_attempt(
             self,
@@ -561,6 +526,7 @@ class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):
     ) -> Optional[GameAttempt]:
         """
         Récupère la dernière tentative d'un joueur
+        CORRECTION: player_id (pas user_id)
 
         Args:
             db: Session de base de données
@@ -570,12 +536,17 @@ class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):
         Returns:
             La dernière tentative ou None
         """
-        query = select(GameAttempt).where(
-            and_(
-                GameAttempt.game_id == game_id,
-                GameAttempt.player_id == player_id
+        query = (
+            select(GameAttempt)
+            .where(
+                and_(
+                    GameAttempt.game_id == game_id,
+                    GameAttempt.player_id == player_id
+                )
             )
-        ).order_by(desc(GameAttempt.attempt_number)).limit(1)
+            .order_by(desc(GameAttempt.attempt_number))
+            .limit(1)
+        )
 
         result = await db.execute(query)
         return result.scalar_one_or_none()
@@ -588,6 +559,7 @@ class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):
     ) -> int:
         """
         Compte les tentatives d'un joueur
+        CORRECTION: player_id (pas user_id)
 
         Args:
             db: Session de base de données
@@ -605,4 +577,44 @@ class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):
         )
 
         result = await db.execute(query)
-        return result.scalar()
+        return result.scalar() or 0
+
+    async def get_winning_attempt(
+            self,
+            db: AsyncSession,
+            game_id: UUID
+    ) -> Optional[GameAttempt]:
+        """
+        Récupère la tentative gagnante d'une partie
+
+        Args:
+            db: Session de base de données
+            game_id: ID de la partie
+
+        Returns:
+            La tentative gagnante ou None
+        """
+        query = (
+            select(GameAttempt)
+            .options(selectinload(GameAttempt.player))
+            .where(
+                and_(
+                    GameAttempt.game_id == game_id,
+                    GameAttempt.is_correct == True
+                )
+            )
+            .order_by(GameAttempt.created_at)
+            .limit(1)
+        )
+
+        result = await db.execute(query)
+        return result.scalar_one_or_none()
+
+
+# === EXPORTS ===
+
+__all__ = [
+    "GameRepository",
+    "GameParticipationRepository",
+    "GameAttemptRepository"
+]

@@ -1,6 +1,7 @@
 """
 Modèles de jeu pour Quantum Mastermind
 SQLAlchemy 2.0.41 avec typing moderne et support quantique
+CORRECTION: Alignement avec le schéma PostgreSQL init.sql
 """
 import json
 import secrets
@@ -24,172 +25,135 @@ if TYPE_CHECKING:
     from app.models.user import User
 
 
-# === ÉNUMÉRATIONS ===
+# === ÉNUMÉRATIONS SYNCHRONISÉES AVEC LA BDD ===
 
 class GameType(str, Enum):
-    """Types de jeu disponibles"""
+    """Types de jeu disponibles - SYNC avec init.sql"""
     CLASSIC = "classic"        # Mastermind classique
     QUANTUM = "quantum"        # Avec fonctionnalités quantiques
-    HYBRID = "hybrid"          # Mix classique/quantique
-    TOURNAMENT = "tournament"  # Mode tournoi
+    SPEED = "speed"           # Mode rapidité
+    PRECISION = "precision"    # Mode précision
 
 
 class GameMode(str, Enum):
-    """Modes de jeu"""
-    SOLO = "solo"             # Jeu solo
-    MULTIPLAYER = "multiplayer"  # Multijoueur coopératif
-    VERSUS = "versus"         # Joueur contre joueur
+    """Modes de jeu - SYNC avec init.sql"""
+    SINGLE = "single"             # Jeu solo
+    MULTIPLAYER = "multiplayer"   # Multijoueur coopératif
     BATTLE_ROYALE = "battle_royale"  # Élimination progressive
-    RANKED = "ranked"         # Partie classée
-    TRAINING = "training"     # Mode entraînement
+    TOURNAMENT = "tournament"     # Mode tournoi
 
 
 class GameStatus(str, Enum):
-    """États d'une partie"""
+    """États d'une partie - SYNC avec init.sql"""
     WAITING = "waiting"       # En attente de joueurs
     STARTING = "starting"     # Démarrage en cours
     ACTIVE = "active"         # Partie en cours
     PAUSED = "paused"         # En pause
     FINISHED = "finished"     # Terminée
     CANCELLED = "cancelled"   # Annulée
-    ABANDONED = "abandoned"   # Abandonnée
+    ABORTED = "aborted"       # Abandonnée
 
 
 class Difficulty(str, Enum):
-    """Niveaux de difficulté"""
-    EASY = "easy"            # Facile (4 couleurs, 3 positions)
-    NORMAL = "normal"        # Normal (6 couleurs, 4 positions)
-    HARD = "hard"           # Difficile (8 couleurs, 5 positions)
-    EXPERT = "expert"       # Expert (10 couleurs, 6 positions)
+    """Niveaux de difficulté - SYNC avec init.sql"""
+    EASY = "easy"            # Facile
+    MEDIUM = "medium"        # Moyen
+    HARD = "hard"           # Difficile
+    EXPERT = "expert"       # Expert
+    QUANTUM = "quantum"     # Quantique
 
 
 class ParticipationStatus(str, Enum):
-    """Statut de participation"""
-    ACTIVE = "active"        # Participe activement
-    SPECTATOR = "spectator"  # Spectateur
-    ELIMINATED = "eliminated"  # Éliminé (battle royale)
+    """Statut de participation - SYNC avec init.sql"""
+    WAITING = "waiting"      # En attente
+    READY = "ready"         # Prêt
+    ACTIVE = "active"       # Participe activement
+    FINISHED = "finished"   # Terminé
+    ELIMINATED = "eliminated"  # Éliminé
     DISCONNECTED = "disconnected"  # Déconnecté
-    FINISHED = "finished"    # Terminé sa partie
 
 
 # === FONCTIONS UTILITAIRES ===
 
-def generate_room_code(length: int = 6) -> str:
-    """Génère un code de room aléatoire"""
-    chars = string.ascii_uppercase + string.digits
-    # Éviter les caractères confus
-    chars = chars.replace('0', '').replace('O', '').replace('1', '').replace('I', '')
-    return ''.join(secrets.choice(chars) for _ in range(length))
+def generate_room_code() -> str:
+    """Génère un code de room unique"""
+    return ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
 
 
-def generate_solution(combination_length: int, color_count: int, allow_duplicates: bool = True) -> List[int]:
+def generate_solution(length: int = 4, colors: int = 6) -> List[int]:
     """Génère une solution aléatoire"""
-    if allow_duplicates:
-        return [secrets.randbelow(color_count) + 1 for _ in range(combination_length)]
-    else:
-        if color_count < combination_length:
-            raise ValueError("Pas assez de couleurs pour une combinaison sans doublons")
-        colors = list(range(1, color_count + 1))
-        return secrets.SystemRandom().sample(colors, combination_length)
+    return [secrets.randbelow(colors) + 1 for _ in range(length)]
 
 
-def calculate_game_score(
-    attempts_used: int,
-    max_attempts: int,
-    time_taken: int,
-    difficulty: Difficulty,
-    quantum_bonus: int = 0
-) -> int:
+def calculate_game_score(attempts: int, time_taken: int, max_attempts: int = 12) -> int:
     """Calcule le score d'une partie"""
-    base_scores = {
-        Difficulty.EASY: 100,
-        Difficulty.NORMAL: 200,
-        Difficulty.HARD: 400,
-        Difficulty.EXPERT: 800
-    }
+    if attempts > max_attempts:
+        return 0
 
-    base_score = base_scores.get(difficulty, 200)
+    base_score = 1000
+    attempt_penalty = (attempts - 1) * 50
+    time_penalty = min(time_taken // 10, 200)
 
-    # Bonus basé sur les tentatives restantes
-    attempts_bonus = max(0, (max_attempts - attempts_used) * 10)
-
-    # Bonus temporel (bonus si résolu rapidement)
-    time_bonus = max(0, (600 - time_taken) // 10)  # 10 min = 600s
-
-    total_score = base_score + attempts_bonus + time_bonus + quantum_bonus
-    return max(0, total_score)
+    return max(0, base_score - attempt_penalty - time_penalty)
 
 
-# === MODÈLE PRINCIPAL DE PARTIE ===
+# === MODÈLES SQLALCHEMY ===
 
 class Game(Base):
     """
-    Modèle principal représentant une partie de Quantum Mastermind
+    Modèle principal d'une partie de jeu
+    CORRECTION: Synchronisé avec init.sql
     """
     __tablename__ = "games"
 
-    # === IDENTIFICATION ===
+    # === CLÉS ET IDENTIFICATION ===
 
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        default=uuid4
+        default=uuid4,
+        index=True
     )
 
+    # CORRECTION: room_code (pas room_id)
     room_code: Mapped[str] = mapped_column(
         String(10),
         unique=True,
-        index=True,
         nullable=False,
-        default=lambda: generate_room_code()
+        index=True
     )
 
-    # === CONFIGURATION DE JEU ===
+    # === CONFIGURATION DU JEU ===
 
     game_type: Mapped[GameType] = mapped_column(
         String(20),
         nullable=False,
+        default=GameType.CLASSIC,
         index=True
     )
 
     game_mode: Mapped[GameMode] = mapped_column(
         String(20),
         nullable=False,
+        default=GameMode.SINGLE,
         index=True
     )
 
     status: Mapped[GameStatus] = mapped_column(
-        String(15),
+        String(20),
         nullable=False,
         default=GameStatus.WAITING,
         index=True
     )
 
     difficulty: Mapped[Difficulty] = mapped_column(
-        String(10),
+        String(20),
         nullable=False,
-        default=Difficulty.NORMAL
+        default=Difficulty.MEDIUM,
+        index=True
     )
 
-    # === PARAMÈTRES DE PARTIE ===
-
-    max_players: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=1
-    )
-
-    max_attempts: Mapped[Optional[int]] = mapped_column(
-        Integer,
-        nullable=True,
-        default=10
-    )
-
-    time_limit: Mapped[Optional[int]] = mapped_column(
-        Integer,
-        nullable=True,
-        comment="Limite de temps en secondes"
-    )
+    # === PARAMÈTRES DE JEU ===
 
     combination_length: Mapped[int] = mapped_column(
         Integer,
@@ -197,13 +161,37 @@ class Game(Base):
         default=4
     )
 
-    color_count: Mapped[int] = mapped_column(
+    available_colors: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=6
     )
 
-    # === ACCÈS ET SÉCURITÉ ===
+    max_attempts: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        default=12
+    )
+
+    time_limit: Mapped[Optional[int]] = mapped_column(
+        Integer,  # en secondes
+        nullable=True
+    )
+
+    max_players: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1
+    )
+
+    # === SOLUTION ET CONFIGURATION ===
+
+    solution: Mapped[List[int]] = mapped_column(
+        JSONB,
+        nullable=False
+    )
+
+    # === FLAGS DE CONFIGURATION ===
 
     is_private: Mapped[bool] = mapped_column(
         Boolean,
@@ -211,57 +199,38 @@ class Game(Base):
         default=False
     )
 
-    password_hash: Mapped[Optional[str]] = mapped_column(
-        String(64),
-        nullable=True,
-        comment="Hash SHA-256 du mot de passe"
-    )
-
-    # === SOLUTION ET ÉTAT ===
-
-    solution: Mapped[Optional[str]] = mapped_column(
-        Text,
-        nullable=True,
-        comment="Solution classique (JSON array)"
-    )
-
-    quantum_solution: Mapped[Optional[str]] = mapped_column(
-        Text,
-        nullable=True,
-        comment="État quantique de la solution"
-    )
-
-    solution_hash: Mapped[Optional[str]] = mapped_column(
-        String(64),
-        nullable=True,
-        comment="Hash de vérification de la solution"
-    )
-
-    # === MÉTADONNÉES DE JEU ===
-
-    current_turn: Mapped[int] = mapped_column(
-        Integer,
+    allow_spectators: Mapped[bool] = mapped_column(
+        Boolean,
         nullable=False,
-        default=0
+        default=True
     )
 
-    total_attempts: Mapped[int] = mapped_column(
-        Integer,
+    enable_chat: Mapped[bool] = mapped_column(
+        Boolean,
         nullable=False,
-        default=0
+        default=True
     )
 
-    quantum_hints_used: Mapped[int] = mapped_column(
-        Integer,
+    quantum_enabled: Mapped[bool] = mapped_column(
+        Boolean,
         nullable=False,
-        default=0
+        default=False
+    )
+
+    # === RELATIONS ===
+
+    creator_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
     )
 
     # === PARAMÈTRES AVANCÉS ===
 
-    settings: Mapped[Optional[dict]] = mapped_column(
+    settings: Mapped[Dict[str, Any]] = mapped_column(
         JSONB,
-        nullable=True,
+        nullable=False,
         default=lambda: {
             "allow_duplicates": True,
             "allow_blanks": False,
@@ -272,104 +241,73 @@ class Game(Base):
         }
     )
 
-    # === RELATIONS ===
-
-    # Créateur de la partie
-    creator_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True
-    )
-
-    creator: Mapped["User"] = relationship(
-        "User",
-        back_populates="created_games",
-        foreign_keys=[creator_id]
-    )
-
-    # Participations
-    participations: Mapped[List["GameParticipation"]] = relationship(
-        "GameParticipation",
-        back_populates="game",
-        cascade="all, delete-orphan",
-        lazy="dynamic"
-    )
-
-    # Tentatives
-    attempts: Mapped[List["GameAttempt"]] = relationship(
-        "GameAttempt",
-        back_populates="game",
-        cascade="all, delete-orphan",
-        lazy="dynamic"
+    quantum_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True
     )
 
     # === MÉTADONNÉES TEMPORELLES ===
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
         nullable=False,
+        default=lambda: datetime.now(timezone.utc),
         index=True
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-        nullable=False
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
     )
 
     started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
-        nullable=True
+        nullable=True,
+        index=True
     )
 
     finished_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
-        nullable=True
+        nullable=True,
+        index=True
     )
 
-    # === CONTRAINTES ===
+    # === RELATIONS SQLALCHEMY ===
 
-    __table_args__ = (
-        # Index composites
-        Index("ix_games_status_created", "status", "created_at"),
-        Index("ix_games_type_mode", "game_type", "game_mode"),
-        Index("ix_games_creator_status", "creator_id", "status"),
+    creator: Mapped["User"] = relationship(
+        "User",
+        back_populates="created_games",
+        lazy="select"
+    )
 
-        # Contraintes de validation
-        CheckConstraint(
-            "max_players >= 1 AND max_players <= 8",
-            name="ck_max_players_range"
-        ),
-        CheckConstraint(
-            "combination_length >= 3 AND combination_length <= 8",
-            name="ck_combination_length_range"
-        ),
-        CheckConstraint(
-            "color_count >= 4 AND color_count <= 12",
-            name="ck_color_count_range"
-        ),
-        CheckConstraint(
-            "max_attempts IS NULL OR max_attempts > 0",
-            name="ck_max_attempts_positive"
-        ),
-        CheckConstraint(
-            "time_limit IS NULL OR time_limit > 0",
-            name="ck_time_limit_positive"
-        ),
-        CheckConstraint(
-            "current_turn >= 0",
-            name="ck_current_turn_positive"
-        ),
-        CheckConstraint(
-            "total_attempts >= 0",
-            name="ck_total_attempts_positive"
-        ),
+    participations: Mapped[List["GameParticipation"]] = relationship(
+        "GameParticipation",
+        back_populates="game",
+        cascade="all, delete-orphan",
+        lazy="select"
+    )
+
+    attempts: Mapped[List["GameAttempt"]] = relationship(
+        "GameAttempt",
+        back_populates="game",
+        cascade="all, delete-orphan",
+        lazy="select"
     )
 
     # === PROPRIÉTÉS CALCULÉES ===
+
+    @property
+    def current_players_count(self) -> int:
+        """Nombre de joueurs actuels"""
+        if not self.participations:
+            return 0
+        return len([p for p in self.participations if p.status != ParticipationStatus.DISCONNECTED])
+
+    @property
+    def is_full(self) -> bool:
+        """Vérifie si la partie est complète"""
+        return self.current_players_count >= self.max_players
 
     @property
     def is_active(self) -> bool:
@@ -379,133 +317,58 @@ class Game(Base):
     @property
     def is_finished(self) -> bool:
         """Vérifie si la partie est terminée"""
-        return self.status in [GameStatus.FINISHED, GameStatus.CANCELLED, GameStatus.ABANDONED]
+        return self.status in [GameStatus.FINISHED, GameStatus.CANCELLED, GameStatus.ABORTED]
 
     @property
-    def duration(self) -> Optional[int]:
+    def duration_seconds(self) -> Optional[int]:
         """Durée de la partie en secondes"""
         if not self.started_at:
             return None
         end_time = self.finished_at or datetime.now(timezone.utc)
         return int((end_time - self.started_at).total_seconds())
 
-    @property
-    def is_full(self) -> bool:
-        """Vérifie si la partie est pleine"""
-        current_players = self.participations.filter(
-            GameParticipation.status == ParticipationStatus.ACTIVE
-        ).count()
-        return current_players >= self.max_players
+    # === MÉTHODES UTILITAIRES ===
 
-    @property
-    def can_start(self) -> bool:
-        """Vérifie si la partie peut démarrer"""
-        if self.status != GameStatus.WAITING:
+    def can_join(self, user_id: UUID) -> bool:
+        """Vérifie si un utilisateur peut rejoindre la partie"""
+        if self.is_full or self.is_finished:
             return False
 
-        active_players = self.participations.filter(
-            GameParticipation.status == ParticipationStatus.ACTIVE
-        ).count()
+        # Vérifier si l'utilisateur n'est pas déjà dans la partie
+        if self.participations:
+            existing = [p for p in self.participations if p.player_id == user_id]
+            if existing:
+                return False
 
-        return active_players >= 1  # Au moins 1 joueur
+        return True
 
-    @property
-    def solution_list(self) -> Optional[List[int]]:
-        """Retourne la solution sous forme de liste"""
-        if not self.solution:
+    def get_participation(self, user_id: UUID) -> Optional["GameParticipation"]:
+        """Récupère la participation d'un utilisateur"""
+        if not self.participations:
             return None
-        try:
-            return json.loads(self.solution)
-        except (json.JSONDecodeError, TypeError):
-            return None
+        for participation in self.participations:
+            if participation.player_id == user_id:
+                return participation
+        return None
 
-    # === MÉTHODES D'INSTANCE ===
-
-    def get_setting(self, key: str, default: Any = None) -> Any:
-        """Récupère un paramètre de jeu"""
-        if not self.settings:
-            return default
-        return self.settings.get(key, default)
-
-    def set_setting(self, key: str, value: Any) -> None:
-        """Définit un paramètre de jeu"""
-        if self.settings is None:
-            self.settings = {}
-        self.settings[key] = value
-
-    def set_solution(self, solution: List[int]) -> None:
-        """Définit la solution de la partie"""
-        import hashlib
-
-        self.solution = json.dumps(solution)
-        # Hash pour vérification d'intégrité
-        solution_str = ''.join(map(str, solution))
-        self.solution_hash = hashlib.sha256(solution_str.encode()).hexdigest()
-
-    def verify_solution(self, proposed_solution: List[int]) -> bool:
-        """Vérifie une solution proposée"""
-        return self.solution_list == proposed_solution
-
-    def start_game(self) -> None:
-        """Démarre la partie"""
-        if not self.can_start:
-            raise ValueError("La partie ne peut pas démarrer")
-
-        self.status = GameStatus.ACTIVE
-        self.started_at = datetime.now(timezone.utc)
-
-    def finish_game(self, reason: str = "completed") -> None:
-        """Termine la partie"""
-        if not self.is_active:
-            raise ValueError("La partie n'est pas active")
-
-        self.status = GameStatus.FINISHED
-        self.finished_at = datetime.now(timezone.utc)
-
-    def pause_game(self) -> None:
-        """Met en pause la partie"""
-        if not self.is_active:
-            raise ValueError("La partie n'est pas active")
-
-        self.status = GameStatus.PAUSED
-
-    def resume_game(self) -> None:
-        """Reprend la partie"""
-        if self.status != GameStatus.PAUSED:
-            raise ValueError("La partie n'est pas en pause")
-
-        self.status = GameStatus.ACTIVE
-
-    def cancel_game(self, reason: str = "cancelled") -> None:
-        """Annule la partie"""
-        if self.is_finished:
-            raise ValueError("La partie est déjà terminée")
-
-        self.status = GameStatus.CANCELLED
-        self.finished_at = datetime.now(timezone.utc)
-
-    def abandon_game(self) -> None:
-        """Abandonne la partie (tous les joueurs partis)"""
-        self.status = GameStatus.ABANDONED
-        self.finished_at = datetime.now(timezone.utc)
-
-    def add_quantum_hint(self) -> None:
-        """Incrémente le compteur de hints quantiques"""
-        self.quantum_hints_used += 1
+    def add_quantum_data(self, data: Dict[str, Any]) -> None:
+        """Ajoute des données quantiques"""
+        if self.quantum_data is None:
+            self.quantum_data = {}
+        self.quantum_data.update(data)
 
     def __repr__(self) -> str:
-        return f"<Game(id={self.id}, room_code='{self.room_code}', status='{self.status}')>"
+        return f"<Game(id={self.id}, room_code={self.room_code}, status={self.status})>"
 
-
-# === MODÈLE DE PARTICIPATION ===
 
 class GameParticipation(Base):
     """
-    Participation d'un utilisateur à une partie
+    Modèle de participation à une partie
+    CORRECTION: Synchronisé avec init.sql
     """
     __tablename__ = "game_participations"
 
-    # === IDENTIFICATION ===
+    # === CLÉS ===
 
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -513,7 +376,7 @@ class GameParticipation(Base):
         default=uuid4
     )
 
-    # === RELATIONS ===
+    # === RELATIONS - CORRECTION: player_id (pas user_id) ===
 
     game_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -529,39 +392,42 @@ class GameParticipation(Base):
         index=True
     )
 
-    game: Mapped["Game"] = relationship(
-        "Game",
-        back_populates="participations"
-    )
-
-    player: Mapped["User"] = relationship(
-        "User",
-        back_populates="game_participations"
-    )
-
-    # === STATUT ET PARAMÈTRES ===
+    # === STATUT ===
 
     status: Mapped[ParticipationStatus] = mapped_column(
-        String(15),
+        String(20),
         nullable=False,
-        default=ParticipationStatus.ACTIVE
+        default=ParticipationStatus.WAITING,
+        index=True
     )
 
-    player_name: Mapped[Optional[str]] = mapped_column(
-        String(50),
-        nullable=True,
-        comment="Nom d'affichage dans cette partie"
+    role: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="player"
     )
 
-    # === STATISTIQUES ===
+    # === ORDRE ET POSITION ===
 
-    attempts_made: Mapped[int] = mapped_column(
+    join_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False
+    )
+
+    finish_position: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True
+    )
+
+    # === SCORING ET STATISTIQUES ===
+
+    score: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0
     )
 
-    score: Mapped[int] = mapped_column(
+    attempts_made: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0
@@ -573,24 +439,38 @@ class GameParticipation(Base):
         default=0
     )
 
+    time_taken: Mapped[Optional[int]] = mapped_column(
+        Integer,  # en secondes
+        nullable=True
+    )
+
+    # === FLAGS ===
+
+    is_ready: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
+
     is_winner: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=False
     )
 
-    finish_position: Mapped[Optional[int]] = mapped_column(
-        Integer,
-        nullable=True,
-        comment="Position de fin (1er, 2ème, etc.)"
+    is_eliminated: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
     )
 
     # === MÉTADONNÉES TEMPORELLES ===
+    # CORRECTION: Synchronisé avec init.sql - pas de created_at/updated_at
 
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
     )
 
     left_at: Mapped[Optional[datetime]] = mapped_column(
@@ -603,93 +483,37 @@ class GameParticipation(Base):
         nullable=True
     )
 
-    # === CONTRAINTES ===
+    # === RELATIONS SQLALCHEMY ===
 
-    __table_args__ = (
-        # Contrainte d'unicité
-        Index("ix_participation_unique", "game_id", "player_id", unique=True),
-
-        # Index composites
-        Index("ix_participation_game_status", "game_id", "status"),
-        Index("ix_participation_player_status", "player_id", "status"),
-
-        # Contraintes de validation
-        CheckConstraint(
-            "attempts_made >= 0",
-            name="ck_attempts_made_positive"
-        ),
-        CheckConstraint(
-            "score >= 0",
-            name="ck_score_positive"
-        ),
-        CheckConstraint(
-            "quantum_hints_used >= 0",
-            name="ck_quantum_hints_positive"
-        ),
-        CheckConstraint(
-            "finish_position IS NULL OR finish_position > 0",
-            name="ck_finish_position_positive"
-        ),
+    game: Mapped["Game"] = relationship(
+        "Game",
+        back_populates="participations",
+        lazy="select"
     )
 
-    # === PROPRIÉTÉS CALCULÉES ===
+    player: Mapped["User"] = relationship(
+        "User",
+        back_populates="game_participations",
+        lazy="select"
+    )
 
-    @property
-    def is_active(self) -> bool:
-        """Vérifie si la participation est active"""
-        return self.status == ParticipationStatus.ACTIVE
-
-    @property
-    def duration(self) -> Optional[int]:
-        """Durée de participation en secondes"""
-        if not self.joined_at:
-            return None
-        end_time = self.left_at or datetime.now(timezone.utc)
-        return int((end_time - self.joined_at).total_seconds())
-
-    # === MÉTHODES D'INSTANCE ===
-
-    def leave_game(self) -> None:
-        """Quitte la partie"""
-        if self.status == ParticipationStatus.ACTIVE:
-            self.status = ParticipationStatus.DISCONNECTED
-            self.left_at = datetime.now(timezone.utc)
-
-    def eliminate(self) -> None:
-        """Élimine le joueur (battle royale)"""
-        self.status = ParticipationStatus.ELIMINATED
-        self.finished_at = datetime.now(timezone.utc)
-
-    def finish(self, position: int, won: bool = False) -> None:
-        """Termine la participation"""
-        self.status = ParticipationStatus.FINISHED
-        self.finish_position = position
-        self.is_winner = won
-        self.finished_at = datetime.now(timezone.utc)
-
-    def add_attempt(self, score: int = 0) -> None:
-        """Ajoute une tentative"""
-        self.attempts_made += 1
-        if score > 0:
-            self.score += score
-
-    def use_quantum_hint(self) -> None:
-        """Utilise un hint quantique"""
-        self.quantum_hints_used += 1
+    # === CONTRAINTE D'UNICITÉ ===
+    __table_args__ = (
+        Index('idx_participation_unique', 'game_id', 'player_id', unique=True),
+    )
 
     def __repr__(self) -> str:
-        return f"<GameParticipation(game_id={self.game_id}, player_id={self.player_id}, status='{self.status}')>"
+        return f"<GameParticipation(game_id={self.game_id}, player_id={self.player_id}, status={self.status})>"
 
-
-# === MODÈLE DE TENTATIVE ===
 
 class GameAttempt(Base):
     """
-    Tentative d'un joueur dans une partie
+    Modèle d'une tentative de jeu
+    CORRECTION: Synchronisé avec init.sql
     """
     __tablename__ = "game_attempts"
 
-    # === IDENTIFICATION ===
+    # === CLÉS ===
 
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -697,7 +521,7 @@ class GameAttempt(Base):
         default=uuid4
     )
 
-    # === RELATIONS ===
+    # === RELATIONS - CORRECTION: player_id (pas user_id) ===
 
     game_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -713,58 +537,59 @@ class GameAttempt(Base):
         index=True
     )
 
-    game: Mapped["Game"] = relationship(
-        "Game",
-        back_populates="attempts"
-    )
-
-    player: Mapped["User"] = relationship(
-        "User",
-        back_populates="game_attempts"
-    )
-
-    # === DONNÉES DE TENTATIVE ===
+    # === DÉTAILS DE LA TENTATIVE ===
 
     attempt_number: Mapped[int] = mapped_column(
         Integer,
+        nullable=False,
+        index=True
+    )
+
+    combination: Mapped[List[int]] = mapped_column(
+        JSONB,
         nullable=False
     )
 
-    combination: Mapped[str] = mapped_column(
-        String(100),
-        nullable=False,
-        comment="Combinaison proposée (JSON array)"
-    )
+    # === RÉSULTATS ===
 
-    # === RÉSULTAT ===
-
-    black_pegs: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        comment="Pions noirs (bonne couleur, bonne position)"
-    )
-
-    white_pegs: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        comment="Pions blancs (bonne couleur, mauvaise position)"
-    )
-
-    is_winning: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False
-    )
-
-    score_gained: Mapped[int] = mapped_column(
+    correct_positions: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0
     )
 
-    # === MÉTADONNÉES QUANTIQUES ===
+    correct_colors: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0
+    )
+
+    is_correct: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        index=True
+    )
+
+    # === SCORING ET TEMPS ===
+
+    attempt_score: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0
+    )
+
+    time_taken: Mapped[Optional[int]] = mapped_column(
+        Integer,  # temps pour cette tentative en ms
+        nullable=True
+    )
+
+    # === DONNÉES QUANTIQUES ===
+
+    quantum_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True
+    )
 
     used_quantum_hint: Mapped[bool] = mapped_column(
         Boolean,
@@ -772,84 +597,40 @@ class GameAttempt(Base):
         default=False
     )
 
-    quantum_data: Mapped[Optional[dict]] = mapped_column(
-        JSONB,
-        nullable=True,
-        comment="Données quantiques de la tentative"
+    hint_type: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True
     )
 
-    # === MÉTADONNÉES TEMPORELLES ===
+    # === MÉTADONNÉES ===
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
         nullable=False,
+        default=lambda: datetime.now(timezone.utc),
         index=True
     )
 
-    time_taken: Mapped[Optional[int]] = mapped_column(
-        Integer,
-        nullable=True,
-        comment="Temps pris pour cette tentative en secondes"
+    # === RELATIONS SQLALCHEMY ===
+
+    game: Mapped["Game"] = relationship(
+        "Game",
+        back_populates="attempts",
+        lazy="select"
+    )
+
+    player: Mapped["User"] = relationship(
+        "User",
+        back_populates="game_attempts",
+        lazy="select"
     )
 
     # === CONTRAINTES ===
-
     __table_args__ = (
-        # Index composites
-        Index("ix_attempt_game_number", "game_id", "attempt_number"),
-        Index("ix_attempt_player_game", "player_id", "game_id"),
-        Index("ix_attempt_created", "created_at"),
-
-        # Contraintes de validation
-        CheckConstraint(
-            "attempt_number > 0",
-            name="ck_attempt_number_positive"
-        ),
-        CheckConstraint(
-            "black_pegs >= 0",
-            name="ck_black_pegs_positive"
-        ),
-        CheckConstraint(
-            "white_pegs >= 0",
-            name="ck_white_pegs_positive"
-        ),
-        CheckConstraint(
-            "score_gained >= 0",
-            name="ck_score_gained_positive"
-        ),
-        CheckConstraint(
-            "time_taken IS NULL OR time_taken >= 0",
-            name="ck_time_taken_positive"
-        ),
+        Index('idx_attempt_unique', 'game_id', 'player_id', 'attempt_number', unique=True),
     )
 
-    # === PROPRIÉTÉS CALCULÉES ===
-
-    @property
-    def combination_list(self) -> List[int]:
-        """Retourne la combinaison sous forme de liste"""
-        try:
-            return json.loads(self.combination)
-        except (json.JSONDecodeError, TypeError):
-            return []
-
-    @property
-    def total_pegs(self) -> int:
-        """Nombre total de pions (noirs + blancs)"""
-        return self.black_pegs + self.white_pegs
-
-    # === MÉTHODES D'INSTANCE ===
-
-    def set_combination(self, combination: List[int]) -> None:
-        """Définit la combinaison proposée"""
-        self.combination = json.dumps(combination)
-
-    def set_result(self, black_pegs: int, white_pegs: int, is_winning: bool = False) -> None:
-        """Définit le résultat de la tentative"""
-        self.black_pegs = black_pegs
-        self.white_pegs = white_pegs
-        self.is_winning = is_winning
+    # === MÉTHODES UTILITAIRES ===
 
     def add_quantum_data(self, data: Dict[str, Any]) -> None:
         """Ajoute des données quantiques"""
@@ -879,6 +660,12 @@ def game_before_insert(mapper, connection, target):
             "show_statistics": True
         }
 
+    if not target.solution:
+        target.solution = generate_solution(
+            target.combination_length,
+            target.available_colors
+        )
+
 
 @event.listens_for(Game, 'before_update')
 def game_before_update(mapper, connection, target):
@@ -897,7 +684,8 @@ def participation_after_insert(mapper, connection, target):
 def attempt_before_insert(mapper, connection, target):
     """Traitement avant insertion d'une tentative"""
     if isinstance(target.combination, list):
-        target.combination = json.dumps(target.combination)
+        # Ne rien faire car JSONB gère automatiquement les listes
+        pass
 
 
 # === EXPORTS ===

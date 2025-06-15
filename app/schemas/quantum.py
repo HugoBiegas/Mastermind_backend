@@ -1,9 +1,10 @@
 """
 Schémas Pydantic pour les fonctionnalités quantiques
 Validation et sérialisation des données quantiques
+CORRECTION: Synchronisé avec le service quantum
 """
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 from enum import Enum
 
@@ -21,8 +22,10 @@ class QuantumHintType(str, Enum):
 
 
 class QuantumAlgorithm(str, Enum):
-    """Algorithmes quantiques supportés"""
-    GROVER_SEARCH = "grover_search"
+    """Algorithmes quantiques supportés - CORRECTION: Ajout des valeurs du service"""
+    GROVER = "grover"                           # Valeur retournée par le service
+    GROVER_SEARCH = "grover_search"            # Nom complet
+    QUANTUM = "quantum"                         # Valeur générique
     QUANTUM_FOURIER = "quantum_fourier"
     PHASE_ESTIMATION = "phase_estimation"
     AMPLITUDE_AMPLIFICATION = "amplitude_amplification"
@@ -59,13 +62,6 @@ class QuantumState(BaseModel):
         """Valide que les amplitudes forment un état quantique valide"""
         if not v:
             raise ValueError("Au moins une amplitude requise")
-
-        # Vérifier la normalisation (optionnel pour la flexibilité)
-        total_prob = sum(abs(amp)**2 for amp in v)
-        if abs(total_prob - 1.0) > 1e-6:
-            # Logger un avertissement mais ne pas rejeter
-            pass
-
         return v
 
 
@@ -76,68 +72,25 @@ class QuantumGate(BaseModel):
     gate_type: QuantumGateType = Field(..., description="Type de porte")
     qubits: List[int] = Field(..., description="Qubits cibles")
     parameters: Optional[List[float]] = Field(None, description="Paramètres de la porte")
-    description: Optional[str] = Field(None, description="Description de la porte")
-
-    @field_validator('qubits')
-    @classmethod
-    def validate_qubits(cls, v: List[int]) -> List[int]:
-        """Valide les indices de qubits"""
-        if not v:
-            raise ValueError("Au moins un qubit requis")
-
-        for qubit in v:
-            if qubit < 0:
-                raise ValueError("Les indices de qubits doivent être positifs")
-
-        return v
 
 
 class QuantumCircuit(BaseModel):
     """Circuit quantique"""
     model_config = ConfigDict(from_attributes=True)
 
-    n_qubits: int = Field(..., ge=1, le=20, description="Nombre de qubits")
+    n_qubits: int = Field(..., description="Nombre de qubits")
     gates: List[QuantumGate] = Field(..., description="Portes du circuit")
-    name: Optional[str] = Field(None, description="Nom du circuit")
-    description: Optional[str] = Field(None, description="Description du circuit")
-    classical_bits: int = Field(default=0, description="Nombre de bits classiques")
-
-    @field_validator('gates')
-    @classmethod
-    def validate_gates(cls, v: List[QuantumGate]) -> List[QuantumGate]:
-        """Valide la liste des portes"""
-        if not v:
-            raise ValueError("Au moins une porte requise")
-        return v
-
-
-class QuantumMeasurement(BaseModel):
-    """Mesure quantique"""
-    model_config = ConfigDict(from_attributes=True)
-
-    qubits: List[int] = Field(..., description="Qubits à mesurer")
-    classical_bits: List[int] = Field(..., description="Bits classiques de sortie")
-    shots: int = Field(default=1024, ge=1, le=10000, description="Nombre de mesures")
+    measurements: List[int] = Field(default_factory=list, description="Qubits mesurés")
+    depth: int = Field(..., description="Profondeur du circuit")
 
 
 class QuantumJob(BaseModel):
     """Job quantique"""
     model_config = ConfigDict(from_attributes=True)
 
-    circuit: QuantumCircuit = Field(..., description="Circuit à exécuter")
-    measurements: List[QuantumMeasurement] = Field(..., description="Mesures à effectuer")
-    backend: str = Field(default="qasm_simulator", description="Backend quantique")
-    shots: int = Field(default=1024, ge=1, le=10000, description="Nombre total de shots")
-    optimization_level: int = Field(default=1, ge=0, le=3, description="Niveau d'optimisation")
-
-
-# === SCHÉMAS DE RÉSULTATS ===
-
-class QuantumResult(BaseModel):
-    """Résultat d'exécution quantique"""
-    model_config = ConfigDict(from_attributes=True)
-
-    counts: Dict[str, int] = Field(..., description="Comptages des mesures")
+    job_id: str = Field(..., description="ID du job")
+    circuit: QuantumCircuit = Field(..., description="Circuit exécuté")
+    backend: str = Field(..., description="Backend utilisé")
     shots: int = Field(..., description="Nombre de shots")
     success: bool = Field(..., description="Exécution réussie")
     execution_time: float = Field(..., description="Temps d'exécution en secondes")
@@ -167,19 +120,26 @@ class QuantumProbabilities(BaseModel):
 # === SCHÉMAS DE HINTS QUANTIQUES ===
 
 class QuantumHint(BaseModel):
-    """Indice quantique pour le jeu"""
+    """
+    Indice quantique pour le jeu
+    CORRECTION: Champs optionnels pour correspondre au service
+    """
     model_config = ConfigDict(from_attributes=True)
 
-    hint_type: QuantumHintType = Field(..., description="Type d'indice")
+    # Champs de base (du service quantum)
     message: str = Field(..., description="Message de l'indice")
+    type: str = Field(..., description="Type d'indice")  # Utilise 'type' comme dans le service
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confiance de l'indice")
-    cost: int = Field(default=0, description="Coût en points")
 
-    # Données techniques
-    algorithm_used: Optional[QuantumAlgorithm] = Field(None, description="Algorithme utilisé")
-    circuit_depth: Optional[int] = Field(None, description="Profondeur du circuit")
+    # Champs techniques (optionnels)
+    algorithm_used: Optional[str] = Field(None, description="Algorithme utilisé")
     qubits_used: Optional[int] = Field(None, description="Nombre de qubits utilisés")
     execution_time: Optional[float] = Field(None, description="Temps d'exécution")
+
+    # Champs optionnels supplémentaires
+    hint_type: Optional[str] = Field(None, description="Type de hint (alias)")
+    cost: int = Field(default=0, description="Coût en points")
+    circuit_depth: Optional[int] = Field(None, description="Profondeur du circuit")
 
     # Données de jeu
     affected_positions: Optional[List[int]] = Field(None, description="Positions affectées")
@@ -187,8 +147,9 @@ class QuantumHint(BaseModel):
     suggested_colors: Optional[List[int]] = Field(None, description="Couleurs suggérées")
 
     # Métadonnées
-    created_at: datetime = Field(default_factory=datetime.now, description="Date de création")
+    created_at: Optional[datetime] = Field(None, description="Date de création")
     expires_at: Optional[datetime] = Field(None, description="Date d'expiration")
+    error: Optional[str] = Field(None, description="Message d'erreur éventuel")
 
 
 class QuantumHintRequest(BaseModel):
@@ -246,14 +207,37 @@ class SuperpositionAnalysis(BaseModel):
     entanglement_present: bool = Field(..., description="Intrication présente")
 
 
-class EntanglementAnalysis(BaseModel):
-    """Analyse d'intrication"""
+class EntanglementMeasure(BaseModel):
+    """Mesure d'intrication"""
     model_config = ConfigDict(from_attributes=True)
 
-    entangled_qubits: List[List[int]] = Field(..., description="Qubits intriqués")
-    entanglement_measure: float = Field(..., description="Mesure d'intrication")
-    schmidt_coefficients: List[float] = Field(..., description="Coefficients de Schmidt")
-    bipartite_cuts: List[Dict[str, Any]] = Field(..., description="Coupures biparties")
+    entanglement_entropy: float = Field(..., description="Entropie d'intrication")
+    concurrence: float = Field(..., description="Concurrence")
+    negativity: float = Field(..., description="Négativité")
+    entangled_qubits: List[Tuple[int, int]] = Field(..., description="Paires de qubits intriqués")
+
+
+# === SCHÉMAS DE VALIDATION ===
+
+class QuantumValidation(BaseModel):
+    """Validation des données quantiques"""
+    model_config = ConfigDict(from_attributes=True)
+
+    is_valid: bool = Field(..., description="Données valides")
+    errors: List[str] = Field(default_factory=list, description="Erreurs détectées")
+    warnings: List[str] = Field(default_factory=list, description="Avertissements")
+    quantum_properties_preserved: bool = Field(..., description="Propriétés quantiques préservées")
+
+
+class CircuitOptimization(BaseModel):
+    """Optimisation de circuit quantique"""
+    model_config = ConfigDict(from_attributes=True)
+
+    original_depth: int = Field(..., description="Profondeur originale")
+    optimized_depth: int = Field(..., description="Profondeur optimisée")
+    gate_count_reduction: int = Field(..., description="Réduction du nombre de portes")
+    fidelity: float = Field(..., description="Fidélité après optimisation")
+    optimization_time: float = Field(..., description="Temps d'optimisation")
 
 
 # === SCHÉMAS DE CONFIGURATION ===
@@ -263,71 +247,24 @@ class QuantumBackendConfig(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     name: str = Field(..., description="Nom du backend")
-    provider: str = Field(..., description="Fournisseur")
     max_qubits: int = Field(..., description="Nombre maximum de qubits")
     max_shots: int = Field(..., description="Nombre maximum de shots")
-    quantum_volume: Optional[int] = Field(None, description="Volume quantique")
-    gate_time: Optional[float] = Field(None, description="Temps de porte en ns")
-    readout_error: Optional[float] = Field(None, description="Erreur de lecture")
-    gate_error: Optional[float] = Field(None, description="Erreur de porte")
-    connectivity: Optional[List[List[int]]] = Field(None, description="Connectivité des qubits")
-    available: bool = Field(default=True, description="Backend disponible")
+    coupling_map: Optional[List[List[int]]] = Field(None, description="Carte de couplage")
+    gate_set: List[str] = Field(..., description="Ensemble de portes supportées")
+    error_rates: Dict[str, float] = Field(default_factory=dict, description="Taux d'erreur")
 
 
 class QuantumExperiment(BaseModel):
-    """Expérience quantique complète"""
-    model_config = ConfigDict(from_attributes=True)
-
-    name: str = Field(..., description="Nom de l'expérience")
-    description: str = Field(..., description="Description")
-    circuits: List[QuantumCircuit] = Field(..., description="Circuits de l'expérience")
-    measurements: List[QuantumMeasurement] = Field(..., description="Mesures")
-    parameters: Dict[str, Any] = Field(..., description="Paramètres")
-    expected_results: Optional[Dict[str, Any]] = Field(None, description="Résultats attendus")
-
-    created_at: datetime = Field(default_factory=datetime.now, description="Date de création")
-    created_by: UUID = Field(..., description="Créateur")
-    tags: List[str] = Field(default_factory=list, description="Tags")
-
-
-class QuantumExperimentResult(BaseModel):
-    """Résultat d'expérience quantique"""
+    """Expérience quantique"""
     model_config = ConfigDict(from_attributes=True)
 
     experiment_id: UUID = Field(..., description="ID de l'expérience")
-    results: List[QuantumResult] = Field(..., description="Résultats des circuits")
-    analysis: Dict[str, Any] = Field(..., description="Analyse des résultats")
-    success: bool = Field(..., description="Expérience réussie")
-    total_time: float = Field(..., description="Temps total d'exécution")
-
-    executed_at: datetime = Field(default_factory=datetime.now, description="Date d'exécution")
-    backend_used: str = Field(..., description="Backend utilisé")
-    error_messages: List[str] = Field(default_factory=list, description="Messages d'erreur")
-
-
-# === SCHÉMAS DE VALIDATION ===
-
-class QuantumValidation(BaseModel):
-    """Validation de données quantiques"""
-    model_config = ConfigDict(from_attributes=True)
-
-    is_valid: bool = Field(..., description="Données valides")
-    errors: List[str] = Field(default_factory=list, description="Erreurs détectées")
-    warnings: List[str] = Field(default_factory=list, description="Avertissements")
-    suggestions: List[str] = Field(default_factory=list, description="Suggestions")
-    quantum_properties: Dict[str, Any] = Field(default_factory=dict, description="Propriétés quantiques")
-
-
-class CircuitOptimization(BaseModel):
-    """Optimisation de circuit"""
-    model_config = ConfigDict(from_attributes=True)
-
-    original_circuit: QuantumCircuit = Field(..., description="Circuit original")
-    optimized_circuit: QuantumCircuit = Field(..., description="Circuit optimisé")
-    optimization_level: int = Field(..., description="Niveau d'optimisation")
-    gate_count_reduction: int = Field(..., description="Réduction du nombre de portes")
-    depth_reduction: int = Field(..., description="Réduction de profondeur")
-    fidelity: float = Field(..., description="Fidélité de l'optimisation")
+    circuit: QuantumCircuit = Field(..., description="Circuit utilisé")
+    backend_config: QuantumBackendConfig = Field(..., description="Configuration backend")
+    results: Dict[str, Any] = Field(..., description="Résultats de l'expérience")
+    analysis: Optional[Dict[str, Any]] = Field(None, description="Analyse des résultats")
+    created_at: datetime = Field(..., description="Date de création")
+    completed_at: Optional[datetime] = Field(None, description="Date de complétion")
 
 
 # === EXPORTS ===
@@ -336,21 +273,19 @@ __all__ = [
     # Énumérations
     "QuantumHintType", "QuantumAlgorithm", "QuantumGateType",
 
-    # Structures de base
-    "QuantumState", "QuantumGate", "QuantumCircuit", "QuantumMeasurement", "QuantumJob",
+    # États et circuits
+    "QuantumState", "QuantumGate", "QuantumCircuit", "QuantumJob",
 
-    # Résultats
-    "QuantumResult", "QuantumProbabilities",
-
-    # Hints de jeu
+    # Hints
     "QuantumHint", "QuantumHintRequest", "QuantumHintResponse",
 
     # Algorithmes
-    "GroverSearchRequest", "GroverSearchResult", "SuperpositionAnalysis", "EntanglementAnalysis",
+    "GroverSearchRequest", "GroverSearchResult",
+    "SuperpositionAnalysis", "EntanglementMeasure",
 
-    # Configuration et expériences
-    "QuantumBackendConfig", "QuantumExperiment", "QuantumExperimentResult",
+    # Utilitaires
+    "QuantumProbabilities", "QuantumValidation", "CircuitOptimization",
 
-    # Validation et optimisation
-    "QuantumValidation", "CircuitOptimization"
+    # Configuration
+    "QuantumBackendConfig", "QuantumExperiment"
 ]

@@ -1,215 +1,174 @@
 """
-Schémas Pydantic pour les jeux
-Validation et sérialisation des données de jeu
+Schémas Pydantic pour la gestion des jeux
+CORRECTION: Synchronisé avec les modèles SQLAlchemy
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, validator
 
 from app.models.game import GameType, GameMode, GameStatus, Difficulty, ParticipationStatus
 
 
-# === SCHÉMAS DE CRÉATION ===
+# === SCHÉMAS DE BASE ===
 
 class GameCreate(BaseModel):
-    """Schéma pour créer une nouvelle partie"""
+    """Schéma pour créer une partie"""
     model_config = ConfigDict(from_attributes=True)
 
-    game_type: GameType = Field(..., description="Type de jeu")
-    game_mode: GameMode = Field(..., description="Mode de jeu")
-    difficulty: Difficulty = Field(default=Difficulty.NORMAL, description="Niveau de difficulté")
+    game_type: GameType = Field(default=GameType.CLASSIC, description="Type de jeu")
+    game_mode: GameMode = Field(default=GameMode.SINGLE, description="Mode de jeu")
+    difficulty: Difficulty = Field(default=Difficulty.MEDIUM, description="Difficulté")
 
-    # Paramètres optionnels
-    max_attempts: Optional[int] = Field(None, ge=1, le=50, description="Nombre maximum de tentatives")
-    time_limit: Optional[int] = Field(None, ge=10, description="Limite de temps en secondes")
-    max_players: int = Field(default=1, ge=1, le=8, description="Nombre maximum de joueurs")
+    max_attempts: Optional[int] = Field(default=12, ge=1, le=50, description="Tentatives max")
+    time_limit: Optional[int] = Field(default=None, ge=60, le=3600, description="Limite de temps (secondes)")
+    max_players: int = Field(default=1, ge=1, le=8, description="Joueurs max")
 
-    # Personnalisation
-    room_code: Optional[str] = Field(None, min_length=4, max_length=10, description="Code de room personnalisé")
     is_private: bool = Field(default=False, description="Partie privée")
-    password: Optional[str] = Field(None, min_length=4, max_length=50, description="Mot de passe")
+    password: Optional[str] = Field(default=None, min_length=1, max_length=50, description="Mot de passe")
+    room_code: Optional[str] = Field(default=None, min_length=4, max_length=10, description="Code personnalisé")
 
-    # Paramètres avancés
-    settings: Optional[Dict[str, Any]] = Field(None, description="Paramètres personnalisés")
+    allow_spectators: bool = Field(default=True, description="Autoriser les spectateurs")
+    enable_chat: bool = Field(default=True, description="Activer le chat")
+    quantum_enabled: bool = Field(default=False, description="Fonctionnalités quantiques")
 
-    @field_validator('room_code')
-    @classmethod
-    def validate_room_code(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            v = v.strip().upper()
-            if not v.isalnum():
-                raise ValueError("Le code de room doit être alphanumérique")
-        return v
-
-    @field_validator('settings')
-    @classmethod
-    def validate_settings(cls, v: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if v is None:
-            return v
-
-        # CORRECTION CRITIQUE : Paramètres autorisés étendus
-        allowed_keys = {
-            # Paramètres de base du jeu
-            'combination_length', 'color_count', 'max_attempts', 'time_limit',
-
-            # Paramètres de gameplay
-            'allow_duplicates', 'allow_blanks', 'quantum_enabled', 'quantum_hints_enabled',
-
-            # Paramètres d'interface et aide
-            'hint_cost', 'auto_reveal_pegs', 'show_statistics',
-
-            # Paramètres avancés
-            'difficulty_multiplier', 'scoring_mode', 'bonus_enabled'
-        }
-
-        for key in v.keys():
-            if key not in allowed_keys:
-                raise ValueError(f"Paramètre non autorisé: {key}")
-
-        return v
+    settings: Optional[Dict[str, Any]] = Field(default=None, description="Paramètres avancés")
 
 
 class GameJoin(BaseModel):
     """Schéma pour rejoindre une partie"""
     model_config = ConfigDict(from_attributes=True)
 
-    game_id: UUID = Field(..., description="ID de la partie à rejoindre")
-    password: Optional[str] = Field(None, description="Mot de passe si partie privée")
-    role: str = Field(default="player", description="Rôle dans la partie")
-
-    @field_validator('role')
-    @classmethod
-    def validate_role(cls, v: str) -> str:
-        allowed_roles = {'player', 'spectator'}
-        if v not in allowed_roles:
-            raise ValueError(f"Rôle non autorisé. Rôles valides: {allowed_roles}")
-        return v
+    password: Optional[str] = Field(default=None, description="Mot de passe de la partie")
+    player_name: Optional[str] = Field(default=None, max_length=50, description="Nom d'affichage")
 
 
 class GameUpdate(BaseModel):
-    """Schéma pour mettre à jour une partie"""
+    """Schéma pour modifier une partie"""
     model_config = ConfigDict(from_attributes=True)
 
-    status: Optional[GameStatus] = Field(None, description="Nouveau statut")
-    settings: Optional[Dict[str, Any]] = Field(None, description="Nouveaux paramètres")
-    max_players: Optional[int] = Field(None, ge=1, le=8, description="Nouveau max de joueurs")
-    time_limit: Optional[int] = Field(None, ge=10, description="Nouvelle limite de temps")
+    max_attempts: Optional[int] = Field(default=None, ge=1, le=50, description="Tentatives max")
+    time_limit: Optional[int] = Field(default=None, ge=60, le=3600, description="Limite de temps")
+    is_private: Optional[bool] = Field(default=None, description="Partie privée")
+    password: Optional[str] = Field(default=None, description="Mot de passe")
+    allow_spectators: Optional[bool] = Field(default=None, description="Autoriser spectateurs")
+    enable_chat: Optional[bool] = Field(default=None, description="Activer chat")
+    settings: Optional[Dict[str, Any]] = Field(default=None, description="Paramètres")
 
 
-# === SCHÉMAS DE GAMEPLAY ===
+def validate_combination(v):
+    """Valide la combinaison"""
+    if not all(isinstance(x, int) and 1 <= x <= 10 for x in v):
+        raise ValueError("Chaque couleur doit être un entier entre 1 et 10")
+    return v
+
 
 class AttemptCreate(BaseModel):
     """Schéma pour créer une tentative"""
     model_config = ConfigDict(from_attributes=True)
 
-    combination: List[int] = Field(..., min_length=4, max_length=6, description="Combinaison proposée")
-    quantum_hint_used: bool = Field(default=False, description="Indice quantique utilisé")
-    time_taken: Optional[int] = Field(None, description="Temps pris pour cette tentative")
-
-    @field_validator('combination')
-    @classmethod
-    def validate_combination(cls, v: List[int]) -> List[int]:
-        """Valide la combinaison proposée"""
-        if not v:
-            raise ValueError("La combinaison ne peut pas être vide")
-
-        for color in v:
-            if not (1 <= color <= 8):
-                raise ValueError("Les couleurs doivent être entre 1 et 8")
-
-        return v
-
-
-class AttemptResult(BaseModel):
-    """Résultat d'une tentative"""
-    model_config = ConfigDict(from_attributes=True)
-
-    attempt_number: int = Field(..., description="Numéro de la tentative")
     combination: List[int] = Field(..., description="Combinaison proposée")
-    correct_positions: int = Field(..., description="Positions correctes (pions noirs)")
-    correct_colors: int = Field(..., description="Couleurs correctes (pions blancs)")
-    is_winning: bool = Field(..., description="Tentative gagnante")
-    score_gained: int = Field(default=0, description="Points gagnés")
-    time_taken: Optional[int] = Field(None, description="Temps pris")
-    quantum_bonus: Optional[int] = Field(None, description="Bonus quantique")
-
-
-class SolutionHint(BaseModel):
-    """Indice sur la solution"""
-    model_config = ConfigDict(from_attributes=True)
-
-    hint_type: str = Field(..., description="Type d'indice")
-    message: str = Field(..., description="Message de l'indice")
-    cost: int = Field(default=0, description="Coût en points")
-    quantum_data: Optional[Dict[str, Any]] = Field(None, description="Données quantiques")
-
-
-class SolutionReveal(BaseModel):
-    """Révélation de la solution"""
-    model_config = ConfigDict(from_attributes=True)
-
-    solution: List[int] = Field(..., description="Solution complète")
-    attempts_used: int = Field(..., description="Tentatives utilisées")
-    time_elapsed: int = Field(..., description="Temps écoulé")
-    score: int = Field(..., description="Score final")
+    use_quantum_hint: bool = Field(default=False, description="Utiliser un hint quantique")
+    hint_type: Optional[str] = Field(default=None, description="Type de hint quantique")
 
 
 # === SCHÉMAS D'INFORMATION ===
 
-class GameInfo(BaseModel):
-    """Informations de base sur une partie"""
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID = Field(..., description="ID unique de la partie")
-    game_type: GameType = Field(..., description="Type de jeu")
-    game_mode: GameMode = Field(..., description="Mode de jeu")
-    status: GameStatus = Field(..., description="Statut actuel")
-    difficulty: Difficulty = Field(..., description="Niveau de difficulté")
-
-    # Timing
-    created_at: datetime = Field(..., description="Date de création")
-    started_at: Optional[datetime] = Field(None, description="Date de début")
-    finished_at: Optional[datetime] = Field(None, description="Date de fin")
-
-    # Joueurs
-    current_players: int = Field(..., description="Nombre de joueurs actuels")
-    max_players: int = Field(..., description="Nombre maximum de joueurs")
-
-    # Paramètres
-    max_attempts: Optional[int] = Field(None, description="Tentatives maximales")
-    time_limit: Optional[int] = Field(None, description="Limite de temps")
-    is_private: bool = Field(..., description="Partie privée")
-    room_code: Optional[str] = Field(None, description="Code de la room")
-
-
 class ParticipantInfo(BaseModel):
-    """Information sur un participant"""
+    """Information sur un participant - CORRECTION: player_id au lieu de user_id"""
     model_config = ConfigDict(from_attributes=True)
 
-    user_id: UUID = Field(..., description="ID de l'utilisateur")
+    # CORRECTION: Mapping depuis player_id vers user_id pour l'API
+    user_id: UUID = Field(..., description="ID de l'utilisateur", alias="player_id")
     username: str = Field(..., description="Nom d'utilisateur")
     avatar_url: Optional[str] = Field(None, description="Avatar")
     status: ParticipationStatus = Field(..., description="Statut de participation")
     score: int = Field(default=0, description="Score dans cette partie")
-    attempts_used: int = Field(default=0, description="Tentatives utilisées")
+    attempts_made: int = Field(default=0, description="Tentatives utilisées", alias="attempts_made")
     is_ready: bool = Field(default=False, description="Prêt à jouer")
     role: str = Field(default="player", description="Rôle dans la partie")
+    is_winner: bool = Field(default=False, description="Est le gagnant")
+    join_order: int = Field(..., description="Ordre d'arrivée")
+
+    # Ajout des champs manquants du modèle
+    quantum_hints_used: int = Field(default=0, description="Hints quantiques utilisés")
+    time_taken: Optional[int] = Field(None, description="Temps pris (secondes)")
+    joined_at: datetime = Field(..., description="Date de participation")
+
+    @classmethod
+    def from_participation(cls, participation):
+        """Crée un ParticipantInfo depuis une GameParticipation"""
+        return cls(
+            player_id=participation.player_id,  # Sera mappé vers user_id
+            username=participation.player.username,
+            avatar_url=participation.player.avatar_url,
+            status=participation.status,
+            score=participation.score,
+            attempts_made=participation.attempts_made,
+            is_ready=participation.is_ready,
+            role=participation.role,
+            is_winner=participation.is_winner,
+            join_order=participation.join_order,
+            quantum_hints_used=participation.quantum_hints_used,
+            time_taken=participation.time_taken,
+            joined_at=participation.joined_at
+        )
 
 
 class AttemptInfo(BaseModel):
-    """Information sur une tentative"""
+    """Information sur une tentative - CORRECTION: player_id au lieu de user_id"""
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID = Field(..., description="ID de la tentative")
     attempt_number: int = Field(..., description="Numéro de tentative")
-    user_id: UUID = Field(..., description="ID de l'utilisateur")
+    # CORRECTION: Mapping depuis player_id vers user_id pour l'API
+    user_id: UUID = Field(..., description="ID de l'utilisateur", alias="player_id")
     combination: List[int] = Field(..., description="Combinaison proposée")
     correct_positions: int = Field(..., description="Positions correctes")
     correct_colors: int = Field(..., description="Couleurs correctes")
-    timestamp: datetime = Field(..., description="Horodatage")
-    is_winning: bool = Field(..., description="Tentative gagnante")
+    is_correct: bool = Field(..., description="Tentative gagnante", alias="is_correct")
+    attempt_score: int = Field(default=0, description="Score de la tentative")
+    time_taken: Optional[int] = Field(None, description="Temps pris (ms)")
+    used_quantum_hint: bool = Field(default=False, description="Hint quantique utilisé")
+    hint_type: Optional[str] = Field(None, description="Type de hint")
+    created_at: datetime = Field(..., description="Horodatage", alias="created_at")
+
+    # Propriété calculée pour la compatibilité
+    @property
+    def timestamp(self) -> datetime:
+        """Alias pour created_at"""
+        return self.created_at
+
+    @property
+    def is_winning(self) -> bool:
+        """Alias pour is_correct"""
+        return self.is_correct
+
+
+class GameInfo(BaseModel):
+    """Informations de base d'une partie"""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(..., description="ID de la partie")
+    room_code: str = Field(..., description="Code de la room")
+    game_type: GameType = Field(..., description="Type de jeu")
+    game_mode: GameMode = Field(..., description="Mode de jeu")
+    status: GameStatus = Field(..., description="Statut")
+    difficulty: Difficulty = Field(..., description="Difficulté")
+
+    max_attempts: Optional[int] = Field(None, description="Tentatives max")
+    time_limit: Optional[int] = Field(None, description="Limite de temps")
+    max_players: int = Field(..., description="Joueurs max")
+    current_players: int = Field(..., description="Joueurs actuels")
+
+    is_private: bool = Field(..., description="Partie privée")
+    quantum_enabled: bool = Field(..., description="Quantique activé")
+
+    creator_id: UUID = Field(..., description="ID du créateur")
+    created_at: datetime = Field(..., description="Date de création")
+    started_at: Optional[datetime] = Field(None, description="Date de début")
+    finished_at: Optional[datetime] = Field(None, description="Date de fin")
 
 
 class GamePublic(BaseModel):
@@ -217,15 +176,17 @@ class GamePublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID = Field(..., description="ID de la partie")
+    room_code: str = Field(..., description="Code de room")
     game_type: GameType = Field(..., description="Type de jeu")
     game_mode: GameMode = Field(..., description="Mode de jeu")
     status: GameStatus = Field(..., description="Statut")
     difficulty: Difficulty = Field(..., description="Difficulté")
+
     current_players: int = Field(..., description="Joueurs actuels")
     max_players: int = Field(..., description="Max joueurs")
+
     created_at: datetime = Field(..., description="Date de création")
     creator_username: str = Field(..., description="Créateur")
-    room_code: Optional[str] = Field(None, description="Code de room")
     is_joinable: bool = Field(..., description="Peut être rejoint")
 
 
@@ -235,28 +196,29 @@ class GameFull(BaseModel):
 
     # Informations de base
     id: UUID = Field(..., description="ID de la partie")
+    room_code: str = Field(..., description="Code de room")
     game_type: GameType = Field(..., description="Type de jeu")
     game_mode: GameMode = Field(..., description="Mode de jeu")
     status: GameStatus = Field(..., description="Statut")
     difficulty: Difficulty = Field(..., description="Difficulté")
 
     # Paramètres
+    combination_length: int = Field(..., description="Longueur de la combinaison")
+    available_colors: int = Field(..., description="Couleurs disponibles")
     max_attempts: Optional[int] = Field(None, description="Tentatives max")
     time_limit: Optional[int] = Field(None, description="Limite de temps")
     max_players: int = Field(..., description="Joueurs max")
     is_private: bool = Field(..., description="Partie privée")
-    room_code: Optional[str] = Field(None, description="Code de room")
 
     # Timing
     created_at: datetime = Field(..., description="Date de création")
     started_at: Optional[datetime] = Field(None, description="Date de début")
     finished_at: Optional[datetime] = Field(None, description="Date de fin")
-    duration: Optional[int] = Field(None, description="Durée en secondes")
 
-    # Participants et tentatives
-    participants: List[ParticipantInfo] = Field(..., description="Participants")
-    attempts: List[AttemptInfo] = Field(..., description="Tentatives")
-    current_turn: Optional[UUID] = Field(None, description="Tour actuel")
+    # Relations
+    creator_id: UUID = Field(..., description="ID du créateur")
+    participants: List[ParticipantInfo] = Field(default_factory=list, description="Participants")
+    attempts: List[AttemptInfo] = Field(default_factory=list, description="Tentatives")
 
     # Solution (si révélée)
     solution: Optional[List[int]] = Field(None, description="Solution")
@@ -264,6 +226,70 @@ class GameFull(BaseModel):
     # Paramètres avancés
     settings: Dict[str, Any] = Field(default_factory=dict, description="Paramètres")
     quantum_data: Optional[Dict[str, Any]] = Field(None, description="Données quantiques")
+
+    # Propriétés calculées
+    @property
+    def current_players(self) -> int:
+        """Nombre de joueurs actuels"""
+        if not self.participants:
+            return 0
+        return len([p for p in self.participants if p.status != ParticipationStatus.DISCONNECTED])
+
+    @property
+    def duration(self) -> Optional[int]:
+        """Durée en secondes"""
+        if not self.started_at:
+            return None
+        end_time = self.finished_at or datetime.now(timezone.utc)
+        return int((end_time - self.started_at).total_seconds())
+
+    @property
+    def current_turn(self) -> Optional[UUID]:
+        """Tour actuel (pour les jeux au tour par tour)"""
+        # Logique pour déterminer le tour actuel
+        return None
+
+
+# === SCHÉMAS DE GAMEPLAY ===
+
+class AttemptResult(BaseModel):
+    """Résultat d'une tentative"""
+    model_config = ConfigDict(from_attributes=True)
+
+    attempt_id: UUID = Field(..., description="ID de la tentative")
+    attempt_number: int = Field(..., description="Numéro de tentative")
+    correct_positions: int = Field(..., description="Positions correctes (pegs noirs)")
+    correct_colors: int = Field(..., description="Couleurs correctes (pegs blancs)")
+    is_winning: bool = Field(..., description="Tentative gagnante")
+    score: int = Field(..., description="Score obtenu")
+
+    time_taken: Optional[int] = Field(None, description="Temps pris (ms)")
+    game_finished: bool = Field(default=False, description="Partie terminée")
+    solution: Optional[List[int]] = Field(None, description="Solution (si gagnant)")
+
+    quantum_hint_used: bool = Field(default=False, description="Hint quantique utilisé")
+    remaining_attempts: Optional[int] = Field(None, description="Tentatives restantes")
+
+
+class SolutionHint(BaseModel):
+    """Indice sur la solution"""
+    model_config = ConfigDict(from_attributes=True)
+
+    hint_type: str = Field(..., description="Type d'indice")
+    message: str = Field(..., description="Message d'indice")
+    positions: Optional[List[int]] = Field(None, description="Positions concernées")
+    colors: Optional[List[int]] = Field(None, description="Couleurs concernées")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Niveau de confiance")
+
+
+class SolutionReveal(BaseModel):
+    """Révélation de la solution (debug)"""
+    model_config = ConfigDict(from_attributes=True)
+
+    game_id: UUID = Field(..., description="ID de la partie")
+    solution: List[int] = Field(..., description="Solution complète")
+    revealed_by: UUID = Field(..., description="ID de l'utilisateur qui révèle")
+    revealed_at: datetime = Field(..., description="Date de révélation")
 
 
 # === SCHÉMAS DE RECHERCHE ===
@@ -300,12 +326,14 @@ class GameStatistics(BaseModel):
     """Statistiques d'une partie"""
     model_config = ConfigDict(from_attributes=True)
 
+    game_id: UUID = Field(..., description="ID de la partie")
     total_attempts: int = Field(..., description="Total des tentatives")
     average_attempts_per_player: float = Field(..., description="Tentatives moyennes par joueur")
-    fastest_solution: Optional[int] = Field(None, description="Solution la plus rapide")
+    fastest_solution: Optional[int] = Field(None, description="Solution la plus rapide (ms)")
     best_score: int = Field(..., description="Meilleur score")
     quantum_hints_used: int = Field(default=0, description="Indices quantiques utilisés")
     completion_rate: float = Field(..., description="Taux de complétion")
+    average_time_per_attempt: Optional[float] = Field(None, description="Temps moyen par tentative")
 
 
 class PlayerGameStats(BaseModel):
@@ -313,12 +341,14 @@ class PlayerGameStats(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     user_id: UUID = Field(..., description="ID de l'utilisateur")
+    game_id: UUID = Field(..., description="ID de la partie")
     attempts_made: int = Field(..., description="Tentatives effectuées")
-    best_attempt: Optional[AttemptResult] = Field(None, description="Meilleure tentative")
-    total_score: int = Field(..., description="Score total")
-    time_spent: int = Field(..., description="Temps passé")
-    quantum_bonuses: int = Field(default=0, description="Bonus quantiques")
-    achievements: List[str] = Field(default_factory=list, description="Succès obtenus")
+    best_attempt: Optional[int] = Field(None, description="Meilleure tentative")
+    total_time: Optional[int] = Field(None, description="Temps total (ms)")
+    score: int = Field(..., description="Score obtenu")
+    rank: int = Field(..., description="Classement dans la partie")
+    quantum_hints_used: int = Field(default=0, description="Hints quantiques utilisés")
+    is_winner: bool = Field(..., description="A gagné la partie")
 
 
 # === SCHÉMAS D'EXPORT ===
@@ -327,43 +357,40 @@ class GameExport(BaseModel):
     """Export d'une partie"""
     model_config = ConfigDict(from_attributes=True)
 
-    game_data: GameFull = Field(..., description="Données complètes de la partie")
+    game: GameFull = Field(..., description="Données de la partie")
     export_format: str = Field(..., description="Format d'export")
-    generated_at: datetime = Field(..., description="Date de génération")
-    file_size: Optional[int] = Field(None, description="Taille du fichier")
+    exported_at: datetime = Field(..., description="Date d'export")
+    exported_by: UUID = Field(..., description="Exporté par")
 
 
 class GameReplay(BaseModel):
-    """Rejeu d'une partie"""
+    """Replay d'une partie"""
     model_config = ConfigDict(from_attributes=True)
 
     game_id: UUID = Field(..., description="ID de la partie")
-    replay_data: List[AttemptResult] = Field(..., description="Données de rejeu")
-    metadata: Dict[str, Any] = Field(..., description="Métadonnées")
-    duration: int = Field(..., description="Durée totale")
+    events: List[Dict[str, Any]] = Field(..., description="Événements chronologiques")
+    duration: int = Field(..., description="Durée totale (secondes)")
+    created_at: datetime = Field(..., description="Date de création du replay")
 
 
 # === SCHÉMAS D'ADMINISTRATION ===
+
+def validate_action(v):
+    allowed_actions = ['pause', 'resume', 'terminate', 'kick_player', 'ban_player', 'warn_player']
+    if v not in allowed_actions:
+        raise ValueError(f"Action invalide. Actions valides: {allowed_actions}")
+    return v
+
 
 class GameModerationAction(BaseModel):
     """Action de modération sur une partie"""
     model_config = ConfigDict(from_attributes=True)
 
-    game_id: UUID = Field(..., description="ID de la partie")
-    action: str = Field(..., description="Action à effectuer")
+    action: str = Field(..., description="Action effectuée")
     reason: str = Field(..., description="Raison de l'action")
-    moderator_note: Optional[str] = Field(None, description="Note du modérateur")
-
-    @field_validator('action')
-    @classmethod
-    def validate_action(cls, v: str) -> str:
-        allowed_actions = {
-            'pause', 'resume', 'terminate', 'kick_player',
-            'ban_player', 'reset', 'force_end'
-        }
-        if v not in allowed_actions:
-            raise ValueError(f"Action non autorisée. Actions valides: {allowed_actions}")
-        return v
+    moderator_id: UUID = Field(..., description="ID du modérateur")
+    target_user_id: Optional[UUID] = Field(None, description="Utilisateur ciblé")
+    executed_at: datetime = Field(..., description="Date d'exécution")
 
 
 class GameAuditLog(BaseModel):
