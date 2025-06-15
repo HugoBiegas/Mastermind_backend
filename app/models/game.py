@@ -2,14 +2,17 @@
 Modèles de jeu pour Quantum Mastermind
 SQLAlchemy 2.0.41 avec typing moderne et support quantique
 """
-from datetime import datetime, timezone
-from typing import List, Optional, TYPE_CHECKING
+import json
+import secrets
+import string
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional, TYPE_CHECKING, Any, Dict
 from uuid import UUID, uuid4
 from enum import Enum
 
 from sqlalchemy import (
     Boolean, DateTime, String, Text, Integer, Float,
-    func, Index, CheckConstraint, ForeignKey, JSON
+    func, Index, CheckConstraint, ForeignKey, JSON, event
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -66,14 +69,62 @@ class ParticipationStatus(str, Enum):
     SPECTATOR = "spectator"  # Spectateur
     ELIMINATED = "eliminated"  # Éliminé (battle royale)
     DISCONNECTED = "disconnected"  # Déconnecté
-    FINISHED = "finished"    # A terminé sa partie
+    FINISHED = "finished"    # Terminé sa partie
 
 
-# === MODÈLE PRINCIPAL DE JEU ===
+# === FONCTIONS UTILITAIRES ===
+
+def generate_room_code(length: int = 6) -> str:
+    """Génère un code de room aléatoire"""
+    chars = string.ascii_uppercase + string.digits
+    # Éviter les caractères confus
+    chars = chars.replace('0', '').replace('O', '').replace('1', '').replace('I', '')
+    return ''.join(secrets.choice(chars) for _ in range(length))
+
+
+def generate_solution(combination_length: int, color_count: int, allow_duplicates: bool = True) -> List[int]:
+    """Génère une solution aléatoire"""
+    if allow_duplicates:
+        return [secrets.randbelow(color_count) + 1 for _ in range(combination_length)]
+    else:
+        if color_count < combination_length:
+            raise ValueError("Pas assez de couleurs pour une combinaison sans doublons")
+        colors = list(range(1, color_count + 1))
+        return secrets.SystemRandom().sample(colors, combination_length)
+
+
+def calculate_game_score(
+    attempts_used: int,
+    max_attempts: int,
+    time_taken: int,
+    difficulty: Difficulty,
+    quantum_bonus: int = 0
+) -> int:
+    """Calcule le score d'une partie"""
+    base_scores = {
+        Difficulty.EASY: 100,
+        Difficulty.NORMAL: 200,
+        Difficulty.HARD: 400,
+        Difficulty.EXPERT: 800
+    }
+
+    base_score = base_scores.get(difficulty, 200)
+
+    # Bonus basé sur les tentatives restantes
+    attempts_bonus = max(0, (max_attempts - attempts_used) * 10)
+
+    # Bonus temporel (bonus si résolu rapidement)
+    time_bonus = max(0, (600 - time_taken) // 10)  # 10 min = 600s
+
+    total_score = base_score + attempts_bonus + time_bonus + quantum_bonus
+    return max(0, total_score)
+
+
+# === MODÈLE PRINCIPAL DE PARTIE ===
 
 class Game(Base):
     """
-    Modèle principal d'une partie de Quantum Mastermind
+    Modèle principal représentant une partie de Quantum Mastermind
     """
     __tablename__ = "games"
 
@@ -82,16 +133,15 @@ class Game(Base):
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        default=uuid4,
-        index=True
+        default=uuid4
     )
 
-    room_code: Mapped[Optional[str]] = mapped_column(
+    room_code: Mapped[str] = mapped_column(
         String(10),
         unique=True,
         index=True,
-        nullable=True,
-        comment="Code de room personnalisé"
+        nullable=False,
+        default=lambda: generate_room_code()
     )
 
     # === CONFIGURATION DE JEU ===
@@ -108,12 +158,6 @@ class Game(Base):
         index=True
     )
 
-    difficulty: Mapped[Difficulty] = mapped_column(
-        String(10),
-        nullable=False,
-        default=Difficulty.NORMAL
-    )
-
     status: Mapped[GameStatus] = mapped_column(
         String(15),
         nullable=False,
@@ -121,12 +165,30 @@ class Game(Base):
         index=True
     )
 
-    # === PARAMÈTRES ===
+    difficulty: Mapped[Difficulty] = mapped_column(
+        String(10),
+        nullable=False,
+        default=Difficulty.NORMAL
+    )
 
-    max_attempts: Mapped[int] = mapped_column(
+    # === PARAMÈTRES DE PARTIE ===
+
+    max_players: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        default=12
+        default=1
+    )
+
+    max_attempts: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        default=10
+    )
+
+    time_limit: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Limite de temps en secondes"
     )
 
     combination_length: Mapped[int] = mapped_column(
@@ -141,19 +203,7 @@ class Game(Base):
         default=6
     )
 
-    time_limit_seconds: Mapped[Optional[int]] = mapped_column(
-        Integer,
-        nullable=True,
-        comment="Limite de temps par tentative en secondes"
-    )
-
-    max_players: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=1
-    )
-
-    # === SÉCURITÉ ET ACCÈS ===
+    # === ACCÈS ET SÉCURITÉ ===
 
     is_private: Mapped[bool] = mapped_column(
         Boolean,
@@ -162,15 +212,15 @@ class Game(Base):
     )
 
     password_hash: Mapped[Optional[str]] = mapped_column(
-        String(255),
+        String(64),
         nullable=True,
-        comment="Hash du mot de passe pour rejoindre"
+        comment="Hash SHA-256 du mot de passe"
     )
 
     # === SOLUTION ET ÉTAT ===
 
-    classical_solution: Mapped[Optional[str]] = mapped_column(
-        String(50),
+    solution: Mapped[Optional[str]] = mapped_column(
+        Text,
         nullable=True,
         comment="Solution classique (JSON array)"
     )
@@ -272,43 +322,41 @@ class Game(Base):
 
     started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
-        nullable=True,
-        index=True
+        nullable=True
     )
 
     finished_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
-        nullable=True,
-        index=True
+        nullable=True
     )
 
     # === CONTRAINTES ===
 
     __table_args__ = (
         # Index composites
-        Index("ix_games_status_type", "status", "game_type"),
-        Index("ix_games_created_status", "created_at", "status"),
+        Index("ix_games_status_created", "status", "created_at"),
+        Index("ix_games_type_mode", "game_type", "game_mode"),
         Index("ix_games_creator_status", "creator_id", "status"),
 
         # Contraintes de validation
         CheckConstraint(
-            "max_attempts > 0 AND max_attempts <= 50",
-            name="ck_max_attempts_valid"
+            "max_players >= 1 AND max_players <= 8",
+            name="ck_max_players_range"
         ),
         CheckConstraint(
-            "combination_length > 0 AND combination_length <= 10",
-            name="ck_combination_length_valid"
+            "combination_length >= 3 AND combination_length <= 8",
+            name="ck_combination_length_range"
         ),
         CheckConstraint(
-            "color_count >= combination_length",
-            name="ck_color_count_sufficient"
+            "color_count >= 4 AND color_count <= 12",
+            name="ck_color_count_range"
         ),
         CheckConstraint(
-            "max_players > 0 AND max_players <= 8",
-            name="ck_max_players_valid"
+            "max_attempts IS NULL OR max_attempts > 0",
+            name="ck_max_attempts_positive"
         ),
         CheckConstraint(
-            "time_limit_seconds IS NULL OR time_limit_seconds > 0",
+            "time_limit IS NULL OR time_limit > 0",
             name="ck_time_limit_positive"
         ),
         CheckConstraint(
@@ -321,10 +369,7 @@ class Game(Base):
         ),
     )
 
-    # === MÉTHODES ===
-
-    def __repr__(self) -> str:
-        return f"<Game(id={self.id}, type={self.game_type}, status={self.status})>"
+    # === PROPRIÉTÉS CALCULÉES ===
 
     @property
     def is_active(self) -> bool:
@@ -337,63 +382,79 @@ class Game(Base):
         return self.status in [GameStatus.FINISHED, GameStatus.CANCELLED, GameStatus.ABANDONED]
 
     @property
-    def can_join(self) -> bool:
-        """Vérifie si on peut rejoindre la partie"""
-        return self.status == GameStatus.WAITING and not self.is_full
+    def duration(self) -> Optional[int]:
+        """Durée de la partie en secondes"""
+        if not self.started_at:
+            return None
+        end_time = self.finished_at or datetime.now(timezone.utc)
+        return int((end_time - self.started_at).total_seconds())
 
     @property
     def is_full(self) -> bool:
-        """Vérifie si la partie est complète"""
-        active_count = self.participations.filter_by(status=ParticipationStatus.ACTIVE).count()
-        return active_count >= self.max_players
+        """Vérifie si la partie est pleine"""
+        current_players = self.participations.filter(
+            GameParticipation.status == ParticipationStatus.ACTIVE
+        ).count()
+        return current_players >= self.max_players
 
     @property
-    def duration_minutes(self) -> Optional[float]:
-        """Calcule la durée de la partie en minutes"""
-        if not self.started_at:
+    def can_start(self) -> bool:
+        """Vérifie si la partie peut démarrer"""
+        if self.status != GameStatus.WAITING:
+            return False
+
+        active_players = self.participations.filter(
+            GameParticipation.status == ParticipationStatus.ACTIVE
+        ).count()
+
+        return active_players >= 1  # Au moins 1 joueur
+
+    @property
+    def solution_list(self) -> Optional[List[int]]:
+        """Retourne la solution sous forme de liste"""
+        if not self.solution:
+            return None
+        try:
+            return json.loads(self.solution)
+        except (json.JSONDecodeError, TypeError):
             return None
 
-        end_time = self.finished_at or datetime.now(timezone.utc)
-        duration = end_time - self.started_at
-        return duration.total_seconds() / 60
+    # === MÉTHODES D'INSTANCE ===
 
-    @property
-    def active_player_count(self) -> int:
-        """Nombre de joueurs actifs"""
-        return self.participations.filter_by(status=ParticipationStatus.ACTIVE).count()
-
-    @property
-    def difficulty_config(self) -> dict:
-        """Configuration basée sur la difficulté"""
-        configs = {
-            Difficulty.EASY: {"colors": 4, "length": 3, "attempts": 15},
-            Difficulty.NORMAL: {"colors": 6, "length": 4, "attempts": 12},
-            Difficulty.HARD: {"colors": 8, "length": 5, "attempts": 10},
-            Difficulty.EXPERT: {"colors": 10, "length": 6, "attempts": 8}
-        }
-        return configs.get(self.difficulty, configs[Difficulty.NORMAL])
-
-    def get_setting(self, key: str, default=None):
+    def get_setting(self, key: str, default: Any = None) -> Any:
         """Récupère un paramètre de jeu"""
         if not self.settings:
             return default
         return self.settings.get(key, default)
 
-    def set_setting(self, key: str, value) -> None:
+    def set_setting(self, key: str, value: Any) -> None:
         """Définit un paramètre de jeu"""
-        if not self.settings:
+        if self.settings is None:
             self.settings = {}
         self.settings[key] = value
 
+    def set_solution(self, solution: List[int]) -> None:
+        """Définit la solution de la partie"""
+        import hashlib
+
+        self.solution = json.dumps(solution)
+        # Hash pour vérification d'intégrité
+        solution_str = ''.join(map(str, solution))
+        self.solution_hash = hashlib.sha256(solution_str.encode()).hexdigest()
+
+    def verify_solution(self, proposed_solution: List[int]) -> bool:
+        """Vérifie une solution proposée"""
+        return self.solution_list == proposed_solution
+
     def start_game(self) -> None:
         """Démarre la partie"""
-        if self.status != GameStatus.WAITING:
-            raise ValueError("La partie ne peut pas être démarrée")
+        if not self.can_start:
+            raise ValueError("La partie ne peut pas démarrer")
 
         self.status = GameStatus.ACTIVE
         self.started_at = datetime.now(timezone.utc)
 
-    def finish_game(self) -> None:
+    def finish_game(self, reason: str = "completed") -> None:
         """Termine la partie"""
         if not self.is_active:
             raise ValueError("La partie n'est pas active")
@@ -414,6 +475,26 @@ class Game(Base):
             raise ValueError("La partie n'est pas en pause")
 
         self.status = GameStatus.ACTIVE
+
+    def cancel_game(self, reason: str = "cancelled") -> None:
+        """Annule la partie"""
+        if self.is_finished:
+            raise ValueError("La partie est déjà terminée")
+
+        self.status = GameStatus.CANCELLED
+        self.finished_at = datetime.now(timezone.utc)
+
+    def abandon_game(self) -> None:
+        """Abandonne la partie (tous les joueurs partis)"""
+        self.status = GameStatus.ABANDONED
+        self.finished_at = datetime.now(timezone.utc)
+
+    def add_quantum_hint(self) -> None:
+        """Incrémente le compteur de hints quantiques"""
+        self.quantum_hints_used += 1
+
+    def __repr__(self) -> str:
+        return f"<Game(id={self.id}, room_code='{self.room_code}', status='{self.status}')>"
 
 
 # === MODÈLE DE PARTICIPATION ===
@@ -504,7 +585,7 @@ class GameParticipation(Base):
         comment="Position de fin (1er, 2ème, etc.)"
     )
 
-    # === MÉTADONNÉES ===
+    # === MÉTADONNÉES TEMPORELLES ===
 
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -526,11 +607,11 @@ class GameParticipation(Base):
 
     __table_args__ = (
         # Contrainte d'unicité
-        Index("ix_unique_game_player", "game_id", "player_id", unique=True),
+        Index("ix_participation_unique", "game_id", "player_id", unique=True),
 
-        # Index pour les requêtes
-        Index("ix_participation_status", "status"),
-        Index("ix_participation_score", "score"),
+        # Index composites
+        Index("ix_participation_game_status", "game_id", "status"),
+        Index("ix_participation_player_status", "player_id", "status"),
 
         # Contraintes de validation
         CheckConstraint(
@@ -551,15 +632,60 @@ class GameParticipation(Base):
         ),
     )
 
+    # === PROPRIÉTÉS CALCULÉES ===
+
+    @property
+    def is_active(self) -> bool:
+        """Vérifie si la participation est active"""
+        return self.status == ParticipationStatus.ACTIVE
+
+    @property
+    def duration(self) -> Optional[int]:
+        """Durée de participation en secondes"""
+        if not self.joined_at:
+            return None
+        end_time = self.left_at or datetime.now(timezone.utc)
+        return int((end_time - self.joined_at).total_seconds())
+
+    # === MÉTHODES D'INSTANCE ===
+
+    def leave_game(self) -> None:
+        """Quitte la partie"""
+        if self.status == ParticipationStatus.ACTIVE:
+            self.status = ParticipationStatus.DISCONNECTED
+            self.left_at = datetime.now(timezone.utc)
+
+    def eliminate(self) -> None:
+        """Élimine le joueur (battle royale)"""
+        self.status = ParticipationStatus.ELIMINATED
+        self.finished_at = datetime.now(timezone.utc)
+
+    def finish(self, position: int, won: bool = False) -> None:
+        """Termine la participation"""
+        self.status = ParticipationStatus.FINISHED
+        self.finish_position = position
+        self.is_winner = won
+        self.finished_at = datetime.now(timezone.utc)
+
+    def add_attempt(self, score: int = 0) -> None:
+        """Ajoute une tentative"""
+        self.attempts_made += 1
+        if score > 0:
+            self.score += score
+
+    def use_quantum_hint(self) -> None:
+        """Utilise un hint quantique"""
+        self.quantum_hints_used += 1
+
     def __repr__(self) -> str:
-        return f"<GameParticipation(game_id={self.game_id}, player_id={self.player_id}, status={self.status})>"
+        return f"<GameParticipation(game_id={self.game_id}, player_id={self.player_id}, status='{self.status}')>"
 
 
 # === MODÈLE DE TENTATIVE ===
 
 class GameAttempt(Base):
     """
-    Tentative de solution dans une partie
+    Tentative d'un joueur dans une partie
     """
     __tablename__ = "game_attempts"
 
@@ -593,7 +719,8 @@ class GameAttempt(Base):
     )
 
     player: Mapped["User"] = relationship(
-        "User"
+        "User",
+        back_populates="game_attempts"
     )
 
     # === DONNÉES DE TENTATIVE ===
@@ -625,10 +752,16 @@ class GameAttempt(Base):
         comment="Pions blancs (bonne couleur, mauvaise position)"
     )
 
-    is_solution: Mapped[bool] = mapped_column(
+    is_winning: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=False
+    )
+
+    score_gained: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0
     )
 
     # === MÉTADONNÉES QUANTIQUES ===
@@ -645,13 +778,7 @@ class GameAttempt(Base):
         comment="Données quantiques de la tentative"
     )
 
-    # === TIMING ===
-
-    time_taken_seconds: Mapped[Optional[float]] = mapped_column(
-        Float,
-        nullable=True,
-        comment="Temps pris pour cette tentative"
-    )
+    # === MÉTADONNÉES TEMPORELLES ===
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -660,15 +787,19 @@ class GameAttempt(Base):
         index=True
     )
 
+    time_taken: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Temps pris pour cette tentative en secondes"
+    )
+
     # === CONTRAINTES ===
 
     __table_args__ = (
         # Index composites
-        Index("ix_attempts_game_player", "game_id", "player_id"),
-        Index("ix_attempts_game_number", "game_id", "attempt_number"),
-
-        # Contrainte d'unicité
-        Index("ix_unique_game_player_attempt", "game_id", "player_id", "attempt_number", unique=True),
+        Index("ix_attempt_game_number", "game_id", "attempt_number"),
+        Index("ix_attempt_player_game", "player_id", "game_id"),
+        Index("ix_attempt_created", "created_at"),
 
         # Contraintes de validation
         CheckConstraint(
@@ -684,80 +815,100 @@ class GameAttempt(Base):
             name="ck_white_pegs_positive"
         ),
         CheckConstraint(
-            "time_taken_seconds IS NULL OR time_taken_seconds >= 0",
+            "score_gained >= 0",
+            name="ck_score_gained_positive"
+        ),
+        CheckConstraint(
+            "time_taken IS NULL OR time_taken >= 0",
             name="ck_time_taken_positive"
         ),
     )
 
+    # === PROPRIÉTÉS CALCULÉES ===
+
+    @property
+    def combination_list(self) -> List[int]:
+        """Retourne la combinaison sous forme de liste"""
+        try:
+            return json.loads(self.combination)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @property
+    def total_pegs(self) -> int:
+        """Nombre total de pions (noirs + blancs)"""
+        return self.black_pegs + self.white_pegs
+
+    # === MÉTHODES D'INSTANCE ===
+
+    def set_combination(self, combination: List[int]) -> None:
+        """Définit la combinaison proposée"""
+        self.combination = json.dumps(combination)
+
+    def set_result(self, black_pegs: int, white_pegs: int, is_winning: bool = False) -> None:
+        """Définit le résultat de la tentative"""
+        self.black_pegs = black_pegs
+        self.white_pegs = white_pegs
+        self.is_winning = is_winning
+
+    def add_quantum_data(self, data: Dict[str, Any]) -> None:
+        """Ajoute des données quantiques"""
+        if self.quantum_data is None:
+            self.quantum_data = {}
+        self.quantum_data.update(data)
+
     def __repr__(self) -> str:
-        return f"<GameAttempt(game_id={self.game_id}, attempt={self.attempt_number}, result={self.black_pegs}B{self.white_pegs}W)>"
-
-    @property
-    def result_string(self) -> str:
-        """Retourne le résultat sous forme de chaîne"""
-        return f"{self.black_pegs}B{self.white_pegs}W"
-
-    @property
-    def is_perfect(self) -> bool:
-        """Vérifie si c'est une solution parfaite"""
-        return self.is_solution and self.black_pegs > 0 and self.white_pegs == 0
+        return f"<GameAttempt(id={self.id}, game_id={self.game_id}, attempt_number={self.attempt_number})>"
 
 
-# === FONCTIONS UTILITAIRES ===
+# === ÉVÉNEMENTS SQLAlchemy ===
 
-def generate_room_code() -> str:
-    """Génère un code de room unique"""
-    import random
-    import string
+@event.listens_for(Game, 'before_insert')
+def game_before_insert(mapper, connection, target):
+    """Traitement avant insertion d'une partie"""
+    if not target.room_code:
+        target.room_code = generate_room_code()
 
-    # Code de 6 caractères alphanumériques
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    if target.settings is None:
+        target.settings = {
+            "allow_duplicates": True,
+            "allow_blanks": False,
+            "quantum_enabled": True,
+            "hint_cost": 10,
+            "auto_reveal_pegs": True,
+            "show_statistics": True
+        }
 
 
-def calculate_game_score(
-    attempts: int,
-    max_attempts: int,
-    time_taken: Optional[float] = None,
-    quantum_used: bool = False,
-    difficulty: Difficulty = Difficulty.NORMAL
-) -> int:
-    """
-    Calcule le score d'une partie
+@event.listens_for(Game, 'before_update')
+def game_before_update(mapper, connection, target):
+    """Traitement avant mise à jour d'une partie"""
+    target.updated_at = datetime.now(timezone.utc)
 
-    Args:
-        attempts: Nombre de tentatives utilisées
-        max_attempts: Nombre maximum de tentatives
-        time_taken: Temps pris en secondes
-        quantum_used: Si des fonctionnalités quantiques ont été utilisées
-        difficulty: Niveau de difficulté
 
-    Returns:
-        Score calculé
-    """
-    base_score = 1000
+@event.listens_for(GameParticipation, 'after_insert')
+def participation_after_insert(mapper, connection, target):
+    """Traitement après insertion d'une participation"""
+    # Logique pour vérifier si la partie peut démarrer automatiquement
+    pass
 
-    # Multiplicateur de difficulté
-    difficulty_multipliers = {
-        Difficulty.EASY: 0.5,
-        Difficulty.NORMAL: 1.0,
-        Difficulty.HARD: 1.5,
-        Difficulty.EXPERT: 2.0
-    }
 
-    multiplier = difficulty_multipliers.get(difficulty, 1.0)
+@event.listens_for(GameAttempt, 'before_insert')
+def attempt_before_insert(mapper, connection, target):
+    """Traitement avant insertion d'une tentative"""
+    if isinstance(target.combination, list):
+        target.combination = json.dumps(target.combination)
 
-    # Pénalité pour les tentatives
-    attempt_penalty = (attempts - 1) * 50
 
-    # Bonus pour la rapidité (si temps disponible)
-    time_bonus = 0
-    if time_taken and time_taken < 300:  # Moins de 5 minutes
-        time_bonus = max(0, (300 - time_taken) * 2)
+# === EXPORTS ===
 
-    # Bonus quantique
-    quantum_bonus = 200 if quantum_used else 0
+__all__ = [
+    # Énumérations
+    "GameType", "GameMode", "GameStatus", "Difficulty", "ParticipationStatus",
 
-    # Calcul final
-    final_score = max(0, int((base_score - attempt_penalty + time_bonus + quantum_bonus) * multiplier))
+    # Modèles
+    "Game", "GameParticipation", "GameAttempt",
 
-    return final_score
+    # Fonctions utilitaires
+    "generate_room_code", "generate_solution", "calculate_game_score"
+]

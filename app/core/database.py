@@ -2,7 +2,7 @@
 Configuration de base de données pour Quantum Mastermind
 SQLAlchemy 2.0.41 avec support async et PostgreSQL
 """
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Dict, Any
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -12,22 +12,21 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine
 )
-from sqlalchemy.ext.declarative import DeclarativeBase
-from sqlalchemy.orm import (
-    sessionmaker,
-    Session,
-    Mapped,
-    mapped_column,
-    relationship
-)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import (
     create_engine,
     MetaData,
     inspect,
     text,
-    event
+    event,
+    String,
+    DateTime,
+    func
 )
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from uuid import UUID, uuid4
+from datetime import datetime, timezone
 
 from app.core.config import settings, is_test
 
@@ -50,6 +49,32 @@ class Base(DeclarativeBase):
             "pk": "pk_%(table_name)s"
         }
     )
+
+    # Colonnes communes à tous les modèles
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        index=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+    def __repr__(self) -> str:
+        """Représentation string commune"""
+        return f"<{self.__class__.__name__}(id={self.id})>"
 
 
 # === MOTEUR DE BASE DE DONNÉES ===
@@ -84,20 +109,27 @@ def create_async_database_engine() -> AsyncEngine:
         )
     else:
         # Configuration pour développement/production
+        engine_kwargs = {
+            "echo": settings.DEBUG,
+            "pool_size": 20,
+            "max_overflow": 30,
+            "pool_timeout": 30,
+            "pool_recycle": 3600,
+            "pool_pre_ping": True,
+        }
+
+        # Ajout des options spécifiques à asyncpg
+        connect_args = {
+            "server_settings": {
+                "application_name": settings.PROJECT_NAME,
+                "jit": "off"  # Optimisation pour PostgreSQL
+            }
+        }
+
         engine = create_async_engine(
             settings.DATABASE_URL,
-            echo=settings.DEBUG,  # Log SQL en mode debug
-            pool_size=20,
-            max_overflow=30,
-            pool_timeout=30,
-            pool_pre_ping=True,  # Vérification des connexions
-            pool_recycle=3600,   # Renouvellement des connexions
-            connect_args={
-                "server_settings": {
-                    "application_name": "quantum_mastermind",
-                    "jit": "off",  # Désactiver JIT pour la stabilité
-                }
-            }
+            connect_args=connect_args,
+            **engine_kwargs
         )
 
     return engine
@@ -105,50 +137,39 @@ def create_async_database_engine() -> AsyncEngine:
 
 def create_sync_database_engine():
     """
-    Crée le moteur de base de données sync pour Alembic
+    Crée le moteur de base de données synchrone pour Alembic
 
     Returns:
-        Moteur SQLAlchemy sync
+        Moteur SQLAlchemy synchrone
     """
-    if is_test():
-        return create_engine(
-            "sqlite:///./test.db",
-            echo=False,
-            poolclass=StaticPool,
-            connect_args={"check_same_thread": False}
-        )
-    else:
-        # Convertir l'URL async en URL sync pour Alembic
-        sync_url = settings.DATABASE_URL.replace(
-            "postgresql+asyncpg://", "postgresql://"
-        )
-        return create_engine(
-            sync_url,
-            echo=settings.DEBUG,
-            pool_size=20,
-            max_overflow=30,
-            pool_timeout=30,
-            pool_pre_ping=True,
-            pool_recycle=3600
-        )
+    # URL synchrone pour Alembic (remplace asyncpg par psycopg2)
+    sync_url = settings.DATABASE_URL.replace(
+        "postgresql+asyncpg://", "postgresql://"
+    )
 
+    return create_engine(
+        sync_url,
+        echo=settings.DEBUG,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_recycle=3600
+    )
 
-# === INITIALISATION ===
 
 async def init_db() -> None:
     """
-    Initialise la base de données et crée les tables
+    Initialise la base de données et crée les connexions
 
-    Cette fonction doit être appelée au démarrage de l'application
+    Appelé au démarrage de l'application
     """
     global async_engine, AsyncSessionLocal, sync_engine
 
     try:
-        # Créer les moteurs
+        # Création du moteur async
         async_engine = create_async_database_engine()
-        sync_engine = create_sync_database_engine()
 
-        # Créer la session factory
+        # Création de la session factory
         AsyncSessionLocal = async_sessionmaker(
             bind=async_engine,
             class_=AsyncSession,
@@ -157,20 +178,19 @@ async def init_db() -> None:
             autocommit=False
         )
 
+        # Moteur sync pour Alembic
+        if not is_test():
+            sync_engine = create_sync_database_engine()
+
+        # Configuration des événements après création du moteur
+        if async_engine and settings.DEBUG:
+            setup_database_events(async_engine)
+
         # Test de connexion
         async with async_engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
 
-        print("✅ Connexion à la base de données établie")
-
-        # Créer les tables si nécessaire (en développement uniquement)
-        if settings.DEBUG:
-            async with async_engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            print("✅ Tables créées/vérifiées")
-
-        # Configuration des événements de connexion
-        setup_database_events()
+        print("✅ Base de données initialisée avec succès")
 
     except Exception as e:
         print(f"❌ Erreur lors de l'initialisation de la base de données: {e}")
@@ -179,36 +199,39 @@ async def init_db() -> None:
 
 async def close_db() -> None:
     """
-    Ferme proprement les connexions de base de données
+    Ferme les connexions à la base de données
+
+    Appelé à l'arrêt de l'application
     """
     global async_engine, sync_engine
 
-    if async_engine:
-        await async_engine.dispose()
-        print("✅ Connexions async fermées")
+    try:
+        if async_engine:
+            await async_engine.dispose()
+            print("✅ Connexions async fermées")
 
-    if sync_engine:
-        sync_engine.dispose()
-        print("✅ Connexions sync fermées")
+        if sync_engine:
+            sync_engine.dispose()
+            print("✅ Connexions sync fermées")
 
+    except Exception as e:
+        print(f"❌ Erreur lors de la fermeture de la base de données: {e}")
 
-# === GESTION DES SESSIONS ===
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    Générateur de sessions de base de données pour l'injection de dépendance
+    Générateur de session de base de données pour FastAPI
 
     Yields:
         Session de base de données async
 
-    Example:
-        ```python
-        async def my_route(db: AsyncSession = Depends(get_db)):
-            result = await db.execute(select(User))
-        ```
+    Usage:
+        @app.get("/")
+        async def endpoint(db: AsyncSession = Depends(get_db)):
+            ...
     """
     if not AsyncSessionLocal:
-        raise RuntimeError("Base de données non initialisée")
+        raise RuntimeError("Base de données non initialisée. Appelez init_db() d'abord.")
 
     async with AsyncSessionLocal() as session:
         try:
@@ -221,16 +244,13 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 @asynccontextmanager
-async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_db_context():
     """
     Context manager pour obtenir une session de base de données
 
     Usage:
-        ```python
-        async with get_db_session() as db:
-            result = await db.execute(select(User))
-            await db.commit()
-        ```
+        async with get_db_context() as db:
+            result = await db.execute(...)
     """
     if not AsyncSessionLocal:
         raise RuntimeError("Base de données non initialisée")
@@ -238,51 +258,135 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         try:
             yield session
+            await session.commit()
         except Exception:
             await session.rollback()
             raise
-
-
-# === UTILITAIRES DE BASE DE DONNÉES ===
-
-async def create_database_if_not_exists() -> None:
-    """
-    Crée la base de données si elle n'existe pas
-
-    Utile pour l'initialisation en développement
-    """
-    if is_test():
-        return  # SQLite en mémoire, pas besoin
-
-    try:
-        # Extraire le nom de la base de données
-        import asyncpg
-        from urllib.parse import urlparse
-
-        parsed_url = urlparse(settings.DATABASE_URL)
-        db_name = parsed_url.path[1:]  # Supprimer le '/' initial
-
-        # Connexion à la base de données par défaut
-        admin_url = settings.DATABASE_URL.replace(f"/{db_name}", "/postgres")
-
-        conn = await asyncpg.connect(admin_url)
-        try:
-            # Vérifier si la base existe
-            result = await conn.fetchval(
-                "SELECT 1 FROM pg_database WHERE datname = $1", db_name
-            )
-
-            if not result:
-                await conn.execute(f'CREATE DATABASE "{db_name}"')
-                print(f"✅ Base de données '{db_name}' créée")
-            else:
-                print(f"✅ Base de données '{db_name}' existe déjà")
-
         finally:
-            await conn.close()
+            await session.close()
 
-    except Exception as e:
-        print(f"⚠️ Impossible de créer la base de données: {e}")
+
+# === UTILITAIRES DE PAGINATION ===
+
+class PaginationParams:
+    """Paramètres de pagination standardisés"""
+
+    def __init__(
+        self,
+        page: int = 1,
+        per_page: int = 20,
+        max_per_page: int = 100
+    ):
+        self.page = max(1, page)
+        self.per_page = min(max(1, per_page), max_per_page)
+
+    @property
+    def offset(self) -> int:
+        """Calcule l'offset pour la pagination"""
+        return (self.page - 1) * self.per_page
+
+    @property
+    def limit(self) -> int:
+        """Limite d'éléments par page"""
+        return self.per_page
+
+    def paginate_query(self, query):
+        """Applique la pagination à une requête SQLAlchemy"""
+        return query.offset(self.offset).limit(self.limit)
+
+
+class PaginationResult:
+    """Résultat de pagination avec métadonnées"""
+
+    def __init__(
+        self,
+        items: list,
+        total: int,
+        page: int,
+        per_page: int
+    ):
+        self.items = items
+        self.total = total
+        self.page = page
+        self.per_page = per_page
+
+    @property
+    def pages(self) -> int:
+        """Nombre total de pages"""
+        return (self.total + self.per_page - 1) // self.per_page
+
+    @property
+    def has_prev(self) -> bool:
+        """True s'il y a une page précédente"""
+        return self.page > 1
+
+    @property
+    def has_next(self) -> bool:
+        """True s'il y a une page suivante"""
+        return self.page < self.pages
+
+    @property
+    def prev_page(self) -> Optional[int]:
+        """Numéro de la page précédente"""
+        return self.page - 1 if self.has_prev else None
+
+    @property
+    def next_page(self) -> Optional[int]:
+        """Numéro de la page suivante"""
+        return self.page + 1 if self.has_next else None
+
+
+# === ÉVÉNEMENTS SQLAlchemy ===
+
+def setup_database_events(engine: AsyncEngine) -> None:
+    """
+    Configure les événements SQLAlchemy après création du moteur
+
+    Args:
+        engine: Moteur de base de données créé
+    """
+    if not settings.DEBUG:
+        return
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute", retval=True)
+    def receive_before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        """Événement avant exécution SQL pour debug"""
+        print(f"🔍 Exécution SQL: {statement[:100]}...")
+        return statement, parameters
+
+    @event.listens_for(engine.sync_engine, "after_cursor_execute")
+    def receive_after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        """Événement après exécution SQL pour monitoring"""
+        # Note: Les événements de timing ne sont pas disponibles sur async engines
+        pass
+
+
+# === FONCTIONS UTILITAIRES ===
+
+async def create_tables():
+    """
+    Crée toutes les tables de la base de données
+
+    Utilisé pour les tests ou l'initialisation
+    """
+    if not async_engine:
+        raise RuntimeError("Moteur de base de données non initialisé")
+
+    async with async_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def drop_tables():
+    """
+    Supprime toutes les tables de la base de données
+
+    ⚠️ Utilisé uniquement pour les tests
+    """
+    if not async_engine:
+        raise RuntimeError("Moteur de base de données non initialisé")
+
+    async with async_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
 
 
 async def check_database_connection() -> bool:
@@ -290,272 +394,73 @@ async def check_database_connection() -> bool:
     Vérifie la connexion à la base de données
 
     Returns:
-        True si la connexion est fonctionnelle
+        True si la connexion fonctionne
     """
     try:
-        async with get_db_session() as db:
-            await db.execute(text("SELECT 1"))
+        if not async_engine:
+            return False
+
+        async with async_engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
             return True
     except Exception:
         return False
 
 
-async def get_database_info() -> dict:
+async def get_database_info() -> Dict[str, Any]:
     """
     Récupère les informations sur la base de données
 
     Returns:
-        Dictionnaire avec les informations de la base
-    """
-    try:
-        async with get_db_session() as db:
-            if is_test():
-                return {
-                    "type": "SQLite",
-                    "version": "Test Database",
-                    "size": "In Memory"
-                }
-            else:
-                # PostgreSQL
-                version_result = await db.execute(text("SELECT version()"))
-                version = version_result.scalar()
-
-                size_result = await db.execute(text(
-                    "SELECT pg_size_pretty(pg_database_size(current_database()))"
-                ))
-                size = size_result.scalar()
-
-                return {
-                    "type": "PostgreSQL",
-                    "version": version,
-                    "size": size,
-                    "url": settings.DATABASE_URL.split('@')[1] if '@' in settings.DATABASE_URL else "Hidden"
-                }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# === ÉVÉNEMENTS DE BASE DE DONNÉES ===
-
-def setup_database_events() -> None:
-    """
-    Configure les événements de base de données
+        Dictionnaire avec les métadonnées
     """
     if not async_engine:
-        return
-
-    @event.listens_for(async_engine.sync_engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        """Configure SQLite pour les tests"""
-        if "sqlite" in str(dbapi_connection):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.close()
-
-    @event.listens_for(async_engine.sync_engine, "connect")
-    def set_postgresql_search_path(dbapi_connection, connection_record):
-        """Configure le search_path pour PostgreSQL"""
-        if "postgresql" in str(dbapi_connection):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("SET search_path TO public")
-            cursor.close()
-
-
-# === MIGRATIONS ET MAINTENANCE ===
-
-async def run_database_migration(revision: str = "head") -> None:
-    """
-    Exécute les migrations Alembic
-
-    Args:
-        revision: Révision cible (défaut: head)
-    """
-    try:
-        from alembic.config import Config
-        from alembic import command
-
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, revision)
-        print(f"✅ Migration vers {revision} effectuée")
-
-    except Exception as e:
-        print(f"❌ Erreur lors de la migration: {e}")
-        raise
-
-
-async def backup_database(backup_path: str) -> None:
-    """
-    Crée une sauvegarde de la base de données
-
-    Args:
-        backup_path: Chemin de sauvegarde
-    """
-    if is_test():
-        print("⚠️ Sauvegarde non supportée pour les tests")
-        return
+        return {"status": "not_initialized"}
 
     try:
-        import subprocess
-        from urllib.parse import urlparse
+        async with async_engine.begin() as conn:
+            # Version PostgreSQL
+            version_result = await conn.execute(text("SELECT version()"))
+            version = version_result.scalar()
 
-        parsed_url = urlparse(settings.DATABASE_URL)
+            # Nombre de connexions actives
+            connections_result = await conn.execute(
+                text("SELECT count(*) FROM pg_stat_activity WHERE state = 'active'")
+            )
+            active_connections = connections_result.scalar()
 
-        cmd = [
-            "pg_dump",
-            f"--host={parsed_url.hostname}",
-            f"--port={parsed_url.port or 5432}",
-            f"--username={parsed_url.username}",
-            f"--dbname={parsed_url.path[1:]}",
-            f"--file={backup_path}",
-            "--verbose",
-            "--no-password"
-        ]
-
-        env = {"PGPASSWORD": parsed_url.password}
-
-        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-
-        if result.returncode == 0:
-            print(f"✅ Sauvegarde créée: {backup_path}")
-        else:
-            print(f"❌ Erreur de sauvegarde: {result.stderr}")
-
+            return {
+                "status": "connected",
+                "version": version,
+                "active_connections": active_connections,
+                "pool_size": async_engine.pool.size(),
+                "checked_in": async_engine.pool.checkedin(),
+                "checked_out": async_engine.pool.checkedout(),
+                "overflow": async_engine.pool.overflow(),
+            }
     except Exception as e:
-        print(f"❌ Erreur lors de la sauvegarde: {e}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 
-# === HELPERS POUR LES TESTS ===
-
-async def reset_test_database() -> None:
-    """
-    Remet à zéro la base de données de test
-    """
-    if not is_test():
-        raise RuntimeError("Cette fonction est réservée aux tests")
-
-    async with async_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-
-
-async def get_test_session() -> AsyncSession:
-    """
-    Retourne une session de test
-
-    Returns:
-        Session de base de données pour les tests
-    """
-    if not is_test():
-        raise RuntimeError("Cette fonction est réservée aux tests")
-
-    return AsyncSessionLocal()
-
-
-# === TRANSACTION HELPERS ===
-
-@asynccontextmanager
-async def database_transaction():
-    """
-    Context manager pour les transactions manuelles
-
-    Usage:
-        ```python
-        async with database_transaction() as db:
-            user = User(username="test")
-            db.add(user)
-            # Auto-commit à la fin du contexte
-        ```
-    """
-    async with get_db_session() as db:
-        try:
-            yield db
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
-
-
-async def execute_in_transaction(query_func, *args, **kwargs):
-    """
-    Exécute une fonction dans une transaction
-
-    Args:
-        query_func: Fonction async à exécuter
-        *args, **kwargs: Arguments pour la fonction
-
-    Returns:
-        Résultat de la fonction
-    """
-    async with database_transaction() as db:
-        return await query_func(db, *args, **kwargs)
-
-
-# === MONITORING ET STATISTIQUES ===
-
-async def get_database_stats() -> dict:
-    """
-    Récupère les statistiques de la base de données
-
-    Returns:
-        Statistiques de performance
-    """
-    try:
-        async with get_db_session() as db:
-            if is_test():
-                return {"connections": 1, "type": "test"}
-
-            # PostgreSQL stats
-            stats_query = text("""
-                SELECT 
-                    numbackends as connections,
-                    xact_commit as commits,
-                    xact_rollback as rollbacks,
-                    blks_read as blocks_read,
-                    blks_hit as blocks_hit
-                FROM pg_stat_database 
-                WHERE datname = current_database()
-            """)
-
-            result = await db.execute(stats_query)
-            row = result.fetchone()
-
-            if row:
-                return {
-                    "connections": row.connections,
-                    "commits": row.commits,
-                    "rollbacks": row.rollbacks,
-                    "blocks_read": row.blocks_read,
-                    "blocks_hit": row.blocks_hit,
-                    "cache_hit_ratio": round(
-                        (row.blocks_hit / (row.blocks_hit + row.blocks_read)) * 100, 2
-                    ) if (row.blocks_hit + row.blocks_read) > 0 else 0
-                }
-
-            return {}
-
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# === EXPORT ===
+# === EXPORTS ===
 
 __all__ = [
     "Base",
     "async_engine",
     "AsyncSessionLocal",
+    "sync_engine",
     "init_db",
     "close_db",
     "get_db",
-    "get_db_session",
-    "create_database_if_not_exists",
+    "get_db_context",
+    "PaginationParams",
+    "PaginationResult",
+    "create_tables",
+    "drop_tables",
     "check_database_connection",
     "get_database_info",
-    "run_database_migration",
-    "backup_database",
-    "reset_test_database",
-    "get_test_session",
-    "database_transaction",
-    "execute_in_transaction",
-    "get_database_stats"
+    "setup_database_events"
 ]

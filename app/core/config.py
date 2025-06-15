@@ -75,25 +75,16 @@ class Settings(BaseSettings):
             return [i.strip() for i in v.split(",")]
         elif isinstance(v, (list, str)):
             return v
-        raise ValueError(v)
-
-    @field_validator("TRUSTED_HOSTS", mode="before")
-    @classmethod
-    def assemble_trusted_hosts(cls, v: Union[str, List[str]]) -> List[str]:
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",")]
-        elif isinstance(v, (list, str)):
-            return v
-        raise ValueError(v)
+        raise ValueError("CORS_ORIGINS doit être une liste ou une chaîne")
 
     # === QUANTUM COMPUTING ===
     QISKIT_BACKEND: str = "qasm_simulator"
-    MAX_QUBITS: int = 30
+    MAX_QUBITS: int = 10
     QUANTUM_SHOTS: int = 1024
-    QUANTUM_OPTIMIZATION_LEVEL: int = 1
-    QUANTUM_TIMEOUT: int = 300  # 5 minutes
+    QUANTUM_TIMEOUT: int = 300
+    ENABLE_QUANTUM_HINTS: bool = True
 
-    # === EMAIL (pour futures fonctionnalités) ===
+    # === EMAIL ===
     SMTP_TLS: bool = True
     SMTP_PORT: Optional[int] = None
     SMTP_HOST: Optional[str] = None
@@ -102,88 +93,70 @@ class Settings(BaseSettings):
     EMAILS_FROM_EMAIL: Optional[str] = None
     EMAILS_FROM_NAME: Optional[str] = None
 
-    # === FICHIERS ET UPLOADS ===
-    MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB
-    ALLOWED_FILE_TYPES: List[str] = ["json", "csv", "txt"]
-    UPLOAD_PATH: str = "uploads"
+    @field_validator("EMAILS_FROM_NAME")
+    @classmethod
+    def get_project_name(cls, v: Optional[str], info) -> str:
+        if not v:
+            return info.data.get("PROJECT_NAME", "Quantum Mastermind")
+        return v
 
-    # === CACHE ET SESSIONS ===
-    CACHE_TTL: int = 300  # 5 minutes
-    SESSION_TIMEOUT: int = 1800  # 30 minutes
-    REMEMBER_ME_EXPIRE_DAYS: int = 30
+    # === SÉCURITÉ AVANCÉE ===
+    PASSWORD_MIN_LENGTH: int = 8
+    PASSWORD_REQUIRE_UPPERCASE: bool = True
+    PASSWORD_REQUIRE_LOWERCASE: bool = True
+    PASSWORD_REQUIRE_NUMBERS: bool = True
+    PASSWORD_REQUIRE_SYMBOLS: bool = False
+    MAX_LOGIN_ATTEMPTS: int = 5
+    LOCKOUT_DURATION_MINUTES: int = 15
 
     # === RATE LIMITING ===
-    RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 100
-    RATE_LIMIT_PERIOD: int = 60  # secondes
+    RATE_LIMIT_WINDOW: int = 3600  # 1 heure
+    RATE_LIMIT_STORAGE: str = "memory"  # ou "redis"
+
+    # === WEBSOCKETS ===
+    WS_MAX_CONNECTIONS: int = 1000
+    WS_HEARTBEAT_INTERVAL: int = 30
+    WS_CONNECTION_TIMEOUT: int = 60
 
     # === LOGGING ===
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
     LOG_FILE: Optional[str] = None
-    ENABLE_REQUEST_LOGGING: bool = True
+    ENABLE_ACCESS_LOG: bool = True
 
     # === MONITORING ===
     ENABLE_METRICS: bool = True
-    METRICS_PORT: int = 9090
-    HEALTH_CHECK_INTERVAL: int = 30
-
-    # === FEATURES FLAGS ===
-    ENABLE_REGISTRATION: bool = True
-    ENABLE_EMAIL_VERIFICATION: bool = False
-    ENABLE_QUANTUM_FEATURES: bool = True
-    ENABLE_MULTIPLAYER: bool = True
-    ENABLE_CHAT: bool = True
-    ENABLE_TOURNAMENTS: bool = False  # Futur
-
-    # === GAME SETTINGS ===
-    DEFAULT_MAX_ATTEMPTS: int = 12
-    DEFAULT_COMBINATION_LENGTH: int = 4
-    DEFAULT_COLOR_COUNT: int = 6
-    MAX_PLAYERS_PER_GAME: int = 8
-    GAME_TIMEOUT_MINUTES: int = 60
-
-    # === WEBSOCKET ===
-    WS_HEARTBEAT_INTERVAL: int = 30
-    WS_CONNECTION_TIMEOUT: int = 60
-    WS_MAX_CONNECTIONS_PER_USER: int = 5
+    METRICS_PATH: str = "/metrics"
+    HEALTH_CHECK_PATH: str = "/health"
 
     class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
         case_sensitive = True
+        env_file = ".env"
 
 
-@lru_cache()
-def get_settings() -> Settings:
-    """
-    Retourne les paramètres de configuration avec cache
-    Pattern Singleton pour optimiser les performances
-    """
-    return Settings()
-
-
-# Instance globale des paramètres
-settings = get_settings()
-
-
-# === CONFIGURATION SÉCURITÉ ===
 class SecurityConfig:
-    """Configuration spécifique à la sécurité"""
+    """Configuration de sécurité"""
 
-    # Algorithmes de hachage autorisés
-    ALLOWED_HASH_ALGORITHMS = ["HS256", "RS256"]
+    # Algorithmes de hachage supportés
+    SUPPORTED_HASH_ALGORITHMS = ["bcrypt", "argon2"]
+    DEFAULT_HASH_ALGORITHM = "bcrypt"
 
-    # Durées d'expiration
+    # Configuration bcrypt
+    BCRYPT_ROUNDS = 12
+
+    # Configuration Argon2
+    ARGON2_TIME_COST = 2
+    ARGON2_MEMORY_COST = 65536
+    ARGON2_PARALLELISM = 1
+
+    # Longueurs de tokens
+    TOKEN_LENGTH = 32
+    API_KEY_LENGTH = 64
+
+    # Expiration des tokens spéciaux
     PASSWORD_RESET_EXPIRE_HOURS = 24
     EMAIL_VERIFICATION_EXPIRE_HOURS = 48
-
-    # Complexité mot de passe
-    PASSWORD_MIN_LENGTH = 8
-    PASSWORD_REQUIRE_UPPERCASE = True
-    PASSWORD_REQUIRE_LOWERCASE = True
-    PASSWORD_REQUIRE_DIGITS = True
-    PASSWORD_REQUIRE_SPECIAL = True
 
     # Headers de sécurité
     SECURITY_HEADERS = {
@@ -195,206 +168,170 @@ class SecurityConfig:
         "Referrer-Policy": "strict-origin-when-cross-origin"
     }
 
-    # IP Whitelisting pour admin
-    ADMIN_IP_WHITELIST = ["127.0.0.1", "::1"]
 
-    # Tentatives de connexion
-    MAX_LOGIN_ATTEMPTS = 5
-    LOCKOUT_DURATION_MINUTES = 15
-
-    # Validation des tokens
-    TOKEN_BLACKLIST_CHECK = True
-    REFRESH_TOKEN_ROTATION = True
-
-
-# === CONFIGURATION QUANTUM ===
 class QuantumConfig:
-    """Configuration pour les opérations quantiques"""
+    """Configuration des fonctionnalités quantiques"""
 
-    # Backends disponibles (Qiskit 2.0.2 compatible)
+    # Backends disponibles
     AVAILABLE_BACKENDS = [
         "qasm_simulator",
+        "aer_simulator",
         "statevector_simulator",
         "unitary_simulator"
     ]
 
-    # Paramètres par défaut des circuits
-    DEFAULT_CIRCUIT_DEPTH = 5
-    MAX_CIRCUIT_DEPTH = 20
+    # Limites par défaut
+    DEFAULT_QUBITS = 4
+    MAX_QUBITS = 20
     DEFAULT_SHOTS = 1024
     MAX_SHOTS = 8192
 
-    # Algorithmes quantiques supportés
+    # Types d'algorithmes supportés
     SUPPORTED_ALGORITHMS = [
         "grover_search",
-        "quantum_superposition",
-        "entanglement_generation",
-        "quantum_interference"
+        "quantum_fourier",
+        "phase_estimation",
+        "amplitude_amplification"
     ]
 
-    # Scoring quantique
-    GROVER_HINT_POINTS = 50
-    SUPERPOSITION_POINTS = 25
-    ENTANGLEMENT_POINTS = 30
-    MEASUREMENT_COST = 5
-
-    # Limites de sécurité
-    MAX_QUBITS_PER_CIRCUIT = 30
-    MAX_OPERATIONS_PER_CIRCUIT = 1000
-    QUANTUM_OPERATION_TIMEOUT = 30  # secondes
-
-    # Cache des résultats quantiques
-    CACHE_QUANTUM_RESULTS = True
-    QUANTUM_CACHE_TTL = 600  # 10 minutes
-
-
-# === CONFIGURATION DES JEUX ===
-class GameConfig:
-    """Configuration spécifique aux jeux"""
-
-    # Types de jeux disponibles
-    GAME_TYPES = [
-        "classic",
-        "quantum",
-        "hybrid",
-        "tournament"
-    ]
-
-    # Modes de jeu
-    GAME_MODES = [
-        "solo",
-        "multiplayer",
-        "ranked",
-        "training"
-    ]
-
-    # Difficultés
-    DIFFICULTIES = {
-        "easy": {
-            "colors": 4,
-            "length": 3,
-            "max_attempts": 15,
-            "hints_allowed": True
-        },
-        "normal": {
-            "colors": 6,
-            "length": 4,
-            "max_attempts": 12,
-            "hints_allowed": True
-        },
-        "hard": {
-            "colors": 8,
-            "length": 5,
-            "max_attempts": 10,
-            "hints_allowed": False
-        },
-        "expert": {
-            "colors": 10,
-            "length": 6,
-            "max_attempts": 8,
-            "hints_allowed": False
-        }
+    # Configuration des hints
+    HINT_COSTS = {
+        "grover": 10,
+        "superposition": 5,
+        "entanglement": 15,
+        "interference": 8
     }
+
+    # Timeouts
+    CIRCUIT_EXECUTION_TIMEOUT = 30
+    ALGORITHM_TIMEOUT = 60
+
+
+class GameConfig:
+    """Configuration des paramètres de jeu"""
+
+    # Paramètres par défaut
+    DEFAULT_COMBINATION_LENGTH = 4
+    DEFAULT_COLOR_COUNT = 6
+    DEFAULT_MAX_ATTEMPTS = 10
+
+    # Limites
+    MIN_COMBINATION_LENGTH = 3
+    MAX_COMBINATION_LENGTH = 8
+    MIN_COLOR_COUNT = 4
+    MAX_COLOR_COUNT = 10
+    MAX_ATTEMPTS_LIMIT = 20
 
     # Scoring
     BASE_SCORE = 1000
     ATTEMPT_PENALTY = 50
-    TIME_BONUS_MULTIPLIER = 2.0
+    TIME_BONUS_MULTIPLIER = 0.1
     QUANTUM_BONUS_MULTIPLIER = 1.5
-    PERFECT_GAME_BONUS = 500
 
-    # Limites
-    MAX_GAME_DURATION_HOURS = 24
-    MAX_CONCURRENT_GAMES_PER_USER = 5
-    MIN_PLAYERS_FOR_MULTIPLAYER = 2
+    # Difficultés
+    DIFFICULTY_SETTINGS = {
+        "easy": {
+            "combination_length": 3,
+            "color_count": 4,
+            "max_attempts": 15,
+            "time_limit": None,
+            "duplicates_allowed": True
+        },
+        "normal": {
+            "combination_length": 4,
+            "color_count": 6,
+            "max_attempts": 10,
+            "time_limit": 600,  # 10 minutes
+            "duplicates_allowed": True
+        },
+        "hard": {
+            "combination_length": 5,
+            "color_count": 8,
+            "max_attempts": 8,
+            "time_limit": 300,  # 5 minutes
+            "duplicates_allowed": False
+        },
+        "expert": {
+            "combination_length": 6,
+            "color_count": 10,
+            "max_attempts": 6,
+            "time_limit": 180,  # 3 minutes
+            "duplicates_allowed": False
+        }
+    }
 
 
-# === CONFIGURATION WEBSOCKET ===
 class WebSocketConfig:
     """Configuration WebSocket"""
 
-    # Types de connexions
-    CONNECTION_TYPES = [
-        "game",
-        "chat",
-        "admin",
-        "tournament"
-    ]
+    # Limites de connexion
+    MAX_CONNECTIONS_PER_USER = 3
+    MAX_ROOMS_PER_USER = 5
+    MAX_USERS_PER_ROOM = 8
 
-    # Événements supportés
-    SUPPORTED_EVENTS = [
-        "connection_established",
-        "user_connected",
-        "user_disconnected",
-        "authenticate",
-        "join_game_room",
-        "leave_game_room",
-        "game_state_update",
-        "attempt_made",
-        "quantum_hint_used",
-        "chat_message",
-        "heartbeat"
-    ]
-
-    # Limites
-    MAX_MESSAGE_SIZE = 1024 * 1024  # 1MB
-    MAX_MESSAGES_PER_SECOND = 10
-    HEARTBEAT_INTERVAL = 30
+    # Timeouts
     CONNECTION_TIMEOUT = 60
+    HEARTBEAT_INTERVAL = 30
+    CLEANUP_INTERVAL = 300
 
-    # Rate limiting WebSocket
-    WS_RATE_LIMIT_WINDOW = 60  # secondes
-    WS_RATE_LIMIT_MAX_MESSAGES = 100
+    # Tailles de messages
+    MAX_MESSAGE_SIZE = 1024 * 64  # 64KB
+    MAX_QUEUE_SIZE = 100
+
+    # Types d'événements
+    ALLOWED_EVENT_TYPES = [
+        "authenticate", "join_room", "leave_room",
+        "make_attempt", "get_hint", "chat_message",
+        "heartbeat", "game_state_request"
+    ]
 
 
-# === CONFIGURATION DE DÉVELOPPEMENT ===
 class DevelopmentConfig:
     """Configuration pour le développement"""
 
-    # Debug
-    ENABLE_DEBUG_ROUTES = True
-    ENABLE_SOLUTION_REVEAL = True
-    ENABLE_MOCK_QUANTUM = False
+    DEBUG = True
+    LOG_LEVEL = "DEBUG"
+    ENABLE_METRICS = True
+    CORS_ORIGINS = ["*"]
+    TRUSTED_HOSTS = ["*"]
 
-    # Base de données
-    ECHO_SQL = False
-    DROP_TABLES_ON_START = False
+    # Base de données de développement
+    DB_ECHO = True
+    DB_POOL_SIZE = 5
+    DB_MAX_OVERFLOW = 10
 
-    # Tests
-    TEST_DATABASE_URL = "postgresql+asyncpg://test_user:test_pass@localhost/test_quantum"
-    ENABLE_TEST_FIXTURES = True
-
-    # Performance
-    DISABLE_RATE_LIMITING = True
-    FAST_PASSWORD_HASHING = True
+    # Quantum computing en mode dev
+    QISKIT_BACKEND = "qasm_simulator"
+    MAX_QUBITS = 5
+    QUANTUM_SHOTS = 512
 
 
-# === CONFIGURATION DE PRODUCTION ===
 class ProductionConfig:
     """Configuration pour la production"""
 
-    # Sécurité renforcée
-    REQUIRE_HTTPS = True
-    STRICT_CORS = True
-    ENABLE_CSRF_PROTECTION = True
-
-    # Performance
-    ENABLE_COMPRESSION = True
-    ENABLE_CACHING = True
-    CACHE_STATIC_ASSETS = True
-
-    # Monitoring
+    DEBUG = False
+    LOG_LEVEL = "WARNING"
     ENABLE_METRICS = True
-    ENABLE_HEALTH_CHECKS = True
-    ENABLE_DISTRIBUTED_TRACING = False
 
-    # Base de données
+    # Base de données optimisée pour la production
+    DB_ECHO = False
     DB_POOL_SIZE = 20
     DB_MAX_OVERFLOW = 30
-    DB_POOL_TIMEOUT = 30
+    DB_POOL_RECYCLE = 3600
+
+    # Sécurité renforcée
+    PASSWORD_MIN_LENGTH = 12
+    MAX_LOGIN_ATTEMPTS = 3
+    LOCKOUT_DURATION_MINUTES = 30
+
+    # Performance quantique optimisée
+    QUANTUM_SHOTS = 2048
+    MAX_QUBITS = 15
 
 
-# Instances globales des configurations
+# === INSTANCES GLOBALES ===
+
+settings = Settings()
 security_config = SecurityConfig()
 quantum_config = QuantumConfig()
 game_config = GameConfig()
@@ -403,54 +340,40 @@ development_config = DevelopmentConfig()
 production_config = ProductionConfig()
 
 
-# === HELPERS DE CONFIGURATION ===
+# === FONCTIONS UTILITAIRES ===
 
-def get_config_for_environment(env: str = None) -> Dict[str, Any]:
+@lru_cache()
+def get_settings() -> Settings:
+    """Retourne l'instance de configuration mise en cache"""
+    return Settings()
+
+
+def get_config_for_environment(env: str) -> Dict[str, Any]:
     """
-    Retourne la configuration appropriée pour l'environnement
+    Retourne la configuration pour un environnement spécifique
 
     Args:
         env: Environnement (development, production, test)
 
     Returns:
-        Configuration environnementale
+        Configuration pour l'environnement
     """
-    env = env or settings.ENVIRONMENT.lower()
-
-    base_config = {
-        "settings": settings,
-        "security": security_config,
-        "quantum": quantum_config,
-        "game": game_config,
-        "websocket": websocket_config
-    }
-
     if env == "development":
-        base_config["development"] = development_config
+        return development_config.__dict__
     elif env == "production":
-        base_config["production"] = production_config
-
-    return base_config
+        return production_config.__dict__
+    else:
+        return {}
 
 
 def validate_configuration() -> List[str]:
     """
-    Valide la configuration et retourne les erreurs
+    Valide la configuration actuelle et retourne les erreurs
 
     Returns:
         Liste des erreurs de configuration
     """
     errors = []
-
-    # Validation des variables obligatoires
-    if not settings.SECRET_KEY or len(settings.SECRET_KEY) < 32:
-        errors.append("SECRET_KEY doit faire au moins 32 caractères")
-
-    if not settings.JWT_SECRET_KEY or len(settings.JWT_SECRET_KEY) < 32:
-        errors.append("JWT_SECRET_KEY doit faire au moins 32 caractères")
-
-    if not settings.DATABASE_URL:
-        errors.append("DATABASE_URL est requis")
 
     # Validation de l'environnement
     valid_environments = ["development", "production", "test"]

@@ -2,7 +2,7 @@
 Modèle utilisateur pour Quantum Mastermind
 SQLAlchemy 2.0.41 avec typing moderne et async support
 """
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -17,7 +17,7 @@ from app.core.database import Base
 
 # Import conditionnel pour éviter les imports circulaires
 if TYPE_CHECKING:
-    from app.models.game import Game, GameParticipation
+    from app.models.game import Game, GameParticipation, GameAttempt
     from app.models.audit import AuditLog
 
 
@@ -157,6 +157,14 @@ class User(Base):
         comment="Points gagnés en utilisant les fonctionnalités quantiques"
     )
 
+    # Rang dérivé du score et des performances
+    rank: Mapped[str] = mapped_column(
+        String(20),
+        default="Bronze",
+        nullable=False,
+        index=True
+    )
+
     # === MÉTADONNÉES TEMPORELLES ===
 
     created_at: Mapped[datetime] = mapped_column(
@@ -184,7 +192,7 @@ class User(Base):
         nullable=True
     )
 
-    # === MÉTADONNÉES DE CONNEXION ===
+    # === MÉTADONNÉES DE SÉCURITÉ ===
 
     login_attempts: Mapped[int] = mapped_column(
         Integer,
@@ -221,6 +229,14 @@ class User(Base):
         lazy="dynamic"
     )
 
+    # Tentatives dans les jeux
+    game_attempts: Mapped[List["GameAttempt"]] = relationship(
+        "GameAttempt",
+        back_populates="player",
+        cascade="all, delete-orphan",
+        lazy="dynamic"
+    )
+
     # Logs d'audit
     audit_logs: Mapped[List["AuditLog"]] = relationship(
         "AuditLog",
@@ -236,6 +252,7 @@ class User(Base):
         Index("ix_users_active_verified", "is_active", "is_verified"),
         Index("ix_users_created_score", "created_at", "total_score"),
         Index("ix_users_last_login", "last_login"),
+        Index("ix_users_rank_score", "rank", "total_score"),
 
         # Contraintes de validation
         CheckConstraint(
@@ -276,27 +293,14 @@ class User(Base):
         ),
     )
 
-    # === MÉTHODES ===
-
-    def __repr__(self) -> str:
-        return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
-
-    def __str__(self) -> str:
-        return self.username
+    # === PROPRIÉTÉS CALCULÉES ===
 
     @property
     def win_rate(self) -> float:
-        """Calcule le taux de victoire"""
+        """Taux de victoire en pourcentage"""
         if self.total_games == 0:
             return 0.0
-        return round((self.games_won / self.total_games) * 100, 2)
-
-    @property
-    def average_score(self) -> float:
-        """Calcule le score moyen"""
-        if self.total_games == 0:
-            return 0.0
-        return round(self.total_score / self.total_games, 2)
+        return (self.games_won / self.total_games) * 100
 
     @property
     def is_locked(self) -> bool:
@@ -306,186 +310,221 @@ class User(Base):
         return datetime.now(timezone.utc) < self.locked_until
 
     @property
-    def display_name(self) -> str:
-        """Retourne le nom d'affichage préféré"""
-        return self.full_name or self.username
+    def is_online(self) -> bool:
+        """Vérifie si l'utilisateur est considéré comme en ligne"""
+        if not self.last_login:
+            return False
+        # Considéré en ligne si dernière connexion < 15 minutes
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+        return self.last_login > cutoff
 
     @property
-    def rank(self) -> str:
-        """Calcule le rang basé sur les points quantiques"""
+    def level(self) -> int:
+        """Calcule le niveau basé sur les points quantiques"""
         if self.quantum_points < 100:
-            return "Novice"
-        elif self.quantum_points < 500:
-            return "Apprenti"
-        elif self.quantum_points < 1000:
-            return "Quantique"
-        elif self.quantum_points < 2500:
-            return "Expert"
-        elif self.quantum_points < 5000:
-            return "Maître"
-        else:
-            return "Grand Maître"
+            return 1
+        return min(100, int(self.quantum_points / 100) + 1)
 
-    def update_stats(self, game_won: bool, score: int, quantum_used: bool) -> None:
+    @property
+    def display_name(self) -> str:
+        """Nom d'affichage (nom complet ou username)"""
+        return self.full_name or self.username
+
+    # === MÉTHODES D'INSTANCE ===
+
+    def update_score(self, points: int) -> None:
         """
-        Met à jour les statistiques après une partie
+        Met à jour le score total et le meilleur score
 
         Args:
-            game_won: True si la partie a été gagnée
-            score: Score obtenu
-            quantum_used: True si des fonctionnalités quantiques ont été utilisées
+            points: Points à ajouter
+        """
+        self.total_score = max(0, self.total_score + points)
+        if points > self.best_score:
+            self.best_score = points
+
+    def update_rank(self) -> None:
+        """Met à jour le rang basé sur le score total"""
+        if self.total_score < 100:
+            self.rank = "Bronze"
+        elif self.total_score < 500:
+            self.rank = "Silver"
+        elif self.total_score < 1000:
+            self.rank = "Gold"
+        elif self.total_score < 2500:
+            self.rank = "Platinum"
+        elif self.total_score < 5000:
+            self.rank = "Diamond"
+        else:
+            self.rank = "Master"
+
+    def record_game_result(self, won: bool, score: int = 0) -> None:
+        """
+        Enregistre le résultat d'une partie
+
+        Args:
+            won: True si le joueur a gagné
+            score: Score obtenu dans la partie
         """
         self.total_games += 1
-        if game_won:
+        if won:
             self.games_won += 1
 
-        self.total_score += score
-        if score > self.best_score:
-            self.best_score = score
+        if score > 0:
+            self.update_score(score)
 
-        if quantum_used:
-            # Bonus pour l'utilisation de fonctionnalités quantiques
-            quantum_bonus = score // 10
-            self.quantum_points += quantum_bonus
+        self.update_rank()
+        self.updated_at = datetime.now(timezone.utc)
+
+    def add_quantum_points(self, points: int) -> None:
+        """
+        Ajoute des points quantiques
+
+        Args:
+            points: Points quantiques à ajouter
+        """
+        self.quantum_points = max(0, self.quantum_points + points)
+        self.updated_at = datetime.now(timezone.utc)
 
     def reset_login_attempts(self) -> None:
         """Remet à zéro les tentatives de connexion"""
         self.login_attempts = 0
         self.locked_until = None
 
-    def increment_login_attempts(self) -> None:
-        """Incrémente les tentatives de connexion et verrouille si nécessaire"""
-        self.login_attempts += 1
+    def lock_account(self, duration_minutes: int = 15) -> None:
+        """
+        Verrouille le compte pour une durée donnée
 
-        # Verrouillage après 5 tentatives
-        if self.login_attempts >= 5:
-            from datetime import timedelta
-            self.locked_until = datetime.now(timezone.utc) + timedelta(minutes=15)
+        Args:
+            duration_minutes: Durée de verrouillage en minutes
+        """
+        self.locked_until = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
 
-    def update_last_login(self, ip_address: Optional[str] = None) -> None:
-        """Met à jour la dernière connexion"""
-        self.last_login = datetime.now(timezone.utc)
-        if ip_address:
-            self.last_ip_address = ip_address
-        self.reset_login_attempts()
+    def update_preferences(self, new_preferences: dict) -> None:
+        """
+        Met à jour les préférences utilisateur
+
+        Args:
+            new_preferences: Nouvelles préférences
+        """
+        if self.preferences is None:
+            self.preferences = {}
+
+        self.preferences.update(new_preferences)
+        self.updated_at = datetime.now(timezone.utc)
+
+    def update_settings(self, new_settings: dict) -> None:
+        """
+        Met à jour les paramètres utilisateur
+
+        Args:
+            new_settings: Nouveaux paramètres
+        """
+        if self.settings is None:
+            self.settings = {
+                "theme": "dark",
+                "language": "fr",
+                "notifications": {},
+                "privacy": {}
+            }
+
+        # Fusion récursive des paramètres
+        for key, value in new_settings.items():
+            if isinstance(value, dict) and key in self.settings:
+                self.settings[key].update(value)
+            else:
+                self.settings[key] = value
+
+        self.updated_at = datetime.now(timezone.utc)
 
     def verify_email(self) -> None:
         """Marque l'email comme vérifié"""
         self.is_verified = True
         self.email_verified_at = datetime.now(timezone.utc)
+        self.updated_at = datetime.now(timezone.utc)
 
-    def get_preference(self, key: str, default=None):
-        """Récupère une préférence utilisateur"""
-        if not self.preferences:
-            return default
-        return self.preferences.get(key, default)
-
-    def set_preference(self, key: str, value) -> None:
-        """Définit une préférence utilisateur"""
-        if not self.preferences:
-            self.preferences = {}
-        self.preferences[key] = value
-
-    def get_setting(self, key: str, default=None):
-        """Récupère un paramètre utilisateur avec support de clés imbriquées"""
-        if not self.settings:
-            return default
-
-        # Support des clés imbriquées comme "notifications.email"
-        keys = key.split('.')
-        current = self.settings
-
-        for k in keys:
-            if isinstance(current, dict) and k in current:
-                current = current[k]
-            else:
-                return default
-
-        return current
-
-    def set_setting(self, key: str, value) -> None:
-        """Définit un paramètre utilisateur avec support de clés imbriquées"""
-        if not self.settings:
-            self.settings = {}
-
-        # Support des clés imbriquées
-        keys = key.split('.')
-        current = self.settings
-
-        for k in keys[:-1]:
-            if k not in current:
-                current[k] = {}
-            current = current[k]
-
-        current[keys[-1]] = value
-
-    def to_dict(self, include_sensitive: bool = False) -> dict:
+    def deactivate(self, reason: Optional[str] = None) -> None:
         """
-        Convertit l'utilisateur en dictionnaire
+        Désactive le compte utilisateur
 
         Args:
-            include_sensitive: Inclure les données sensibles
-
-        Returns:
-            Dictionnaire représentant l'utilisateur
+            reason: Raison de la désactivation
         """
-        data = {
-            "id": str(self.id),
-            "username": self.username,
-            "email": self.email if include_sensitive else self.email[:3] + "***",
-            "full_name": self.full_name,
-            "avatar_url": self.avatar_url,
-            "bio": self.bio,
-            "is_active": self.is_active,
-            "is_verified": self.is_verified,
-            "is_superuser": self.is_superuser if include_sensitive else None,
-            "total_games": self.total_games,
-            "games_won": self.games_won,
-            "win_rate": self.win_rate,
-            "total_score": self.total_score,
-            "best_score": self.best_score,
-            "average_score": self.average_score,
-            "quantum_points": self.quantum_points,
-            "rank": self.rank,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "last_login": self.last_login.isoformat() if self.last_login else None,
-            "settings": self.settings,
-            "preferences": self.preferences
+        self.is_active = False
+        if reason and self.settings:
+            self.settings['deactivation_reason'] = reason
+        self.updated_at = datetime.now(timezone.utc)
+
+    def activate(self) -> None:
+        """Réactive le compte utilisateur"""
+        self.is_active = True
+        self.reset_login_attempts()
+        if self.settings and 'deactivation_reason' in self.settings:
+            del self.settings['deactivation_reason']
+        self.updated_at = datetime.now(timezone.utc)
+
+    # === MÉTHODES DE VALIDATION ===
+
+    def can_play(self) -> bool:
+        """Vérifie si l'utilisateur peut jouer"""
+        return self.is_active and not self.is_locked
+
+    def can_create_game(self) -> bool:
+        """Vérifie si l'utilisateur peut créer une partie"""
+        return self.can_play() and self.is_verified
+
+    def can_use_quantum_features(self) -> bool:
+        """Vérifie si l'utilisateur peut utiliser les fonctionnalités quantiques"""
+        return self.can_play() and self.level >= 3  # Niveau minimum requis
+
+    # === REPRÉSENTATION STRING ===
+
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, username='{self.username}', rank='{self.rank}')>"
+
+    def __str__(self) -> str:
+        return self.display_name
+
+
+# === ÉVÉNEMENTS SQLAlchemy ===
+
+from sqlalchemy import event
+
+@event.listens_for(User, 'before_insert')
+def user_before_insert(mapper, connection, target):
+    """Traitement avant insertion d'un utilisateur"""
+    # Normalisation des données
+    if target.username:
+        target.username = target.username.lower().strip()
+    if target.email:
+        target.email = target.email.lower().strip()
+
+    # Initialisation des valeurs par défaut
+    if target.preferences is None:
+        target.preferences = {}
+    if target.settings is None:
+        target.settings = {
+            "theme": "dark",
+            "language": "fr",
+            "notifications": {
+                "email": True,
+                "push": True,
+                "game_invites": True,
+                "tournaments": True
+            },
+            "privacy": {
+                "show_stats": True,
+                "show_online_status": True
+            }
         }
 
-        # Supprimer les valeurs None si pas sensible
-        if not include_sensitive:
-            data = {k: v for k, v in data.items() if v is not None}
 
-        return data
+@event.listens_for(User, 'before_update')
+def user_before_update(mapper, connection, target):
+    """Traitement avant mise à jour d'un utilisateur"""
+    # Mise à jour automatique du timestamp
+    target.updated_at = datetime.now(timezone.utc)
 
-    @classmethod
-    def create_user(
-        cls,
-        username: str,
-        email: str,
-        hashed_password: str,
-        full_name: Optional[str] = None,
-        is_verified: bool = False
-    ) -> "User":
-        """
-        Factory method pour créer un utilisateur
-
-        Args:
-            username: Nom d'utilisateur
-            email: Adresse email
-            hashed_password: Mot de passe hashé
-            full_name: Nom complet (optionnel)
-            is_verified: Email vérifié (défaut: False)
-
-        Returns:
-            Instance User créée
-        """
-        return cls(
-            username=username,
-            email=email,
-            hashed_password=hashed_password,
-            full_name=full_name,
-            is_verified=is_verified
-        )
+    # Mise à jour du rang si le score a changé
+    if target.total_score != getattr(target, '_sa_instance_state').committed_state.get('total_score', 0):
+        target.update_rank()
