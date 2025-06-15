@@ -2,16 +2,15 @@
 Service de gestion des jeux pour Quantum Mastermind
 Logique métier pour les parties, tentatives et scoring
 """
-import json
 import hashlib
-import secrets
+import json
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
+from sqlalchemy import select, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func, and_, or_, desc
-from sqlalchemy.orm import selectinload, joinedload
+from sqlalchemy.orm import selectinload
 
 from app.models.game import (
     Game, GameParticipation, GameAttempt, GameType, GameMode,
