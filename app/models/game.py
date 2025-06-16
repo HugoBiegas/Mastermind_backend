@@ -19,6 +19,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.models.base import BaseModelWithoutTimestamps, BaseModelWithCreatedAt
 
 # Import conditionnel pour éviter les imports circulaires
 if TYPE_CHECKING:
@@ -361,20 +362,12 @@ class Game(Base):
         return f"<Game(id={self.id}, room_code={self.room_code}, status={self.status})>"
 
 
-class GameParticipation(Base):
+class GameParticipation(BaseModelWithoutTimestamps):
     """
     Modèle de participation à une partie
     CORRECTION: Synchronisé avec init.sql
     """
     __tablename__ = "game_participations"
-
-    # === CLÉS ===
-
-    id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid4
-    )
 
     # === RELATIONS - CORRECTION: player_id (pas user_id) ===
 
@@ -506,7 +499,8 @@ class GameParticipation(Base):
         return f"<GameParticipation(game_id={self.game_id}, player_id={self.player_id}, status={self.status})>"
 
 
-class GameAttempt(Base):
+
+class GameAttempt(BaseModelWithCreatedAt):
     """
     Modèle d'une tentative de jeu
     CORRECTION: Synchronisé avec init.sql

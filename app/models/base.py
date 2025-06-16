@@ -217,16 +217,75 @@ class AuditMixin:
         """Définit l'utilisateur modificateur"""
         self.updated_by = user_id
 
+class BaseModelWithoutTimestamps(Base):
+    """
+    Modèle de base abstrait SANS timestamps automatiques
+    Pour les tables comme game_participations
+    """
+    __abstract__ = True
+
+    # Clé primaire UUID seulement
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        index=True,
+        comment="Identifiant unique UUID"
+    )
+
+    def __repr__(self) -> str:
+        """Représentation string du modèle"""
+        class_name = self.__class__.__name__
+        return f"<{class_name}(id={self.id})>"
+
+    def to_dict(self, exclude: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Convertit le modèle en dictionnaire"""
+        exclude = exclude or []
+        result = {}
+
+        for column in self.__table__.columns:
+            column_name = column.name
+            if column_name not in exclude:
+                value = getattr(self, column_name)
+
+                # Conversion des types spéciaux
+                if isinstance(value, datetime):
+                    result[column_name] = value.isoformat()
+                elif isinstance(value, UUID):
+                    result[column_name] = str(value)
+                else:
+                    result[column_name] = value
+
+        return result
+
+
+class BaseModelWithCreatedAt(Base):
+    """Modèle de base avec SEULEMENT created_at pour game_attempts"""
+    __abstract__ = True
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        index=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
+    )
+
 
 # === MIXIN POUR MÉTADONNÉES JSON ===
 class MetadataMixin:
-    """Mixin pour stocker des métadonnées JSON flexibles"""
+    """Mixin pour stocker des métadonnées JSON flexibles - SQLAlchemy 2.0 compatible"""
 
     from sqlalchemy.dialects.postgresql import JSONB
-    from sqlalchemy import JSON
 
+    # CORRECTION CRITIQUE: Utiliser directement JSONB (projet PostgreSQL)
     metadata: Mapped[Optional[Dict[str, Any]]] = mapped_column(
-        JSONB if "postgresql" in str(Base.metadata.bind) else JSON,
+        JSONB,  # ✅ Correction : utilisation directe de JSONB (pas de détection dynamique)
         nullable=True,
         default=dict,
         comment="Métadonnées JSON flexibles"

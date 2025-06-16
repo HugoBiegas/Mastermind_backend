@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS users (
     -- Informations d'identification
     username VARCHAR(50) UNIQUE NOT NULL,
     email VARCHAR(254) UNIQUE NOT NULL,
-    hashed_password VARCHAR(255) NOT NULL,  -- 🔥 CORRESPOND AU MODÈLE PYTHON
+    hashed_password VARCHAR(255) NOT NULL,
 
     -- Informations personnelles
     full_name VARCHAR(100) DEFAULT NULL,
@@ -154,6 +154,9 @@ CREATE TABLE IF NOT EXISTS game_participations (
     joined_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     left_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
     finished_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
 
     -- Contraintes
     UNIQUE(game_id, player_id),
@@ -194,7 +197,7 @@ CREATE TABLE IF NOT EXISTS game_attempts (
 
     -- Métadonnées
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     -- Contraintes
     UNIQUE(game_id, player_id, attempt_number),
     CONSTRAINT ck_attempts_attempt_number CHECK (attempt_number > 0),

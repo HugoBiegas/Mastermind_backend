@@ -221,21 +221,44 @@ async def get_game(
     Récupère les détails complets d'une partie
 
     Inclut l'état actuel, les joueurs, l'historique des coups
+
+    Args:
+        game_id: UUID de la partie à récupérer
+        current_user: Utilisateur authentifié
+        db: Session de base de données
+
+    Returns:
+        GameFull: Détails complets de la partie
+
+    Raises:
+        404: Partie non trouvée ou accès interdit
+        500: Erreur serveur
     """
     try:
+        # CORRECTION: Appel corrigé du service
         game = await game_service.get_game_details(db, game_id, current_user.id)
         return game
 
     except EntityNotFoundError as e:
         raise create_http_exception_from_error(e)
 
+    except GameError as e:
+        # AJOUT: Gestion spécifique des erreurs de jeu
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
     except Exception as e:
+        # AMÉLIORATION: Logging de l'erreur pour debug
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erreur lors de la récupération de la partie {game_id}: {str(e)}")
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur lors de la récupération de la partie"
         )
-
-
 @router.put(
     "/{game_id}",
     response_model=GameInfo,

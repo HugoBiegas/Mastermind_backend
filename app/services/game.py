@@ -418,10 +418,10 @@ class GameService:
             raise GameError(f"Erreur lors de la tentative: {str(e)}")
 
     async def get_game_details(
-        self,
-        db: AsyncSession,
-        game_id: UUID,
-        user_id: Optional[UUID] = None
+            self,
+            db: AsyncSession,
+            game_id: UUID,
+            user_id: Optional[UUID] = None
     ) -> GameFull:
         """
         Récupère les détails complets d'une partie
@@ -439,59 +439,82 @@ class GameService:
             if not game:
                 raise EntityNotFoundError("Partie non trouvée")
 
-            # Conversion des participants
+            # CORRECTION: Conversion des participants avec model_validate
             participants = []
             for participation in game.participations:
-                participants.append(ParticipantInfo.from_participation(participation))
+                # Création d'un dict avec les bons noms de champs
+                participant_data = {
+                    'user_id': participation.player_id,  # Mapping direct vers user_id
+                    'username': participation.player.username,
+                    'avatar_url': participation.player.avatar_url,
+                    'status': participation.status,
+                    'score': participation.score,
+                    'attempts_made': participation.attempts_made,
+                    'is_ready': participation.is_ready,
+                    'role': participation.role,
+                    'is_winner': participation.is_winner,
+                    'join_order': participation.join_order,
+                    'quantum_hints_used': participation.quantum_hints_used,
+                    'time_taken': participation.time_taken,
+                    'joined_at': participation.joined_at
+                }
+                participants.append(ParticipantInfo.model_validate(participant_data))
 
-            # Conversion des tentatives
+            # CORRECTION: Conversion des tentatives avec model_validate
             attempts = []
             for attempt in game.attempts:
-                attempt_info = AttemptInfo(
-                    id=attempt.id,
-                    attempt_number=attempt.attempt_number,
-                    player_id=attempt.player_id,  # Sera mappé vers user_id
-                    combination=attempt.combination,
-                    correct_positions=attempt.correct_positions,
-                    correct_colors=attempt.correct_colors,
-                    is_correct=attempt.is_correct,
-                    attempt_score=attempt.attempt_score,
-                    time_taken=attempt.time_taken,
-                    used_quantum_hint=attempt.used_quantum_hint,
-                    hint_type=attempt.hint_type,
-                    created_at=attempt.created_at
-                )
-                attempts.append(attempt_info)
+                # Création d'un dict avec les bons noms de champs
+                attempt_data = {
+                    'id': attempt.id,
+                    'attempt_number': attempt.attempt_number,
+                    'user_id': attempt.player_id,  # Mapping direct vers user_id
+                    'combination': attempt.combination,
+                    'correct_positions': attempt.correct_positions,
+                    'correct_colors': attempt.correct_colors,
+                    'is_correct': attempt.is_correct,
+                    'attempt_score': attempt.attempt_score,
+                    'time_taken': attempt.time_taken,
+                    'used_quantum_hint': attempt.used_quantum_hint,
+                    'hint_type': attempt.hint_type,
+                    'created_at': attempt.created_at
+                }
+                attempts.append(AttemptInfo.model_validate(attempt_data))
 
-            # Construction du GameFull
-            return GameFull(
-                id=game.id,
-                room_code=game.room_code,
-                game_type=game.game_type,
-                game_mode=game.game_mode,
-                status=game.status,
-                difficulty=game.difficulty,
-                combination_length=game.combination_length,
-                available_colors=game.available_colors,
-                max_attempts=game.max_attempts,
-                time_limit=game.time_limit,
-                max_players=game.max_players,
-                is_private=game.is_private,
-                created_at=game.created_at,
-                started_at=game.started_at,
-                finished_at=game.finished_at,
-                creator_id=game.creator_id,
-                participants=participants,
-                attempts=attempts,
-                solution=game.solution if game.is_finished else None,
-                settings=game.settings or {},
-                quantum_data=game.quantum_data
-            )
+            # CORRECTION: Vérification correcte du statut pour la solution
+            show_solution = game.status == GameStatus.FINISHED
+
+            # Construction du GameFull avec model_validate
+            game_data = {
+                'id': game.id,
+                'room_code': game.room_code,
+                'game_type': game.game_type,
+                'game_mode': game.game_mode,
+                'status': game.status,
+                'difficulty': game.difficulty,
+                'combination_length': game.combination_length,
+                'available_colors': game.available_colors,
+                'max_attempts': game.max_attempts,
+                'time_limit': game.time_limit,
+                'max_players': game.max_players,
+                'is_private': game.is_private,
+                'created_at': game.created_at,
+                'started_at': game.started_at,
+                'finished_at': game.finished_at,
+                'creator_id': game.creator_id,
+                'participants': participants,
+                'attempts': attempts,
+                'solution': game.solution if show_solution else None,
+                'settings': game.settings or {},
+                'quantum_data': game.quantum_data
+            }
+
+            return GameFull.model_validate(game_data)
 
         except Exception as e:
             if isinstance(e, EntityNotFoundError):
                 raise
             raise GameError(f"Erreur lors de la récupération: {str(e)}")
+
 
     # === MÉTHODES PRIVÉES ===
 
@@ -544,6 +567,7 @@ class GameService:
             Difficulty.HARD: {"colors": 8, "length": 5, "attempts": 10},
             Difficulty.EXPERT: {"colors": 10, "length": 6, "attempts": 8},
             Difficulty.QUANTUM: {"colors": 12, "length": 7, "attempts": 6}
+
         }
         return configs.get(difficulty, configs[Difficulty.MEDIUM])
 

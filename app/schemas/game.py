@@ -76,65 +76,48 @@ class AttemptCreate(BaseModel):
 # === SCHÉMAS D'INFORMATION ===
 
 class ParticipantInfo(BaseModel):
-    """Information sur un participant - CORRECTION: player_id au lieu de user_id"""
+    """Information sur un participant - CORRIGÉ"""
     model_config = ConfigDict(from_attributes=True)
 
-    # CORRECTION: Mapping depuis player_id vers user_id pour l'API
-    user_id: UUID = Field(..., description="ID de l'utilisateur", alias="player_id")
+    # CORRECTION: Pas d'alias, mapping direct dans le service
+    user_id: UUID = Field(..., description="ID de l'utilisateur")
     username: str = Field(..., description="Nom d'utilisateur")
     avatar_url: Optional[str] = Field(None, description="Avatar")
     status: ParticipationStatus = Field(..., description="Statut de participation")
     score: int = Field(default=0, description="Score dans cette partie")
-    attempts_made: int = Field(default=0, description="Tentatives utilisées", alias="attempts_made")
+    attempts_made: int = Field(default=0, description="Tentatives utilisées")
     is_ready: bool = Field(default=False, description="Prêt à jouer")
     role: str = Field(default="player", description="Rôle dans la partie")
     is_winner: bool = Field(default=False, description="Est le gagnant")
     join_order: int = Field(..., description="Ordre d'arrivée")
 
-    # Ajout des champs manquants du modèle
+    # Champs manquants du modèle ajoutés
     quantum_hints_used: int = Field(default=0, description="Hints quantiques utilisés")
     time_taken: Optional[int] = Field(None, description="Temps pris (secondes)")
     joined_at: datetime = Field(..., description="Date de participation")
 
-    @classmethod
-    def from_participation(cls, participation):
-        """Crée un ParticipantInfo depuis une GameParticipation"""
-        return cls(
-            player_id=participation.player_id,  # Sera mappé vers user_id
-            username=participation.player.username,
-            avatar_url=participation.player.avatar_url,
-            status=participation.status,
-            score=participation.score,
-            attempts_made=participation.attempts_made,
-            is_ready=participation.is_ready,
-            role=participation.role,
-            is_winner=participation.is_winner,
-            join_order=participation.join_order,
-            quantum_hints_used=participation.quantum_hints_used,
-            time_taken=participation.time_taken,
-            joined_at=participation.joined_at
-        )
+    # SUPPRESSION de from_participation - remplacé par model_validate dans le service
 
 
 class AttemptInfo(BaseModel):
-    """Information sur une tentative - CORRECTION: player_id au lieu de user_id"""
+    """Information sur une tentative - CORRIGÉ"""
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID = Field(..., description="ID de la tentative")
     attempt_number: int = Field(..., description="Numéro de tentative")
-    # CORRECTION: Mapping depuis player_id vers user_id pour l'API
-    user_id: UUID = Field(..., description="ID de l'utilisateur", alias="player_id")
+    # CORRECTION: Pas d'alias, mapping direct dans le service
+    user_id: UUID = Field(..., description="ID de l'utilisateur")
     combination: List[int] = Field(..., description="Combinaison proposée")
     correct_positions: int = Field(..., description="Positions correctes")
     correct_colors: int = Field(..., description="Couleurs correctes")
-    is_correct: bool = Field(..., description="Tentative gagnante", alias="is_correct")
+    is_correct: bool = Field(..., description="Tentative gagnante")
     attempt_score: int = Field(default=0, description="Score de la tentative")
     time_taken: Optional[int] = Field(None, description="Temps pris (ms)")
     used_quantum_hint: bool = Field(default=False, description="Hint quantique utilisé")
     hint_type: Optional[str] = Field(None, description="Type de hint")
-    created_at: datetime = Field(..., description="Horodatage", alias="created_at")
+    created_at: datetime = Field(..., description="Horodatage")
 
-    # Propriété calculée pour la compatibilité
+    # Propriétés calculées pour la compatibilité
     @property
     def timestamp(self) -> datetime:
         """Alias pour created_at"""
@@ -144,7 +127,6 @@ class AttemptInfo(BaseModel):
     def is_winning(self) -> bool:
         """Alias pour is_correct"""
         return self.is_correct
-
 
 class GameInfo(BaseModel):
     """Informations de base d'une partie"""
@@ -191,7 +173,7 @@ class GamePublic(BaseModel):
 
 
 class GameFull(BaseModel):
-    """Vue complète d'une partie"""
+    """Vue complète d'une partie - CORRIGÉ"""
     model_config = ConfigDict(from_attributes=True)
 
     # Informations de base
@@ -248,7 +230,6 @@ class GameFull(BaseModel):
         """Tour actuel (pour les jeux au tour par tour)"""
         # Logique pour déterminer le tour actuel
         return None
-
 
 # === SCHÉMAS DE GAMEPLAY ===
 
