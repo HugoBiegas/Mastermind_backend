@@ -410,7 +410,7 @@ class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict])
             user_id: UUID
     ) -> List[GameParticipation]:
         """
-        Récupère les participations actives d'un utilisateur
+        Récupère les participations actives d'un utilisateur avec les détails du jeu
         CORRECTION: player_id (pas user_id)
 
         Args:
@@ -418,11 +418,290 @@ class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict])
             user_id: ID de l'utilisateur
 
         Returns:
-            Liste des participations actives
+            Liste des participations actives avec les détails des parties
+        """
+        query = (
+            select(GameParticipation)
+            .options(
+                selectinload(GameParticipation.game),  # Charge les détails de la partie
+                selectinload(GameParticipation.player)  # Charge les détails du joueur
+            )
+            .where(
+                and_(
+                    GameParticipation.player_id == user_id,
+                    GameParticipation.status.in_([
+                        ParticipationStatus.WAITING,
+                        ParticipationStatus.READY,
+                        ParticipationStatus.ACTIVE
+                    ])
+                )
+            )
+            .order_by(GameParticipation.joined_at.desc())  # Plus récent en premier
+        )
+
+        result = await db.execute(query)
+        return list(result.scalars().all())
+
+
+    async def get_user_participation_history(
+            self,
+            db: AsyncSession,
+            user_id: UUID,
+            limit: int = 10,
+            include_active: bool = True
+    ) -> List[GameParticipation]:
+        """
+        Récupère l'historique des participations d'un utilisateur
+
+        Args:
+            db: Session de base de données
+            user_id: ID de l'utilisateur
+            limit: Nombre maximum de participations à retourner
+            include_active: Inclure les participations actives
+
+        Returns:
+            Liste des participations ordonnées par date
         """
         query = (
             select(GameParticipation)
             .options(selectinload(GameParticipation.game))
+            .where(GameParticipation.player_id == user_id)
+        )
+
+        if not include_active:
+            query = query.where(
+                GameParticipation.status.in_([
+                    ParticipationStatus.FINISHED,
+                    ParticipationStatus.ELIMINATED,
+                    ParticipationStatus.DISCONNECTED
+                ])
+            )
+
+        query = query.order_by(GameParticipation.joined_at.desc()).limit(limit)
+
+        result = await db.execute(query)
+        return list(result.scalars().all())
+
+
+    async def cleanup_stale_participations(
+            self,
+            db: AsyncSession,
+            hours_threshold: int = 24
+    ) -> int:
+        """
+        Nettoie les participations en attente depuis trop longtemps
+
+        Args:
+            db: Session de base de données
+            hours_threshold: Seuil en heures pour considérer une participation comme périmée
+
+        Returns:
+            Nombre de participations nettoyées
+        """
+        from datetime import timedelta
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_threshold)
+
+        # Marquer comme déconnectées les participations en attente depuis trop longtemps
+        query = (
+            select(GameParticipation)
+            .where(
+                and_(
+                    GameParticipation.status == ParticipationStatus.WAITING,
+                    GameParticipation.joined_at < cutoff_time
+                )
+            )
+        )
+
+        result = await db.execute(query)
+        stale_participations = result.scalars().all()
+
+        count = 0
+        current_time = datetime.now(timezone.utc)
+
+        for participation in stale_participations:
+            participation.status = ParticipationStatus.DISCONNECTED
+            participation.left_at = current_time
+            count += 1
+
+        if count > 0:
+            await db.commit()
+
+        return count
+
+    async def get_user_participation_stats(
+            self,
+            db: AsyncSession,
+            user_id: UUID
+    ) -> Dict[str, Any]:
+        """
+        Récupère les statistiques de participation d'un utilisateur
+
+        Args:
+            db: Session de base de données
+            user_id: ID de l'utilisateur
+
+        Returns:
+            Dictionnaire avec les statistiques
+        """
+        # Requête pour les statistiques générales
+        stats_query = select(
+            func.count(GameParticipation.id).label('total_games'),
+            func.count(case((GameParticipation.status == ParticipationStatus.FINISHED, 1))).label('finished_games'),
+            func.count(case((GameParticipation.is_winner == True, 1))).label('wins'),
+            func.avg(GameParticipation.score).label('avg_score'),
+            func.max(GameParticipation.score).label('max_score'),
+            func.sum(GameParticipation.attempts_made).label('total_attempts')
+        ).where(GameParticipation.player_id == user_id)
+
+        result = await db.execute(stats_query)
+        stats = result.first()
+
+        # Calcul du taux de victoire
+        win_rate = 0.0
+        if stats.finished_games and stats.finished_games > 0:
+            win_rate = (stats.wins or 0) / stats.finished_games
+
+        return {
+            'total_games': stats.total_games or 0,
+            'finished_games': stats.finished_games or 0,
+            'wins': stats.wins or 0,
+            'win_rate': round(win_rate * 100, 2),  # En pourcentage
+            'average_score': round(float(stats.avg_score or 0), 2),
+            'max_score': stats.max_score or 0,
+            'total_attempts': stats.total_attempts or 0
+        }
+
+    async def check_participation_conflicts(
+            self,
+            db: AsyncSession,
+            user_id: UUID
+    ) -> List[Dict[str, Any]]:
+        """
+        Vérifie s'il y a des conflits dans les participations d'un utilisateur
+        (ex: plusieurs participations actives, participations dans des parties terminées, etc.)
+
+        Args:
+            db: Session de base de données
+            user_id: ID de l'utilisateur
+
+        Returns:
+            Liste des conflits détectés
+        """
+        conflicts = []
+
+        # Vérifier les participations multiples actives
+        active_participations = await self.get_user_active_participations(db, user_id)
+
+        if len(active_participations) > 1:
+            conflicts.append({
+                'type': 'multiple_active_participations',
+                'description': f'Utilisateur dans {len(active_participations)} parties actives simultanément',
+                'participations': [
+                    {
+                        'game_id': str(p.game_id),
+                        'room_code': p.game.room_code if p.game else 'N/A',
+                        'status': p.status
+                    }
+                    for p in active_participations
+                ]
+            })
+
+        # Vérifier les participations dans des parties terminées mais marquées comme actives
+        for participation in active_participations:
+            if participation.game and participation.game.is_finished:
+                conflicts.append({
+                    'type': 'active_in_finished_game',
+                    'description': f'Participation active dans une partie terminée',
+                    'game_id': str(participation.game_id),
+                    'room_code': participation.game.room_code,
+                    'game_status': participation.game.status,
+                    'participation_status': participation.status
+                })
+
+        return conflicts
+
+    # Nouvelle méthode pour forcer la synchronisation du statut
+    async def sync_participation_status_with_game(
+            self,
+            db: AsyncSession,
+            game_id: UUID
+    ) -> int:
+        """
+        Synchronise le statut des participations avec le statut de la partie
+
+        Args:
+            db: Session de base de données
+            game_id: ID de la partie
+
+        Returns:
+            Nombre de participations mises à jour
+        """
+        # Récupérer la partie
+        game_query = select(Game).where(Game.id == game_id)
+        game_result = await db.execute(game_query)
+        game = game_result.scalar_one_or_none()
+
+        if not game:
+            return 0
+
+        # Récupérer toutes les participations de cette partie
+        participations_query = select(GameParticipation).where(
+            GameParticipation.game_id == game_id
+        )
+        participations_result = await db.execute(participations_query)
+        participations = participations_result.scalars().all()
+
+        updated_count = 0
+        current_time = datetime.now(timezone.utc)
+
+        for participation in participations:
+            updated = False
+
+            # Si la partie est terminée, marquer les participations actives comme terminées
+            if game.is_finished and participation.status in [
+                ParticipationStatus.WAITING,
+                ParticipationStatus.READY,
+                ParticipationStatus.ACTIVE
+            ]:
+                participation.status = ParticipationStatus.FINISHED
+                if not participation.finished_at:
+                    participation.finished_at = current_time
+                updated = True
+
+            # Si la partie est active, marquer les participations en attente comme actives
+            elif game.status == GameStatus.ACTIVE and participation.status == ParticipationStatus.WAITING:
+                participation.status = ParticipationStatus.ACTIVE
+                updated = True
+
+            if updated:
+                updated_count += 1
+
+        if updated_count > 0:
+            await db.commit()
+
+        return updated_count
+
+    async def check_user_can_join_new_game(
+            self,
+            db: AsyncSession,
+            user_id: UUID,
+            exclude_game_id: Optional[UUID] = None
+    ) -> bool:
+        """
+        Vérifie si un utilisateur peut rejoindre une nouvelle partie
+        (c'est-à-dire qu'il n'est pas déjà dans une partie active)
+
+        Args:
+            db: Session de base de données
+            user_id: ID de l'utilisateur
+            exclude_game_id: ID de partie à exclure de la vérification (optionnel)
+
+        Returns:
+            True si l'utilisateur peut rejoindre une nouvelle partie
+        """
+        query = (
+            select(func.count(GameParticipation.id))
             .where(
                 and_(
                     GameParticipation.player_id == user_id,
@@ -435,8 +714,14 @@ class GameParticipationRepository(BaseRepository[GameParticipation, dict, dict])
             )
         )
 
+        # Exclure une partie spécifique si nécessaire (utile pour la reconnexion)
+        if exclude_game_id:
+            query = query.where(GameParticipation.game_id != exclude_game_id)
+
         result = await db.execute(query)
-        return list(result.scalars().all())
+        active_count = result.scalar() or 0
+
+        return active_count == 0
 
 
 class GameAttemptRepository(BaseRepository[GameAttempt, dict, dict]):

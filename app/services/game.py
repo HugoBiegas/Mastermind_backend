@@ -36,19 +36,18 @@ class GameService:
         self.user_repo = UserRepository()
 
     # === CRÉATION ET GESTION DES PARTIES ===
-
     async def create_game(
-        self,
-        db: AsyncSession,
-        game_data: GameCreate,
-        creator_id: UUID
+            self,
+            db: AsyncSession,
+            game_data: GameCreate,
+            creator_id: UUID
     ) -> Dict[str, Any]:
         """
         Crée une nouvelle partie
 
         Args:
             db: Session de base de données
-            game_data: Données de création
+            game_data: Données de création de la partie
             creator_id: ID du créateur
 
         Returns:
@@ -56,43 +55,67 @@ class GameService:
 
         Raises:
             ValidationError: Si les données sont invalides
+            GameError: Si la création échoue
         """
         try:
-            # Validation des données
-            await self._validate_game_creation(db, game_data, creator_id)
-
-            # Génération du code de room si non fourni
-            room_code = game_data.room_code
-            if not room_code:
-                room_code = await self._generate_unique_room_code(db)
-
-            # Configuration basée sur la difficulté
-            difficulty_config = self._get_difficulty_config(game_data.difficulty)
-
-            # Génération de la solution
-            solution = generate_solution(
-                difficulty_config["length"],
-                difficulty_config["colors"]
+            # VÉRIFICATION: Empêcher la création si l'utilisateur est déjà dans une partie active
+            active_participations = await self.participation_repo.get_user_active_participations(
+                db, creator_id
             )
 
-            # Création de la partie
+            if active_participations:
+                # Récupérer les informations de la partie active
+                active_game = active_participations[0].game
+                raise GameError(
+                    f"Vous participez déjà à une partie active (Room: {active_game.room_code}). "
+                    "Quittez d'abord cette partie avant d'en créer une nouvelle."
+                )
+
+            # Configuration de difficulté AVANT la validation
+            difficulty_config = self._get_difficulty_config(game_data.difficulty)
+
+            # CORRECTION: Utiliser les valeurs de difficulty_config ou celles du game_data si spécifiées
+            combination_length = getattr(game_data, 'combination_length', difficulty_config["length"])
+            available_colors = getattr(game_data, 'available_colors', difficulty_config["colors"])
+            max_attempts = getattr(game_data, 'max_attempts', difficulty_config["attempts"])
+
+            # Validation des données avec les valeurs finales
+            if combination_length < 2 or combination_length > 8:
+                raise ValidationError("La longueur de combinaison doit être entre 2 et 8")
+
+            if available_colors < 3 or available_colors > 10:
+                raise ValidationError("Le nombre de couleurs doit être entre 3 et 10")
+
+            if max_attempts and (max_attempts < 1 or max_attempts > 50):
+                raise ValidationError("Le nombre de tentatives doit être entre 1 et 50")
+
+            if game_data.max_players < 1 or game_data.max_players > 8:
+                raise ValidationError("Le nombre de joueurs doit être entre 1 et 8")
+
+            # Génération du code de room unique
+            room_code = await self._generate_unique_room_code(db)
+
+            # Génération de la solution avec les valeurs finales
+            solution = self._generate_solution(combination_length, available_colors)
+
+            # Création de la partie avec les valeurs finales
             game = Game(
                 room_code=room_code,
                 game_type=game_data.game_type,
                 game_mode=game_data.game_mode,
                 difficulty=game_data.difficulty,
-                combination_length=difficulty_config["length"],
-                available_colors=difficulty_config["colors"],
-                max_attempts=game_data.max_attempts or difficulty_config["attempts"],
-                time_limit=game_data.time_limit,
+                combination_length=combination_length,
+                available_colors=available_colors,
+                max_attempts=max_attempts,
+                time_limit=getattr(game_data, 'time_limit', None),
                 max_players=game_data.max_players,
                 solution=solution,
-                is_private=game_data.is_private,
-                allow_spectators=game_data.allow_spectators,
-                enable_chat=game_data.enable_chat,
-                quantum_enabled=game_data.quantum_enabled,
+                is_private=getattr(game_data, 'is_private', False),
+                allow_spectators=getattr(game_data, 'allow_spectators', True),
+                enable_chat=getattr(game_data, 'enable_chat', True),
+                quantum_enabled=getattr(game_data, 'quantum_enabled', False),
                 creator_id=creator_id,
-                settings=game_data.settings or {}
+                settings=getattr(game_data, 'settings', {})
             )
 
             # Ajout à la base de données
@@ -100,9 +123,8 @@ class GameService:
             await db.commit()
             await db.refresh(game)
 
-            # Ajouter le créateur comme premier participant si mode multijoueur
-            if game.game_mode != GameMode.SINGLE:
-                await self._add_participant(db, game.id, creator_id, join_order=1)
+            # Ajouter TOUJOURS le créateur comme participant
+            await self._add_participant(db, game.id, creator_id, join_order=1)
 
             # Retour des informations
             return {
@@ -113,8 +135,10 @@ class GameService:
                 "difficulty": game.difficulty,
                 "status": game.status,
                 "max_players": game.max_players,
+                "combination_length": combination_length,
+                "available_colors": available_colors,
                 "created_at": game.created_at.isoformat(),
-                "message": "Partie créée avec succès"
+                "message": "Partie créée avec succès - vous avez été automatiquement ajouté à la partie"
             }
 
         except Exception as e:
@@ -123,12 +147,13 @@ class GameService:
                 raise
             raise GameError(f"Erreur lors de la création de la partie: {str(e)}")
 
+    # 2. MODIFICATION DE LA MÉTHODE join_game
     async def join_game(
-        self,
-        db: AsyncSession,
-        game_id: UUID,
-        player_id: UUID,
-        join_data: GameJoin
+            self,
+            db: AsyncSession,
+            game_id: UUID,
+            player_id: UUID,
+            join_data: GameJoin
     ) -> Dict[str, Any]:
         """
         Rejoint une partie existante
@@ -146,34 +171,62 @@ class GameService:
             EntityNotFoundError: Si la partie n'existe pas
             GameFullError: Si la partie est complète
             GameNotActiveError: Si la partie n'est pas active
+            GameError: Si le joueur est déjà dans une autre partie
         """
         try:
+            # NOUVELLE VÉRIFICATION : Empêcher de rejoindre si l'utilisateur est déjà dans une partie active
+            active_participations = await self.participation_repo.get_user_active_participations(
+                db, player_id
+            )
+
+            if active_participations:
+                # Vérifier si c'est la même partie (reconnexion) ou une autre partie
+                current_game_participation = None
+                other_game_participations = []
+
+                for participation in active_participations:
+                    if participation.game_id == game_id:
+                        current_game_participation = participation
+                    else:
+                        other_game_participations.append(participation)
+
+                # Si l'utilisateur est dans une AUTRE partie, l'empêcher de rejoindre
+                if other_game_participations:
+                    other_game = other_game_participations[0].game
+                    raise GameError(
+                        f"Vous participez déjà à une autre partie (Room: {other_game.room_code}). "
+                        "Quittez d'abord cette partie avant d'en rejoindre une nouvelle."
+                    )
+
+                # Si c'est la même partie et que le joueur était déconnecté, le reconnecter
+                if current_game_participation and current_game_participation.status == ParticipationStatus.DISCONNECTED:
+                    current_game_participation.status = ParticipationStatus.WAITING
+                    current_game_participation.left_at = None
+                    await db.commit()
+                    return {
+                        "message": "Reconnexion réussie à la partie",
+                        "participation_id": current_game_participation.id,
+                        "game_id": game_id,
+                        "join_order": current_game_participation.join_order
+                    }
+
+                # Si c'est la même partie et que le joueur est déjà actif
+                if current_game_participation:
+                    raise GameError("Vous participez déjà à cette partie")
+
             # Récupération de la partie avec participants
             game = await self.game_repo.get_game_with_full_details(db, game_id)
             if not game:
                 raise EntityNotFoundError("Partie non trouvée")
 
-            # Vérifications
-            if not game.can_join(player_id):
-                if game.is_full:
-                    raise GameFullError(
-                        "Partie complète",
-                        game_id=game_id,
-                        max_players=game.max_players,
-                        current_players=game.current_players_count
-                    )
-
-                # Vérifier si le joueur est déjà dans la partie
-                existing_participation = game.get_participation(player_id)
-                if existing_participation:
-                    if existing_participation.status == ParticipationStatus.DISCONNECTED:
-                        # Réactiver la participation
-                        existing_participation.status = ParticipationStatus.WAITING
-                        existing_participation.left_at = None
-                        await db.commit()
-                        return {"message": "Reconnexion réussie", "participation_id": existing_participation.id}
-                    else:
-                        raise GameError("Vous participez déjà à cette partie")
+            # Vérifications standard
+            if game.is_full:
+                raise GameFullError(
+                    "Partie complète",
+                    game_id=game_id,
+                    max_players=game.max_players,
+                    current_players=game.current_players_count
+                )
 
             if game.status not in [GameStatus.WAITING, GameStatus.STARTING]:
                 raise GameNotActiveError(
@@ -197,7 +250,7 @@ class GameService:
             )
 
             return {
-                "message": "Participation réussie",
+                "message": "Vous avez rejoint la partie avec succès",
                 "participation_id": participation.id,
                 "game_id": game_id,
                 "join_order": participation.join_order,
@@ -211,10 +264,10 @@ class GameService:
             raise GameError(f"Erreur lors de la participation: {str(e)}")
 
     async def leave_game(
-        self,
-        db: AsyncSession,
-        game_id: UUID,
-        player_id: UUID
+            self,
+            db: AsyncSession,
+            game_id: UUID,
+            player_id: UUID
     ) -> None:
         """
         Quitte une partie
@@ -223,6 +276,10 @@ class GameService:
             db: Session de base de données
             game_id: ID de la partie
             player_id: ID du joueur
+
+        Raises:
+            EntityNotFoundError: Si la participation n'existe pas
+            GameError: Si l'erreur lors de l'abandon
         """
         try:
             # Récupération de la participation
@@ -231,7 +288,20 @@ class GameService:
             )
 
             if not participation:
-                raise EntityNotFoundError("Participation non trouvée")
+                # AMÉLIORATION : Message d'erreur plus explicite
+                # Vérifier si la partie existe
+                game = await self.game_repo.get_by_id(db, game_id)
+                if not game:
+                    raise EntityNotFoundError("Partie non trouvée")
+                else:
+                    raise EntityNotFoundError(
+                        "Vous ne participez pas à cette partie. "
+                        "Impossible de quitter une partie à laquelle vous n'avez pas rejoint."
+                    )
+
+            # Vérifier si le joueur est déjà déconnecté
+            if participation.status == ParticipationStatus.DISCONNECTED:
+                raise GameError("Vous avez déjà quitté cette partie")
 
             # Marquer comme déconnecté
             participation.status = ParticipationStatus.DISCONNECTED
@@ -239,11 +309,104 @@ class GameService:
 
             await db.commit()
 
+            # AMÉLIORATION : Log de l'action pour audit
+            print(f"Joueur {player_id} a quitté la partie {game_id} à {participation.left_at}")
+
         except Exception as e:
             await db.rollback()
-            if isinstance(e, EntityNotFoundError):
+            if isinstance(e, (EntityNotFoundError, GameError)):
                 raise
             raise GameError(f"Erreur lors de l'abandon: {str(e)}")
+
+
+    async def get_user_current_game(
+            self,
+            db: AsyncSession,
+            user_id: UUID
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Récupère la partie active actuelle d'un utilisateur
+
+        Args:
+            db: Session de base de données
+            user_id: ID de l'utilisateur
+
+        Returns:
+            Informations de la partie active ou None
+        """
+        try:
+            active_participations = await self.participation_repo.get_user_active_participations(
+                db, user_id
+            )
+
+            if not active_participations:
+                return None
+
+            # Prendre la première participation active (un utilisateur ne devrait avoir qu'une seule partie active)
+            participation = active_participations[0]
+            game = participation.game
+
+            return {
+                "game_id": game.id,
+                "room_code": game.room_code,
+                "game_type": game.game_type,
+                "game_mode": game.game_mode,
+                "status": game.status,
+                "participation_status": participation.status,
+                "joined_at": participation.joined_at.isoformat() if participation.joined_at else None
+            }
+
+        except Exception as e:
+            raise GameError(f"Erreur lors de la récupération de la partie active: {str(e)}")
+
+    # 5. MÉTHODE POUR FORCER LA SORTIE D'UNE PARTIE (ADMIN)
+    async def force_leave_all_games(
+            self,
+            db: AsyncSession,
+            user_id: UUID,
+            admin_id: UUID
+    ) -> List[str]:
+        """
+        Force un utilisateur à quitter toutes ses parties actives (fonction admin)
+
+        Args:
+            db: Session de base de données
+            user_id: ID de l'utilisateur à faire sortir
+            admin_id: ID de l'administrateur
+
+        Returns:
+            Liste des codes de room des parties quittées
+
+        Raises:
+            AuthorizationError: Si l'admin n'a pas les permissions
+        """
+        try:
+            # Vérifier que l'admin a les permissions (cette vérification devrait être faite en amont)
+            admin_user = await self.user_repo.get_by_id(db, admin_id)  # Supposons qu'il y ait un user_repo
+            if not admin_user or not admin_user.is_superuser:
+                raise AuthorizationError("Seuls les administrateurs peuvent forcer la sortie")
+
+            active_participations = await self.participation_repo.get_user_active_participations(
+                db, user_id
+            )
+
+            left_games = []
+            current_time = datetime.now(timezone.utc)
+
+            for participation in active_participations:
+                participation.status = ParticipationStatus.DISCONNECTED
+                participation.left_at = current_time
+                left_games.append(participation.game.room_code)
+
+            await db.commit()
+
+            return left_games
+
+        except Exception as e:
+            await db.rollback()
+            if isinstance(e, AuthorizationError):
+                raise
+            raise GameError(f"Erreur lors de la sortie forcée: {str(e)}")
 
     async def start_game(
         self,
@@ -692,6 +855,20 @@ class GameService:
             "creator_username": game.creator.username if game.creator else "Inconnu",
             "is_joinable": game.can_join
         }
+
+    def _generate_solution(self, length: int, colors: int) -> List[int]:
+        """
+        Génère une solution aléatoire
+
+        Args:
+            length: Longueur de la combinaison
+            colors: Nombre de couleurs disponibles
+
+        Returns:
+            Liste d'entiers représentant la solution
+        """
+        import random
+        return [random.randint(1, colors) for _ in range(length)]
 
 
 # Instance globale du service de jeu

@@ -26,7 +26,7 @@ from app.services.game import game_service
 from app.services.quantum import quantum_service
 from app.utils.exceptions import (
     EntityNotFoundError, GameError, GameNotActiveError,
-    GameFullError, ValidationError
+    GameFullError, ValidationError, AuthorizationError
 )
 
 # Configuration du router
@@ -50,20 +50,38 @@ async def create_game(
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
     """
-    Crée une nouvelle partie de Quantum Mastermind
+    Crée une nouvelle partie
 
-    - **game_type**: Type de jeu (classic, quantum, hybrid, tournament)
-    - **game_mode**: Mode de jeu (solo, multiplayer, ranked, training)
-    - **difficulty**: Niveau de difficulté (easy, medium, hard, expert, quantum)
+    - **game_type**: Type de jeu (classic, quantum, speed, precision)
+    - **game_mode**: Mode de jeu (single, multiplayer, battle_royale, tournament)
+    - **difficulty**: Difficulté (easy, medium, hard, expert, quantum)
+    - **max_players**: Nombre maximum de joueurs
+    - **is_private**: Partie privée ou publique
     """
     try:
-        created_game = await game_service.create_game(
+        result = await game_service.create_game(
             db, game_data, current_user.id
         )
-        return created_game
+        return result
 
-    except (ValidationError, GameError) as e:
-        raise create_http_exception_from_error(e)
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Données de création invalides: {str(e)}"
+        )
+
+    except GameError as e:
+        # Gestion spécifique pour le cas où l'utilisateur est déjà dans une partie
+        if "participez déjà" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e)
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
 
     except Exception as e:
         raise HTTPException(
@@ -109,6 +127,32 @@ async def search_games(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur lors de la recherche de parties"
+        )
+
+
+@router.get(
+    "/my-current-game",
+    response_model=Optional[Dict[str, Any]],
+    summary="Récupérer ma partie active",
+    description="Récupère la partie actuellement active de l'utilisateur connecté"
+)
+async def get_my_current_game(
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Optional[Dict[str, Any]]:
+    """
+    Récupère la partie active de l'utilisateur connecté
+
+    Retourne None si l'utilisateur n'est dans aucune partie active
+    """
+    try:
+        current_game = await game_service.get_user_current_game(db, current_user.id)
+        return current_game
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération de la partie active"
         )
 
 
@@ -351,8 +395,36 @@ async def join_game(
         )
         return result
 
-    except (EntityNotFoundError, GameFullError, GameNotActiveError) as e:
-        raise create_http_exception_from_error(e)
+    except EntityNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+
+    except GameFullError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e)
+        )
+
+    except GameNotActiveError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e)
+        )
+
+    except GameError as e:
+        # Gestion spécifique pour les erreurs de participation multiple
+        if "participez déjà" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e)
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
 
     except Exception as e:
         raise HTTPException(
@@ -380,12 +452,28 @@ async def leave_game(
     try:
         await game_service.leave_game(db, game_id, current_user.id)
         return MessageResponse(
-            message="Vous avez quitté la partie",
+            message="Vous avez quitté la partie avec succès",
             details={"game_id": str(game_id)}
         )
 
     except EntityNotFoundError as e:
-        raise create_http_exception_from_error(e)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)  # Le message sera plus explicite grâce aux modifications du service
+        )
+
+    except GameError as e:
+        # Gestion spécifique pour le cas où l'utilisateur a déjà quitté
+        if "déjà quitté" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e)
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
 
     except Exception as e:
         raise HTTPException(
@@ -664,4 +752,99 @@ async def export_game(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur lors de l'export de la partie"
+        )
+
+
+@router.post(
+    "/admin/force-leave/{user_id}",
+    response_model=Dict[str, Any],
+    summary="Forcer la sortie (ADMIN)",
+    description="Force un utilisateur à quitter toutes ses parties actives"
+)
+async def admin_force_leave_all_games(
+        user_id: UUID,
+        current_user: User = Depends(get_current_superuser),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """
+    Force un utilisateur à quitter toutes ses parties actives (Admin uniquement)
+
+    Args:
+        user_id: ID de l'utilisateur à faire sortir
+
+    Returns:
+        Liste des parties dont l'utilisateur a été retiré
+    """
+    try:
+        left_games = await game_service.force_leave_all_games(
+            db, user_id, current_user.id
+        )
+
+        return {
+            "message": f"Utilisateur {user_id} retiré de {len(left_games)} partie(s)",
+            "left_games": left_games,
+            "total_games_left": len(left_games)
+        }
+
+    except AuthorizationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la sortie forcée"
+        )
+
+
+@router.get(
+    "/user/{user_id}/game-status",
+    response_model=Dict[str, Any],
+    summary="Statut de jeu d'un utilisateur",
+    description="Récupère le statut de jeu complet d'un utilisateur"
+)
+async def get_user_game_status(
+        user_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """
+    Récupère le statut de jeu d'un utilisateur
+
+    Accessible par l'utilisateur lui-même ou par un admin
+    """
+    try:
+        # Vérification des permissions
+        if user_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vous ne pouvez voir que votre propre statut"
+            )
+
+        # Récupération du statut
+        current_game = await game_service.get_user_current_game(db, user_id)
+
+        # Récupération de l'historique récent (optionnel)
+        active_participations = await game_service.participation_repo.get_user_active_participations(
+            db, user_id
+        )
+
+        return {
+            "user_id": str(user_id),
+            "current_game": current_game,
+            "has_active_game": current_game is not None,
+            "active_participations_count": len(active_participations),
+            "can_create_game": current_game is None,
+            "can_join_game": current_game is None
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de la récupération du statut"
         )
