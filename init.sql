@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS games (
 
     -- Contraintes
     CONSTRAINT ck_games_combination_length CHECK (combination_length >= 2 AND combination_length <= 8),
-    CONSTRAINT ck_games_available_colors CHECK (available_colors >= 3 AND available_colors <= 10),
+    CONSTRAINT ck_games_available_colors CHECK (available_colors >= 3 AND available_colors <= 15),
     CONSTRAINT ck_games_max_attempts CHECK (max_attempts IS NULL OR max_attempts > 0),
     CONSTRAINT ck_games_time_limit CHECK (time_limit IS NULL OR time_limit > 0),
     CONSTRAINT ck_games_max_players CHECK (max_players >= 1 AND max_players <= 8),

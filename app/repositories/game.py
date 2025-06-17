@@ -7,13 +7,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from sqlalchemy import and_, desc, func, select, or_, case
+from sqlalchemy import and_, desc, func, select, or_, case, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 
 from app.models.game import Game, GameParticipation, GameAttempt, GameStatus, GameType, GameMode, ParticipationStatus
 from app.schemas.game import GameCreate, GameUpdate, GameSearch
 from .base import BaseRepository
+from ..api.auth import logger
 
 
 class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
@@ -91,6 +92,196 @@ class GameRepository(BaseRepository[Game, GameCreate, GameUpdate]):
 
         result = await db.execute(query)
         return result.scalar_one_or_none()
+
+    async def sync_participation_status(self, db: AsyncSession, game_id: UUID) -> int:
+        """
+        Synchronise les statuts des participations avec l'état de la partie
+        AMÉLIORATION: Ajout de logs et meilleure gestion d'erreurs
+
+        Args:
+            db: Session de base de données
+            game_id: ID de la partie
+
+        Returns:
+            Nombre de participations mises à jour
+        """
+        try:
+            # Récupérer la partie
+            game_query = select(Game).where(Game.id == game_id)
+            game_result = await db.execute(game_query)
+            game = game_result.scalar_one_or_none()
+
+            if not game:
+                logger.warning(f"Tentative de synchronisation sur une partie inexistante: {game_id}")
+                return 0
+
+            # Récupérer toutes les participations de cette partie
+            participations_query = select(GameParticipation).where(
+                GameParticipation.game_id == game_id
+            )
+            participations_result = await db.execute(participations_query)
+            participations = participations_result.scalars().all()
+
+            updated_count = 0
+            current_time = datetime.now(timezone.utc)
+
+            for participation in participations:
+                old_status = participation.status
+                updated = False
+
+                # Si la partie est terminée, marquer les participations actives comme terminées
+                if game.is_finished and participation.status in [
+                    ParticipationStatus.WAITING,
+                    ParticipationStatus.READY,
+                    ParticipationStatus.ACTIVE
+                ]:
+                    participation.status = ParticipationStatus.FINISHED
+                    if not participation.finished_at:
+                        participation.finished_at = current_time
+                    updated = True
+
+                    logger.info(f"Participation {participation.id} mise à jour: {old_status} → FINISHED")
+
+                # Si la partie est active, marquer les participations en attente comme actives
+                elif game.status == GameStatus.ACTIVE and participation.status == ParticipationStatus.WAITING:
+                    participation.status = ParticipationStatus.ACTIVE
+                    updated = True
+
+                    logger.info(f"Participation {participation.id} mise à jour: {old_status} → ACTIVE")
+
+                if updated:
+                    updated_count += 1
+
+            if updated_count > 0:
+                await db.commit()
+                logger.info(
+                    f"Synchronisation terminée pour la partie {game_id}: {updated_count} participations mises à jour")
+            else:
+                logger.debug(f"Aucune synchronisation nécessaire pour la partie {game_id}")
+
+            return updated_count
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Erreur lors de la synchronisation des participations pour la partie {game_id}: {str(e)}")
+            raise
+
+    async def sync_all_games_participation_status(self, db: AsyncSession) -> Dict[str, int]:
+        """
+        Synchronise les statuts de toutes les parties (utile pour les tâches de maintenance)
+
+        Returns:
+            Statistiques de synchronisation
+        """
+        try:
+            # Récupérer toutes les parties non terminées
+            games_query = select(Game).where(
+                Game.status.in_([
+                    GameStatus.WAITING,
+                    GameStatus.STARTING,
+                    GameStatus.ACTIVE,
+                    GameStatus.PAUSED
+                ])
+            )
+            games_result = await db.execute(games_query)
+            games = games_result.scalars().all()
+
+            total_games = len(games)
+            total_updated = 0
+            games_with_updates = 0
+
+            for game in games:
+                updated_count = await self.sync_participation_status(db, game.id)
+                total_updated += updated_count
+                if updated_count > 0:
+                    games_with_updates += 1
+
+            stats = {
+                "total_games_checked": total_games,
+                "games_with_updates": games_with_updates,
+                "total_participations_updated": total_updated
+            }
+
+            logger.info(f"Synchronisation globale terminée: {stats}")
+            return stats
+
+        except Exception as e:
+            logger.error(f"Erreur lors de la synchronisation globale: {str(e)}")
+            raise
+
+    async def get_inconsistent_games(self, db: AsyncSession) -> List[Dict[str, Any]]:
+        """
+        Détecte les parties avec des statuts incohérents
+
+        Returns:
+            Liste des parties avec problèmes de cohérence
+        """
+        try:
+            # Requête pour détecter les incohérences
+            inconsistent_query = """
+             SELECT DISTINCT 
+                 g.id as game_id,
+                 g.room_code,
+                 g.status as game_status,
+                 g.finished_at,
+                 COUNT(gp.id) as total_participants,
+                 COUNT(CASE WHEN gp.status IN ('waiting', 'ready', 'active') THEN 1 END) as active_participants,
+                 COUNT(CASE WHEN gp.status = 'finished' THEN 1 END) as finished_participants,
+                 ARRAY_AGG(DISTINCT gp.status) as participant_statuses
+             FROM games g
+             LEFT JOIN game_participations gp ON g.id = gp.game_id
+             WHERE g.status IN ('finished', 'cancelled', 'aborted')
+             GROUP BY g.id, g.room_code, g.status, g.finished_at
+             HAVING COUNT(CASE WHEN gp.status IN ('waiting', 'ready', 'active') THEN 1 END) > 0
+             """
+
+            result = await db.execute(text(inconsistent_query))
+            inconsistent_games = []
+
+            for row in result:
+                inconsistent_games.append({
+                    "game_id": str(row.game_id),
+                    "room_code": row.room_code,
+                    "game_status": row.game_status,
+                    "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                    "total_participants": row.total_participants,
+                    "active_participants": row.active_participants,
+                    "finished_participants": row.finished_participants,
+                    "participant_statuses": row.participant_statuses,
+                    "issue": "Partie terminée avec des joueurs encore actifs"
+                })
+
+            logger.info(f"Détection d'incohérences: {len(inconsistent_games)} parties problématiques trouvées")
+            return inconsistent_games
+
+        except Exception as e:
+            logger.error(f"Erreur lors de la détection d'incohérences: {str(e)}")
+            raise
+
+    async def fix_inconsistent_game(self, db: AsyncSession, game_id: UUID) -> bool:
+        """
+        Corrige les incohérences d'une partie spécifique
+
+        Args:
+            db: Session de base de données
+            game_id: ID de la partie à corriger
+
+        Returns:
+            True si des corrections ont été apportées
+        """
+        try:
+            updated_count = await self.sync_participation_status(db, game_id)
+
+            if updated_count > 0:
+                logger.info(f"Partie {game_id} corrigée: {updated_count} participations mises à jour")
+                return True
+            else:
+                logger.debug(f"Partie {game_id}: aucune correction nécessaire")
+                return False
+
+        except Exception as e:
+            logger.error(f"Erreur lors de la correction de la partie {game_id}: {str(e)}")
+            raise
 
     async def search_games(
             self,
