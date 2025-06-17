@@ -46,21 +46,22 @@ router = APIRouter(prefix="/games", tags=["Jeux"])
 )
 async def create_game(
         game_data: GameCreate,
+        auto_leave: bool = Query(
+            default=False,
+            description="Quitter automatiquement les parties actives avant de créer la nouvelle"
+        ),
         current_user: User = Depends(get_current_verified_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
     """
-    Crée une nouvelle partie
+    Crée une nouvelle partie de Quantum Mastermind
 
-    - **game_type**: Type de jeu (classic, quantum, speed, precision)
-    - **game_mode**: Mode de jeu (single, multiplayer, battle_royale, tournament)
-    - **difficulty**: Difficulté (easy, medium, hard, expert, quantum)
-    - **max_players**: Nombre maximum de joueurs
-    - **is_private**: Partie privée ou publique
+    - **auto_leave**: Si true, quitte automatiquement les parties actives
+    - **game_data**: Configuration de la partie à créer
     """
     try:
-        result = await game_service.create_game(
-            db, game_data, current_user.id
+        result = await game_service.create_game_with_auto_leave(
+            db, game_data, current_user.id, auto_leave
         )
         return result
 
@@ -73,9 +74,10 @@ async def create_game(
     except GameError as e:
         # Gestion spécifique pour le cas où l'utilisateur est déjà dans une partie
         if "participez déjà" in str(e):
+            # Proposer l'auto-leave comme solution
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=str(e)
+                detail=f"{str(e)} Utilisez le paramètre auto_leave=true pour quitter automatiquement vos parties actives."
             )
         else:
             raise HTTPException(
@@ -88,7 +90,6 @@ async def create_game(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur lors de la création de la partie"
         )
-
 
 @router.get(
     "/search",
@@ -279,7 +280,6 @@ async def get_game(
         500: Erreur serveur
     """
     try:
-        # CORRECTION: Appel corrigé du service
         game = await game_service.get_game_details(db, game_id, current_user.id)
         return game
 
@@ -432,53 +432,45 @@ async def join_game(
             detail="Erreur lors de la participation à la partie"
         )
 
-
 @router.post(
-    "/{game_id}/leave",
-    response_model=MessageResponse,
-    summary="Quitter une partie",
-    description="Quitte une partie en cours"
+    "/leave",
+    response_model=Dict[str, Any],
+    summary="Quitter toutes les parties actives",
+    description="Quitte toutes les parties actives de l'utilisateur avec gestion intelligente des annulations"
 )
-async def leave_game(
-        game_id: UUID,
+async def leave_all_active_games(
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
-) -> MessageResponse:
+) -> Dict[str, Any]:
     """
-    Quitte une partie en cours
+    Quitte toutes les parties actives de l'utilisateur
 
-    L'utilisateur sera retiré de la liste des participants
+    Logique appliquée :
+    - Trouve toutes les parties avec status 'waiting', 'starting', 'active', 'paused'
+    - Met le status du joueur à 'disconnected'
+    - Annule la partie si l'utilisateur est seul
+    - Annule la partie si tous les autres joueurs ont des status non-actifs
     """
     try:
-        await game_service.leave_game(db, game_id, current_user.id)
-        return MessageResponse(
-            message="Vous avez quitté la partie avec succès",
-            details={"game_id": str(game_id)}
-        )
+        result = await game_service.leave_all_active_games(db, current_user.id)
+        return result
 
     except EntityNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)  # Le message sera plus explicite grâce aux modifications du service
+            detail=str(e)
         )
 
     except GameError as e:
-        # Gestion spécifique pour le cas où l'utilisateur a déjà quitté
-        if "déjà quitté" in str(e):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=str(e)
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e)
-            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
 
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de l'abandon de la partie"
+            detail="Erreur lors de l'abandon des parties actives"
         )
 
 

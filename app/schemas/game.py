@@ -232,6 +232,27 @@ class GameFull(BaseModel):
         return None
 
 # === SCHÉMAS DE GAMEPLAY ===
+class GameCreateResponse(BaseModel):
+    """Réponse de création de partie avec informations d'auto-leave"""
+    model_config = ConfigDict(from_attributes=True)
+
+    # Informations de base de la partie créée
+    id: UUID = Field(..., description="ID de la partie")
+    room_code: str = Field(..., description="Code de room")
+    game_type: GameType = Field(..., description="Type de jeu")
+    game_mode: GameMode = Field(..., description="Mode de jeu")
+    difficulty: Difficulty = Field(..., description="Difficulté")
+    status: GameStatus = Field(..., description="Statut")
+    max_players: int = Field(..., description="Joueurs max")
+    combination_length: int = Field(..., description="Longueur combinaison")
+    available_colors: int = Field(..., description="Couleurs disponibles")
+    created_at: str = Field(..., description="Date de création")
+    message: str = Field(..., description="Message de confirmation")
+
+    # Informations sur l'auto-leave
+    auto_leave_performed: bool = Field(..., description="Auto-leave a été effectué")
+    leave_summary: Optional[Dict[str, int]] = Field(None, description="Résumé des parties quittées")
+
 
 class AttemptResult(BaseModel):
     """Résultat d'une tentative"""
