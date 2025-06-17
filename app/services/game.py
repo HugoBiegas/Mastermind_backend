@@ -375,6 +375,135 @@ class GameService:
         except Exception as e:
             raise GameError(f"Erreur lors de la récupération de la partie active: {str(e)}")
 
+    async def make_attempt(
+            self,
+            db: AsyncSession,
+            game_id: UUID,
+            player_id: UUID,
+            attempt_data: AttemptCreate
+    ) -> AttemptResult:
+        """
+        Effectue une tentative dans une partie
+
+        Args:
+            db: Session de base de données
+            game_id: ID de la partie
+            player_id: ID du joueur
+            attempt_data: Données de la tentative
+
+        Returns:
+            Résultat de la tentative
+
+        Raises:
+            EntityNotFoundError: Si la partie ou le joueur n'existe pas
+            GameError: Si la tentative n'est pas autorisée
+            ValidationError: Si les données sont invalides
+        """
+        try:
+            # Récupération de la partie avec tous les détails
+            game = await self.game_repo.get_game_with_full_details(db, game_id)
+            if not game:
+                raise EntityNotFoundError("Partie non trouvée")
+
+            # Vérifications de base
+            if game.status != GameStatus.ACTIVE:
+                raise GameError("Cette partie n'est pas active")
+
+            # Vérification de la participation
+            participation = game.get_participation(player_id)
+            if not participation or participation.status != ParticipationStatus.ACTIVE:
+                raise GameError("Vous ne participez pas activement à cette partie")
+
+            # Vérification du nombre de tentatives
+            current_attempts = await self.attempt_repo.count_player_attempts(
+                db, game_id, player_id
+            )
+
+            if game.max_attempts and current_attempts >= game.max_attempts:
+                raise GameError("Nombre maximum de tentatives atteint")
+
+            # Validation de la combinaison
+            if len(attempt_data.combination) != game.combination_length:
+                raise ValidationError(f"La combinaison doit contenir {game.combination_length} couleurs")
+
+            if not all(1 <= color <= game.available_colors for color in attempt_data.combination):
+                raise ValidationError(f"Les couleurs doivent être entre 1 et {game.available_colors}")
+
+            # Calcul du résultat
+            result = self._calculate_attempt_result(
+                attempt_data.combination,
+                game.solution
+            )
+
+            # Création de la tentative
+            attempt = GameAttempt(
+                game_id=game_id,
+                player_id=player_id,
+                attempt_number=current_attempts + 1,
+                combination=attempt_data.combination,
+                correct_positions=result["correct_positions"],
+                correct_colors=result["correct_colors"],
+                is_correct=result["is_winning"],
+                attempt_score=result["score"],
+                used_quantum_hint=attempt_data.use_quantum_hint,
+                hint_type=attempt_data.hint_type if attempt_data.use_quantum_hint else None
+            )
+
+            db.add(attempt)
+
+            # Mise à jour de la participation
+            participation.attempts_made += 1
+            participation.score += result["score"]
+
+            # Si la tentative est gagnante
+            if result["is_winning"]:
+                participation.is_winner = True
+                participation.finished_at = datetime.now(timezone.utc)
+
+                # Terminer la partie si mode solo ou si c'est le premier gagnant
+                if game.game_mode == GameMode.SINGLE:
+                    game.status = GameStatus.FINISHED
+                    game.finished_at = datetime.now(timezone.utc)
+
+                    # ✅ CORRECTION : Synchroniser les statuts de tous les joueurs
+                    await self.game_repo.sync_participation_status(db, game_id)
+
+                elif game.game_mode == GameMode.MULTIPLAYER:
+                    # Pour le multijoueur, vérifier si tous les joueurs ont terminé
+                    # ou implémenter votre logique spécifique
+                    game.status = GameStatus.FINISHED
+                    game.finished_at = datetime.now(timezone.utc)
+
+                    # ✅ CORRECTION : Synchroniser les statuts de tous les joueurs
+                    await self.game_repo.sync_participation_status(db, game_id)
+
+            await db.commit()
+            await db.refresh(attempt)
+
+            # Construire le résultat
+            return AttemptResult(
+                attempt_id=attempt.id,
+                attempt_number=attempt.attempt_number,
+                correct_positions=attempt.correct_positions,
+                correct_colors=attempt.correct_colors,
+                is_winning=attempt.is_correct,
+                score=attempt.attempt_score,
+                game_finished=game.status == GameStatus.FINISHED,
+                solution=game.solution if attempt.is_correct else None,
+                quantum_hint_used=attempt.used_quantum_hint,
+                time_taken=attempt.time_taken,
+                remaining_attempts=(
+                    game.max_attempts - participation.attempts_made
+                    if game.max_attempts else None
+                )
+            )
+
+        except Exception as e:
+            await db.rollback()
+            if isinstance(e, (EntityNotFoundError, GameError, ValidationError)):
+                raise
+            raise GameError(f"Erreur lors de la tentative: {str(e)}")
+
     async def leave_all_active_games(
             self,
             db: AsyncSession,
@@ -444,6 +573,10 @@ class GameService:
                     # Cas 1: L'utilisateur est seul dans la partie
                     game.status = GameStatus.CANCELLED
                     game.finished_at = datetime.now(timezone.utc)
+
+                    # ✅ CORRECTION : Synchroniser les statuts
+                    await self.game_repo.sync_participation_status(db, game.id)
+
                     cancelled_games.append({
                         **game_info,
                         "action": "cancelled",
@@ -474,6 +607,10 @@ class GameService:
                         # Annuler la partie
                         game.status = GameStatus.CANCELLED
                         game.finished_at = datetime.now(timezone.utc)
+
+                        # ✅ CORRECTION : Synchroniser les statuts
+                        await self.game_repo.sync_participation_status(db, game.id)
+
                         cancelled_games.append({
                             **game_info,
                             "action": "cancelled",
@@ -616,116 +753,6 @@ class GameService:
                 raise
             raise GameError(f"Erreur lors du démarrage: {str(e)}")
 
-    async def make_attempt(
-        self,
-        db: AsyncSession,
-        game_id: UUID,
-        player_id: UUID,
-        attempt_data: AttemptCreate
-    ) -> AttemptResult:
-        """
-        Effectue une tentative
-
-        Args:
-            db: Session de base de données
-            game_id: ID de la partie
-            player_id: ID du joueur
-            attempt_data: Données de la tentative
-
-        Returns:
-            Résultat de la tentative
-        """
-        try:
-            # Récupération de la partie et vérifications
-            game = await self.game_repo.get_game_with_full_details(db, game_id)
-            if not game:
-                raise EntityNotFoundError("Partie non trouvée")
-
-            if game.status != GameStatus.ACTIVE:
-                raise GameNotActiveError("La partie n'est pas active")
-
-            # Vérification de la participation
-            participation = game.get_participation(player_id)
-            if not participation or participation.status != ParticipationStatus.ACTIVE:
-                raise GameError("Vous ne participez pas activement à cette partie")
-
-            # Vérification du nombre de tentatives
-            current_attempts = await self.attempt_repo.count_player_attempts(
-                db, game_id, player_id
-            )
-
-            if game.max_attempts and current_attempts >= game.max_attempts:
-                raise GameError("Nombre maximum de tentatives atteint")
-
-            # Validation de la combinaison
-            if len(attempt_data.combination) != game.combination_length:
-                raise ValidationError(f"La combinaison doit contenir {game.combination_length} couleurs")
-
-            if not all(1 <= color <= game.available_colors for color in attempt_data.combination):
-                raise ValidationError(f"Les couleurs doivent être entre 1 et {game.available_colors}")
-
-            # Calcul du résultat
-            result = self._calculate_attempt_result(
-                attempt_data.combination,
-                game.solution
-            )
-
-            # Création de la tentative
-            attempt = GameAttempt(
-                game_id=game_id,
-                player_id=player_id,
-                attempt_number=current_attempts + 1,
-                combination=attempt_data.combination,
-                correct_positions=result["correct_positions"],
-                correct_colors=result["correct_colors"],
-                is_correct=result["is_winning"],
-                attempt_score=result["score"],
-                used_quantum_hint=attempt_data.use_quantum_hint,
-                hint_type=attempt_data.hint_type if attempt_data.use_quantum_hint else None
-            )
-
-            db.add(attempt)
-
-            # Mise à jour de la participation
-            participation.attempts_made += 1
-            participation.score += result["score"]
-
-            # Si la tentative est gagnante
-            if result["is_winning"]:
-                participation.is_winner = True
-                participation.finished_at = datetime.now(timezone.utc)
-
-                # Terminer la partie si mode solo ou si c'est le premier gagnant
-                if game.game_mode == GameMode.SINGLE:
-                    game.status = GameStatus.FINISHED
-                    game.finished_at = datetime.now(timezone.utc)
-
-            await db.commit()
-            await db.refresh(attempt)
-
-            # Construire le résultat
-            return AttemptResult(
-                attempt_id=attempt.id,
-                attempt_number=attempt.attempt_number,
-                correct_positions=attempt.correct_positions,
-                correct_colors=attempt.correct_colors,
-                is_winning=attempt.is_correct,
-                score=attempt.attempt_score,
-                game_finished=game.status == GameStatus.FINISHED,
-                solution=game.solution if attempt.is_correct else None,
-                quantum_hint_used=attempt.used_quantum_hint,
-                time_taken=attempt.time_taken,
-                remaining_attempts=(
-                    game.max_attempts - participation.attempts_made
-                    if game.max_attempts else None
-                )
-            )
-
-        except Exception as e:
-            await db.rollback()
-            if isinstance(e, (EntityNotFoundError, GameError, ValidationError)):
-                raise
-            raise GameError(f"Erreur lors de la tentative: {str(e)}")
 
     async def get_game_details(
             self,
