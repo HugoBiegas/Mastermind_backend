@@ -86,6 +86,7 @@ class GameService:
             # Utiliser les valeurs de difficulty_config ou celles du game_data si spécifiées
             combination_length = getattr(game_data, 'combination_length', difficulty_config["length"])
             available_colors = getattr(game_data, 'available_colors', difficulty_config["colors"])
+            max_attempts = difficulty_config["attempts"]
 
             # Génération du code de room unique
             room_code = game_data.room_code or await self._generate_unique_room_code(db)
@@ -99,7 +100,7 @@ class GameService:
                 difficulty=game_data.difficulty,
                 combination_length=combination_length,
                 available_colors=available_colors,
-                max_attempts=game_data.max_attempts,
+                max_attempts=max_attempts,
                 time_limit=game_data.time_limit,
                 max_players=game_data.max_players,
                 is_private=game_data.is_private,
@@ -383,7 +384,7 @@ class GameService:
             attempt_data: AttemptCreate
     ) -> AttemptResult:
         """
-        Effectue une tentative dans une partie
+        Effectue une tentative dans une partie avec gestion d'élimination
 
         Args:
             db: Session de base de données
@@ -411,16 +412,22 @@ class GameService:
 
             # Vérification de la participation
             participation = game.get_participation(player_id)
-            if not participation or participation.status != ParticipationStatus.ACTIVE:
+            if not participation or participation.status not in [ParticipationStatus.ACTIVE]:
                 raise GameError("Vous ne participez pas activement à cette partie")
+
+            # 🔥 VÉRIFICATION: Joueur déjà éliminé ou terminé
+            if participation.status in [ParticipationStatus.ELIMINATED, ParticipationStatus.FINISHED]:
+                raise GameError("Vous ne pouvez plus jouer (éliminé ou partie terminée)")
 
             # Vérification du nombre de tentatives
             current_attempts = await self.attempt_repo.count_player_attempts(
                 db, game_id, player_id
             )
 
+            # 🔥 CORRECTION: On peut jouer tant qu'on n'a pas DÉPASSÉ max_attempts
+            # Si max_attempts = 6, on peut faire les tentatives 1,2,3,4,5,6 mais pas la 7ème
             if game.max_attempts and current_attempts >= game.max_attempts:
-                raise GameError("Nombre maximum de tentatives atteint")
+                raise GameError(f"Nombre maximum de tentatives atteint ({game.max_attempts})")
 
             # Validation de la combinaison
             if len(attempt_data.combination) != game.combination_length:
@@ -455,32 +462,47 @@ class GameService:
             participation.attempts_made += 1
             participation.score += result["score"]
 
-            # Si la tentative est gagnante
+            # 🔥 NOUVELLE LOGIQUE: Gestion des résultats de tentative
+            game_finished = False
+            player_eliminated = False
+
             if result["is_winning"]:
+                # ✅ VICTOIRE: Marquer comme gagnant et terminé
                 participation.is_winner = True
+                participation.status = ParticipationStatus.FINISHED
                 participation.finished_at = datetime.now(timezone.utc)
+                print(f"🏆 Joueur {player_id} a gagné la partie {game_id}")
 
-                # Terminer la partie si mode solo ou si c'est le premier gagnant
-                if game.game_mode == GameMode.SINGLE:
-                    game.status = GameStatus.FINISHED
-                    game.finished_at = datetime.now(timezone.utc)
+                # TODO: Broadcast WebSocket de victoire
+                # await broadcast_player_won(game_id, player_id, participation.player.username, participation.attempts_made)
 
-                    # ✅ CORRECTION : Synchroniser les statuts de tous les joueurs
-                    await self.game_repo.sync_participation_status(db, game_id)
+            else:
+                # ❌ ÉCHEC: Vérifier si éliminé
+                if game.max_attempts and participation.attempts_made >= game.max_attempts:
+                    # Joueur éliminé - a utilisé toutes ses tentatives sans gagner
+                    participation.status = ParticipationStatus.ELIMINATED
+                    participation.is_eliminated = True
+                    participation.finished_at = datetime.now(timezone.utc)
+                    player_eliminated = True
+                    print(
+                        f"💀 Joueur {player_id} éliminé (max tentatives atteintes: {participation.attempts_made}/{game.max_attempts})")
 
-                elif game.game_mode == GameMode.MULTIPLAYER:
-                    # Pour le multijoueur, vérifier si tous les joueurs ont terminé
-                    # ou implémenter votre logique spécifique
-                    game.status = GameStatus.FINISHED
-                    game.finished_at = datetime.now(timezone.utc)
+                    # TODO: Broadcast WebSocket d'élimination
+                    # await broadcast_player_eliminated(game_id, player_id, participation.player.username, participation.attempts_made, game.max_attempts)
 
-                    # ✅ CORRECTION : Synchroniser les statuts de tous les joueurs
-                    await self.game_repo.sync_participation_status(db, game_id)
+            # 🔥 VÉRIFICATION: La partie doit-elle se terminer ?
+            game_finished = await self._check_and_finish_game(db, game)
 
             await db.commit()
             await db.refresh(attempt)
 
-            # Construire le résultat
+            # Obtenir des informations contextuelles pour le résultat
+            participations = [p for p in game.participations if p.role == "player"]
+            active_players = len([p for p in participations if p.status == ParticipationStatus.ACTIVE])
+            eliminated_players = len([p for p in participations if p.status == ParticipationStatus.ELIMINATED])
+            winners_count = len([p for p in participations if p.status == ParticipationStatus.FINISHED])
+
+            # Construire le résultat enrichi
             return AttemptResult(
                 attempt_id=attempt.id,
                 attempt_number=attempt.attempt_number,
@@ -488,13 +510,12 @@ class GameService:
                 correct_colors=attempt.correct_colors,
                 is_winning=attempt.is_correct,
                 score=attempt.attempt_score,
-                game_finished=game.status == GameStatus.FINISHED,
-                solution=game.solution if attempt.is_correct else None,
+                game_finished=game_finished,
+                solution=game.solution if (attempt.is_correct or game_finished) else None,
                 quantum_hint_used=attempt.used_quantum_hint,
                 time_taken=attempt.time_taken,
                 remaining_attempts=(
-                    game.max_attempts - participation.attempts_made
-                    if game.max_attempts else None
+                    max(0, game.max_attempts - participation.attempts_made) if game.max_attempts else None
                 )
             )
 
@@ -503,6 +524,124 @@ class GameService:
             if isinstance(e, (EntityNotFoundError, GameError, ValidationError)):
                 raise
             raise GameError(f"Erreur lors de la tentative: {str(e)}")
+
+    async def _check_and_finish_game(
+            self,
+            db: AsyncSession,
+            game: Game
+    ) -> bool:
+        """
+        Vérifie si la partie doit se terminer et la termine si nécessaire
+
+        Args:
+            db: Session de base de données
+            game: Instance de la partie
+
+        Returns:
+            True si la partie a été terminée, False sinon
+        """
+        try:
+            # Récupérer toutes les participations actives
+            participations = [p for p in game.participations if p.role == "player"]
+
+            if not participations:
+                return False
+
+            # Compter les statuts
+            finished_count = len([p for p in participations if p.status == ParticipationStatus.FINISHED])
+            eliminated_count = len([p for p in participations if p.status == ParticipationStatus.ELIMINATED])
+            active_count = len([p for p in participations if p.status == ParticipationStatus.ACTIVE])
+
+            total_players = len(participations)
+            completed_players = finished_count + eliminated_count
+
+            print(
+                f"📊 Partie {game.id}: {finished_count} gagnants, {eliminated_count} éliminés, {active_count} actifs sur {total_players}")
+
+            # 🔥 CONDITIONS DE FIN DE PARTIE
+            should_finish = False
+            finish_reason = ""
+
+            if game.game_mode == GameMode.SINGLE:
+                # Mode solo: terminer dès qu'il y a un gagnant OU que le joueur est éliminé
+                if finished_count > 0:
+                    should_finish = True
+                    finish_reason = "Victoire en mode solo"
+                elif eliminated_count > 0:
+                    should_finish = True
+                    finish_reason = "Élimination en mode solo"
+
+            else:
+                # Mode multijoueur: terminer quand tous les joueurs sont soit finished soit eliminated
+                if completed_players == total_players:
+                    should_finish = True
+                    finish_reason = f"Tous les joueurs ont terminé ({finished_count} gagnants, {eliminated_count} éliminés)"
+
+            # 🔥 TERMINER LA PARTIE SI NÉCESSAIRE
+            if should_finish:
+                game.status = GameStatus.FINISHED
+                game.finished_at = datetime.now(timezone.utc)
+
+                # Mettre à jour les participations encore actives (edge case)
+                for participation in participations:
+                    if participation.status == ParticipationStatus.ACTIVE:
+                        participation.status = ParticipationStatus.ELIMINATED
+                        participation.is_eliminated = True
+                        participation.finished_at = datetime.now(timezone.utc)
+
+                print(f"🏁 Partie {game.id} terminée: {finish_reason}")
+                return True
+
+            return False
+
+        except Exception as e:
+            print(f"🚨 Erreur lors de la vérification de fin de partie: {str(e)}")
+            return False
+
+    async def get_game_status_summary(
+            self,
+            db: AsyncSession,
+            game_id: UUID
+    ) -> Dict[str, Any]:
+        """
+        Obtient un résumé du statut de la partie
+
+        Args:
+            db: Session de base de données
+            game_id: ID de la partie
+
+        Returns:
+            Résumé du statut
+        """
+        try:
+            game = await self.game_repo.get_game_with_full_details(db, game_id)
+            if not game:
+                raise EntityNotFoundError("Partie non trouvée")
+
+            participations = [p for p in game.participations if p.role == "player"]
+
+            return {
+                "game_id": str(game_id),
+                "status": game.status,
+                "total_players": len(participations),
+                "finished_players": len([p for p in participations if p.status == ParticipationStatus.FINISHED]),
+                "eliminated_players": len([p for p in participations if p.status == ParticipationStatus.ELIMINATED]),
+                "active_players": len([p for p in participations if p.status == ParticipationStatus.ACTIVE]),
+                "winners": [
+                    {
+                        "user_id": str(p.player_id),
+                        "username": p.player.username if p.player else "Unknown",
+                        "score": p.score,
+                        "attempts": p.attempts_made
+                    }
+                    for p in participations if p.is_winner
+                ],
+                "max_attempts": game.max_attempts,
+                "is_finished": game.status == GameStatus.FINISHED
+            }
+
+        except Exception as e:
+            raise GameError(f"Erreur lors de la récupération du statut: {str(e)}")
 
     async def leave_all_active_games(
             self,
