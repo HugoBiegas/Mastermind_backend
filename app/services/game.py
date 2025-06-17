@@ -299,7 +299,7 @@ class GameService:
 
             # NOUVEAU: Mise à jour du score quantique
             if quantum_calculated:
-                participation.quantum_score += 5  # Bonus pour utilisation quantique
+                participation.score += 5  # Bonus pour utilisation quantique
 
             # Si c'est correct, marquer la participation comme terminée
             if is_correct:
@@ -340,7 +340,8 @@ class GameService:
                 remaining_attempts=remaining_attempts,
                 game_finished=participation.status == ParticipationStatus.FINISHED,
                 score=participation.score,
-                quantum_score=participation.quantum_score
+                quantum_score=participation.score,
+                quantum_efficiency=(quantum_calculated and quantum_calculation_data.get("shots")) or None
             )
 
         except Exception as e:

@@ -1,38 +1,46 @@
 """
-Configuration de l'application Quantum Mastermind
-MODIFIÉ: Ajout des paramètres de configuration quantique
+Configuration globale de l'application Quantum Mastermind
+Gestion sécurisée des variables d'environnement et paramètres
+MODIFIÉ: Ajout des paramètres de configuration quantique étendus
+CORRECTION: Validation MAX_QUBITS étendue pour supporter jusqu'à 50 qubits
 """
 import os
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
-
-from pydantic import validator, Field
+from typing import Any, Dict, List, Optional, Union
+from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings
+from pydantic_core import MultiHostUrl
+import secrets
 
 
 class Settings(BaseSettings):
     """Configuration principale de l'application"""
 
-    # === INFORMATIONS DE BASE ===
-    PROJECT_NAME: str = "Quantum Mastermind"
+    # === APPLICATION ===
+    API_V1_STR: str = "/api/v1"
+    SECRET_KEY: str = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
+    PROJECT_NAME: str = "Quantum Mastermind API"
     VERSION: str = "1.0.0-quantum"
     DESCRIPTION: str = "Jeu de Mastermind avec informatique quantique"
-
-    # === ENVIRONNEMENT ===
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
-    # === API ===
+    # === SERVEUR ===
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
     API_PREFIX: str = "/api/v1"
+    WORKERS: int = int(os.getenv("WORKERS", "1"))
+    MAX_REQUESTS: int = int(os.getenv("MAX_REQUESTS", "1000"))
+    MAX_REQUESTS_JITTER: int = int(os.getenv("MAX_REQUESTS_JITTER", "100"))
 
     # === BASE DE DONNÉES ===
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://quantum_user:quantum_pass@localhost:5432/quantum_mastermind"
-    )
+    DB_HOST: str = os.getenv("DB_HOST", "localhost")
+    DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
+    DB_USER: str = os.getenv("DB_USER", "quantum_user")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "quantum_pass")
+    DB_NAME: str = os.getenv("DB_NAME", "quantum_mastermind")
+    DATABASE_URL: Optional[str] = os.getenv("DATABASE_URL")
 
     # Paramètres de connexion
     DB_ECHO: bool = DEBUG
@@ -40,19 +48,38 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", "20"))
     DB_POOL_RECYCLE: int = int(os.getenv("DB_POOL_RECYCLE", "3600"))
 
+    ENABLE_REGISTRATION: bool = os.getenv("ENABLE_REGISTRATION", "true").lower() == "true"
+    ENABLE_EMAIL_VERIFICATION: bool = os.getenv("ENABLE_EMAIL_VERIFICATION", "false").lower() == "true"
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def assemble_db_connection(cls, v: Optional[str], info) -> Any:
+        if isinstance(v, str):
+            return v
+
+        # Accès aux valeurs via info.data dans Pydantic v2
+        values = info.data
+        return str(MultiHostUrl.build(
+            scheme="postgresql+asyncpg",
+            username=values.get("DB_USER"),
+            password=values.get("DB_PASSWORD"),
+            host=values.get("DB_HOST"),
+            port=values.get("DB_PORT"),
+            path=f"/{values.get('DB_NAME') or ''}",
+        ))
+
     # === REDIS ===
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     REDIS_PASSWORD: Optional[str] = os.getenv("REDIS_PASSWORD")
-    REDIS_MAX_CONNECTIONS: int = int(os.getenv("REDIS_MAX_CONNECTIONS", "10"))
+    REDIS_MAX_CONNECTIONS: int = int(os.getenv("REDIS_MAX_CONNECTIONS", "20"))
 
-    # === SÉCURITÉ ===
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "quantum-secret-key-change-in-production")
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "jwt-secret-key-change-in-production")
+    # === SÉCURITÉ JWT ===
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
     JWT_REFRESH_EXPIRE_DAYS: int = int(os.getenv("JWT_REFRESH_EXPIRE_DAYS", "7"))
 
-    # === CORS ===
+    # === CORS ET SÉCURITÉ ===
     CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
         "http://localhost:4200",
@@ -61,22 +88,38 @@ class Settings(BaseSettings):
     ]
     TRUSTED_HOSTS: List[str] = ["localhost", "127.0.0.1"]
 
-    # === NOUVEAU: CONFIGURATION QUANTIQUE ===
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
+        if isinstance(v, str) and not v.startswith("["):
+            return [i.strip() for i in v.split(",")]
+        elif isinstance(v, (list, str)):
+            return v
+        raise ValueError("CORS_ORIGINS doit être une liste ou une chaîne")
+
+    @field_validator('TRUSTED_HOSTS', mode="before")
+    @classmethod
+    def parse_trusted_hosts(cls, v):
+        if isinstance(v, str):
+            return [host.strip() for host in v.split(",")]
+        return v
+
+    # === CONFIGURATION QUANTIQUE ÉTENDUE ===
 
     # Backend quantique
     QISKIT_BACKEND: str = os.getenv("QISKIT_BACKEND", "qasm_simulator")
-    QUANTUM_BACKEND_TYPE: str = os.getenv("QUANTUM_BACKEND_TYPE", "simulator")  # simulator, ibm_quantum, local
+    QUANTUM_BACKEND_TYPE: str = os.getenv("QUANTUM_BACKEND_TYPE", "simulator")
 
-    # Paramètres de performance quantique
-    MAX_QUBITS: int = int(os.getenv("MAX_QUBITS", "5"))
+    # Paramètres de performance quantique - CORRECTION: Limites étendues
+    MAX_QUBITS: int = int(os.getenv("MAX_QUBITS", "10"))
     QUANTUM_SHOTS: int = int(os.getenv("QUANTUM_SHOTS", "1024"))
     QUANTUM_OPTIMIZATION_LEVEL: int = int(os.getenv("QUANTUM_OPTIMIZATION_LEVEL", "1"))
-    QUANTUM_TIMEOUT: int = int(os.getenv("QUANTUM_TIMEOUT", "30"))  # secondes
+    QUANTUM_TIMEOUT: int = int(os.getenv("QUANTUM_TIMEOUT", "300"))
 
     # Limites quantiques pour la sécurité
     MAX_QUANTUM_SHOTS: int = int(os.getenv("MAX_QUANTUM_SHOTS", "8192"))
-    MAX_QUANTUM_QUBITS: int = int(os.getenv("MAX_QUANTUM_QUBITS", "10"))
-    QUANTUM_RATE_LIMIT: int = int(os.getenv("QUANTUM_RATE_LIMIT", "100"))  # requêtes/heure
+    MAX_QUANTUM_QUBITS: int = int(os.getenv("MAX_QUANTUM_QUBITS", "50"))  # AUGMENTÉ
+    QUANTUM_RATE_LIMIT: int = int(os.getenv("QUANTUM_RATE_LIMIT", "100"))
 
     # Configuration des algorithmes quantiques
     ENABLE_GROVER: bool = os.getenv("ENABLE_GROVER", "true").lower() == "true"
@@ -84,71 +127,145 @@ class Settings(BaseSettings):
     ENABLE_ENTANGLEMENT: bool = os.getenv("ENABLE_ENTANGLEMENT", "true").lower() == "true"
     ENABLE_QUANTUM_SOLUTION_GEN: bool = os.getenv("ENABLE_QUANTUM_SOLUTION_GEN", "true").lower() == "true"
     ENABLE_QUANTUM_HINTS_CALC: bool = os.getenv("ENABLE_QUANTUM_HINTS_CALC", "true").lower() == "true"
+    ENABLE_QUANTUM_HINTS: bool = os.getenv("ENABLE_QUANTUM_HINTS", "true").lower() == "true"
 
     # Fallback et tolérance aux pannes
     QUANTUM_FALLBACK_ENABLED: bool = os.getenv("QUANTUM_FALLBACK_ENABLED", "true").lower() == "true"
-    QUANTUM_ERROR_THRESHOLD: int = int(os.getenv("QUANTUM_ERROR_THRESHOLD", "5"))  # erreurs avant fallback
+    QUANTUM_ERROR_THRESHOLD: int = int(os.getenv("QUANTUM_ERROR_THRESHOLD", "5"))
     QUANTUM_RETRY_ATTEMPTS: int = int(os.getenv("QUANTUM_RETRY_ATTEMPTS", "3"))
 
     # Logging et monitoring quantique
     QUANTUM_METRICS_ENABLED: bool = os.getenv("QUANTUM_METRICS_ENABLED", "true").lower() == "true"
     QUANTUM_DETAILED_LOGGING: bool = os.getenv("QUANTUM_DETAILED_LOGGING", "false").lower() == "true"
 
-    # === CONFIGURATION IBM QUANTUM (si utilisé) ===
+    # === CONFIGURATION IBM QUANTUM ===
     IBM_QUANTUM_TOKEN: Optional[str] = os.getenv("IBM_QUANTUM_TOKEN")
     IBM_QUANTUM_HUB: Optional[str] = os.getenv("IBM_QUANTUM_HUB", "ibm-q")
     IBM_QUANTUM_GROUP: Optional[str] = os.getenv("IBM_QUANTUM_GROUP", "open")
     IBM_QUANTUM_PROJECT: Optional[str] = os.getenv("IBM_QUANTUM_PROJECT", "main")
 
-    # === VALIDATION ===
+    # === EMAIL ===
+    SMTP_TLS: bool = os.getenv("SMTP_TLS", "true").lower() == "true"
+    SMTP_PORT: Optional[int] = int(os.getenv("SMTP_PORT", "587")) if os.getenv("SMTP_PORT") else None
+    SMTP_HOST: Optional[str] = os.getenv("SMTP_HOST")
+    SMTP_USER: Optional[str] = os.getenv("SMTP_USER")
+    SMTP_PASSWORD: Optional[str] = os.getenv("SMTP_PASSWORD")
+    EMAILS_FROM_EMAIL: Optional[str] = os.getenv("EMAILS_FROM_EMAIL")
+    EMAILS_FROM_NAME: Optional[str] = os.getenv("EMAILS_FROM_NAME")
 
-    @validator('CORS_ORIGINS', pre=True)
-    def parse_cors_origins(cls, v):
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
+    @field_validator("EMAILS_FROM_NAME")
+    @classmethod
+    def get_project_name(cls, v: Optional[str], info) -> str:
+        if not v:
+            return info.data.get("PROJECT_NAME", "Quantum Mastermind")
         return v
 
-    @validator('TRUSTED_HOSTS', pre=True)
-    def parse_trusted_hosts(cls, v):
-        if isinstance(v, str):
-            return [host.strip() for host in v.split(",")]
-        return v
+    # === SÉCURITÉ AVANCÉE ===
+    PASSWORD_MIN_LENGTH: int = int(os.getenv("PASSWORD_MIN_LENGTH", "8"))
+    PASSWORD_REQUIRE_UPPERCASE: bool = os.getenv("PASSWORD_REQUIRE_UPPERCASE", "true").lower() == "true"
+    PASSWORD_REQUIRE_LOWERCASE: bool = os.getenv("PASSWORD_REQUIRE_LOWERCASE", "true").lower() == "true"
+    PASSWORD_REQUIRE_NUMBERS: bool = os.getenv("PASSWORD_REQUIRE_NUMBERS", "true").lower() == "true"
+    PASSWORD_REQUIRE_SYMBOLS: bool = os.getenv("PASSWORD_REQUIRE_SYMBOLS", "false").lower() == "true"
+    MAX_LOGIN_ATTEMPTS: int = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
+    LOCKOUT_DURATION_MINUTES: int = int(os.getenv("LOCKOUT_DURATION_MINUTES", "15"))
 
-    @validator('QUANTUM_SHOTS')
+    # === RATE LIMITING ===
+    RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
+    RATE_LIMIT_WINDOW: int = int(os.getenv("RATE_LIMIT_WINDOW", "3600"))  # 1 heure
+    RATE_LIMIT_STORAGE: str = os.getenv("RATE_LIMIT_STORAGE", "memory")  # ou "redis"
+
+    # === WEBSOCKETS ===
+    WS_MAX_CONNECTIONS: int = int(os.getenv("WS_MAX_CONNECTIONS", "1000"))
+    WS_HEARTBEAT_INTERVAL: int = int(os.getenv("WS_HEARTBEAT_INTERVAL", "30"))
+    WS_CONNECTION_TIMEOUT: int = int(os.getenv("WS_CONNECTION_TIMEOUT", "60"))
+
+    # === LOGGING ===
+    LOG_FORMAT: str = os.getenv("LOG_FORMAT", "json")
+    LOG_FILE: Optional[str] = os.getenv("LOG_FILE")
+    ENABLE_ACCESS_LOG: bool = os.getenv("ENABLE_ACCESS_LOG", "true").lower() == "true"
+
+    # === MONITORING ===
+    ENABLE_METRICS: bool = os.getenv("ENABLE_METRICS", "true").lower() == "true"
+    METRICS_PATH: str = os.getenv("METRICS_PATH", "/metrics")
+    HEALTH_CHECK_PATH: str = os.getenv("HEALTH_CHECK_PATH", "/health")
+
+    # === VALIDATIONS ÉTENDUES ===
+
+    @field_validator('QUANTUM_SHOTS')
+    @classmethod
     def validate_quantum_shots(cls, v):
         if v < 100 or v > 8192:
             raise ValueError("QUANTUM_SHOTS doit être entre 100 et 8192")
         return v
 
-    @validator('MAX_QUBITS')
+    @field_validator('MAX_QUBITS')
+    @classmethod
     def validate_max_qubits(cls, v):
-        if v < 1 or v > 20:
-            raise ValueError("MAX_QUBITS doit être entre 1 et 20")
+        # CORRECTION: Limite étendue de 20 à 50 qubits
+        if v < 1 or v > 50:
+            raise ValueError("MAX_QUBITS doit être entre 1 et 50")
+        return v
+
+    @field_validator('QUANTUM_OPTIMIZATION_LEVEL')
+    @classmethod
+    def validate_optimization_level(cls, v):
+        if v < 0 or v > 3:
+            raise ValueError("QUANTUM_OPTIMIZATION_LEVEL doit être entre 0 et 3")
+        return v
+
+    @field_validator('QUANTUM_TIMEOUT')
+    @classmethod
+    def validate_quantum_timeout(cls, v):
+        if v < 5 or v > 300:
+            raise ValueError("QUANTUM_TIMEOUT doit être entre 5 et 300 secondes")
         return v
 
     class Config:
-        env_file = ".env"
         case_sensitive = True
+        env_file = ".env"
 
 
 class SecurityConfig:
-    """Configuration de sécurité avancée"""
+    """Configuration de sécurité"""
 
-    # Mots de passe
-    PASSWORD_MIN_LENGTH = 8
-    PASSWORD_REQUIRE_UPPERCASE = True
-    PASSWORD_REQUIRE_LOWERCASE = True
-    PASSWORD_REQUIRE_DIGITS = True
-    PASSWORD_REQUIRE_SPECIAL = True
+    # Algorithmes de hachage supportés
+    SUPPORTED_HASH_ALGORITHMS = ["bcrypt", "argon2"]
+    DEFAULT_HASH_ALGORITHM = "bcrypt"
+
+    # Configuration bcrypt
+    BCRYPT_ROUNDS = 12
+
+    # Configuration Argon2
+    ARGON2_TIME_COST = 2
+    ARGON2_MEMORY_COST = 65536
+    ARGON2_PARALLELISM = 1
+
+    # Longueurs de tokens
+    TOKEN_LENGTH = 32
+    API_KEY_LENGTH = 64
+
+    # Expiration des tokens spéciaux
+    PASSWORD_RESET_EXPIRE_HOURS = 24
+    EMAIL_VERIFICATION_EXPIRE_HOURS = 48
+
+    # Headers de sécurité
+    SECURITY_HEADERS = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "X-XSS-Protection": "1; mode=block",
+        "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+        "Content-Security-Policy": "default-src 'self'",
+        "Referrer-Policy": "strict-origin-when-cross-origin"
+    }
+
+    # Rate limiting
+    RATE_LIMIT_PER_MINUTE = 60
+    RATE_LIMIT_PER_HOUR = 1000
 
     # Sessions
     SESSION_TIMEOUT_MINUTES = 30
     MAX_LOGIN_ATTEMPTS = 5
     LOCKOUT_DURATION_MINUTES = 15
-
-    # Rate limiting
-    RATE_LIMIT_PER_MINUTE = 60
-    RATE_LIMIT_PER_HOUR = 1000
 
     # NOUVEAU: Sécurité quantique
     QUANTUM_OPERATIONS_PER_HOUR = 100
@@ -157,23 +274,33 @@ class SecurityConfig:
 
 
 class QuantumConfig:
-    """Configuration spécialisée pour les opérations quantiques"""
+    """Configuration des fonctionnalités quantiques"""
 
     # Backends disponibles
     AVAILABLE_BACKENDS = [
         "qasm_simulator",
+        "aer_simulator",
         "statevector_simulator",
-        "unitary_simulator",
-        "aer_simulator"
+        "unitary_simulator"
     ]
 
-    # Algorithmes supportés
+    # Limites par défaut - CORRECTION: Synchronisé avec Settings
+    DEFAULT_QUBITS = 4
+    MAX_QUBITS = 50  # AUGMENTÉ de 20 à 50
+    DEFAULT_SHOTS = 1024
+    MAX_SHOTS = 8192
+    MIN_SHOTS = 100
+
+    # Types d'algorithmes supportés
     SUPPORTED_ALGORITHMS = [
         "quantum_solution_generation",
         "quantum_hints_calculation",
         "grover_search",
         "superposition_analysis",
-        "entanglement_detection"
+        "entanglement_detection",
+        "quantum_fourier",
+        "phase_estimation",
+        "amplitude_amplification"
     ]
 
     # Types de hints quantiques
@@ -181,11 +308,16 @@ class QuantumConfig:
         "grover",
         "superposition",
         "entanglement",
+        "interference",
         "basic"
     ]
 
-    # Coûts des opérations quantiques (en points de jeu)
-    QUANTUM_OPERATION_COSTS = {
+    # Configuration des hints
+    HINT_COSTS = {
+        "grover": 10,
+        "superposition": 5,
+        "entanglement": 15,
+        "interference": 8,
         "grover_hint": 50,
         "superposition_hint": 25,
         "entanglement_hint": 35,
@@ -194,16 +326,20 @@ class QuantumConfig:
         "hints_calculation": 0     # Gratuit car automatique
     }
 
-    # Limites de performance
-    DEFAULT_SHOTS = 1024
-    MIN_SHOTS = 100
-    MAX_SHOTS = 8192
-    DEFAULT_QUBITS = 4
-    MAX_QUBITS = 10
+    # Coûts des opérations quantiques (en points de jeu)
+    QUANTUM_OPERATION_COSTS = {
+        "grover_hint": 50,
+        "superposition_hint": 25,
+        "entanglement_hint": 35,
+        "basic_hint": 10,
+        "solution_generation": 0,
+        "hints_calculation": 0
+    }
 
     # Timeouts
-    CIRCUIT_EXECUTION_TIMEOUT = 30  # secondes
-    QUANTUM_OPERATION_TIMEOUT = 60  # secondes
+    CIRCUIT_EXECUTION_TIMEOUT = 30
+    ALGORITHM_TIMEOUT = 60
+    QUANTUM_OPERATION_TIMEOUT = 60
 
     # Qualité et précision
     MINIMUM_FIDELITY = 0.8
@@ -212,23 +348,27 @@ class QuantumConfig:
 
 
 class GameConfig:
-    """Configuration spécifique au jeu"""
+    """Configuration des paramètres de jeu"""
 
-    # Paramètres de jeu par défaut
+    # Paramètres par défaut
     DEFAULT_COMBINATION_LENGTH = 4
+    DEFAULT_COLOR_COUNT = 6
     DEFAULT_AVAILABLE_COLORS = 6
-    DEFAULT_MAX_ATTEMPTS = 12
-    DEFAULT_TIME_LIMIT = None
+    DEFAULT_MAX_ATTEMPTS = 10
 
     # Limites
     MIN_COMBINATION_LENGTH = 3
     MAX_COMBINATION_LENGTH = 8
+    MIN_COLOR_COUNT = 4
+    MAX_COLOR_COUNT = 10
     MIN_COLORS = 4
     MAX_COLORS = 10
     MIN_ATTEMPTS = 1
+    MAX_ATTEMPTS_LIMIT = 20
     MAX_ATTEMPTS = 50
     MIN_TIME_LIMIT = 60  # secondes
     MAX_TIME_LIMIT = 3600  # 1 heure
+    DEFAULT_TIME_LIMIT = None
 
     # Multijoueur
     MAX_PLAYERS_PER_GAME = 8
@@ -237,7 +377,9 @@ class GameConfig:
     # Scoring
     BASE_SCORE = 1000
     ATTEMPT_PENALTY = 50
+    TIME_BONUS_MULTIPLIER = 0.1
     TIME_PENALTY_FACTOR = 10
+    QUANTUM_BONUS_MULTIPLIER = 1.5
 
     # NOUVEAU: Configuration quantique spécifique au jeu
     QUANTUM_SCORE_MULTIPLIER = 1.5
@@ -245,14 +387,66 @@ class GameConfig:
     QUANTUM_SOLUTION_BONUS = 25
     QUANTUM_CALCULATION_BONUS = 5
 
+    # Difficultés
+    DIFFICULTY_SETTINGS = {
+        "easy": {
+            "combination_length": 3,
+            "color_count": 4,
+            "max_attempts": 15,
+            "time_limit": None,
+            "duplicates_allowed": True
+        },
+        "normal": {
+            "combination_length": 4,
+            "color_count": 6,
+            "max_attempts": 10,
+            "time_limit": 600,  # 10 minutes
+            "duplicates_allowed": True
+        },
+        "hard": {
+            "combination_length": 5,
+            "color_count": 8,
+            "max_attempts": 8,
+            "time_limit": 300,  # 5 minutes
+            "duplicates_allowed": False
+        },
+        "expert": {
+            "combination_length": 6,
+            "color_count": 10,
+            "max_attempts": 6,
+            "time_limit": 180,  # 3 minutes
+            "duplicates_allowed": False
+        }
+    }
+
 
 class WebSocketConfig:
     """Configuration WebSocket"""
 
+    # Limites de connexion
     MAX_CONNECTIONS = 1000
+    MAX_CONNECTIONS_PER_USER = 3
+    MAX_ROOMS_PER_USER = 5
+    MAX_USERS_PER_ROOM = 8
+
+    # Timeouts
+    CONNECTION_TIMEOUT = 60
+    HEARTBEAT_INTERVAL = 30
     PING_INTERVAL = 30
     PING_TIMEOUT = 10
+    CLEANUP_INTERVAL = 300
+
+    # Tailles de messages
+    MAX_MESSAGE_SIZE = 1024 * 64  # 64KB
+    MAX_QUEUE_SIZE = 100
     MESSAGE_QUEUE_SIZE = 100
+
+    # Types d'événements
+    ALLOWED_EVENT_TYPES = [
+        "authenticate", "join_room", "leave_room",
+        "make_attempt", "get_hint", "chat_message",
+        "heartbeat", "game_state_request"
+    ]
 
     # Types de messages
     MESSAGE_TYPES = [
@@ -271,13 +465,16 @@ class DevelopmentConfig:
 
     DEBUG = True
     LOG_LEVEL = "DEBUG"
+    ENABLE_METRICS = True
+    CORS_ORIGINS = ["*"]
+    TRUSTED_HOSTS = ["*"]
 
-    # Base de données en mode développement
+    # Base de données de développement
     DB_ECHO = True
     DB_POOL_SIZE = 5
     DB_MAX_OVERFLOW = 10
 
-    # Quantum en mode dev
+    # Quantum computing en mode dev
     QISKIT_BACKEND = "qasm_simulator"
     MAX_QUBITS = 5
     QUANTUM_SHOTS = 512
@@ -304,7 +501,7 @@ class ProductionConfig:
 
     # Performance quantique optimisée
     QUANTUM_SHOTS = 2048
-    MAX_QUBITS = 15
+    MAX_QUBITS = 30  # AUGMENTÉ de 15 à 30
     QUANTUM_RATE_LIMIT = 50  # Plus restrictif en production
 
 
@@ -400,8 +597,20 @@ def validate_configuration() -> List[str]:
     if settings.QUANTUM_SHOTS < quantum_config.MIN_SHOTS or settings.QUANTUM_SHOTS > quantum_config.MAX_SHOTS:
         errors.append(f"QUANTUM_SHOTS doit être entre {quantum_config.MIN_SHOTS} et {quantum_config.MAX_SHOTS}")
 
+    # CORRECTION: Validation cohérente avec les nouvelles limites
     if settings.MAX_QUBITS > quantum_config.MAX_QUBITS:
         errors.append(f"MAX_QUBITS ne peut pas dépasser {quantum_config.MAX_QUBITS}")
+
+    # Validation des limites raisonnables
+    if settings.MAX_QUBITS > 50:  # Limite raisonnable pour la simulation
+        errors.append("MAX_QUBITS ne devrait pas dépasser 50 pour les performances")
+
+    # Validation des CORS en production
+    if settings.ENVIRONMENT == "production":
+        dangerous_origins = ["*", "http://localhost:3000"]
+        for origin in settings.CORS_ORIGINS:
+            if origin in dangerous_origins:
+                errors.append(f"Origine CORS dangereuse en production: {origin}")
 
     # Validation des clés secrètes en production
     if settings.ENVIRONMENT == "production":
@@ -436,7 +645,39 @@ def get_feature_flags() -> Dict[str, bool]:
     }
 
 
-# === EXPORTS ===
+def is_development() -> bool:
+    """Vérifie si on est en mode développement"""
+    return settings.ENVIRONMENT.lower() == "development"
+
+
+def is_production() -> bool:
+    """Vérifie si on est en mode production"""
+    return settings.ENVIRONMENT.lower() == "production"
+
+
+def is_test() -> bool:
+    """Vérifie si on est en mode test"""
+    return settings.ENVIRONMENT.lower() == "test"
+
+
+def startup_config_check():
+    """Vérifie la configuration au démarrage de l'application"""
+    errors = validate_configuration()
+
+    if errors:
+        print("❌ Erreurs de configuration détectées:")
+        for error in errors:
+            print(f"  - {error}")
+
+        if is_production():
+            raise ValueError("Configuration invalide en production")
+        else:
+            print("⚠️  Application démarrée avec des avertissements de configuration")
+    else:
+        print("✅ Configuration validée avec succès")
+
+
+# === EXPORT DE LA CONFIGURATION ===
 
 __all__ = [
     "settings",
@@ -450,5 +691,9 @@ __all__ = [
     "get_config_for_environment",
     "get_quantum_config",
     "validate_configuration",
-    "get_feature_flags"
+    "get_feature_flags",
+    "is_development",
+    "is_production",
+    "is_test",
+    "startup_config_check"
 ]
