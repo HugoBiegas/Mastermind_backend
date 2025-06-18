@@ -1,9 +1,9 @@
 """
-Modèles de base de données pour la gestion des jeux
-MODIFIÉ: Ajout du support pour le mode quantique
-CORRECTION: Synchronisation des relations creator_id avec user.py
+Modèles de jeu pour Quantum Mastermind
+SQLAlchemy 2.0.41 avec typing moderne et support quantique
+CORRECTION: Synchronisé exactement avec init.sql (SANS quantum_score)
 """
-import secrets
+import random
 import string
 from datetime import datetime, timezone
 from enum import Enum
@@ -11,32 +11,31 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    Boolean, DateTime, Integer, String, Index,
-    event, ForeignKey
+    Boolean, DateTime, Integer, String, Text, ForeignKey,
+    CheckConstraint, Index, event
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base
+from app.core.database import Base
 
 # Import conditionnel pour éviter les imports circulaires
 if TYPE_CHECKING:
     from app.models.user import User
 
-
-# === ÉNUMÉRATIONS ===
+# === ÉNUMÉRATIONS CORRIGÉES ===
 
 class GameType(str, Enum):
     """Types de jeu disponibles"""
     CLASSIC = "classic"
-    QUANTUM = "quantum"  # NOUVEAU: Mode quantique
+    QUANTUM = "quantum"
     SPEED = "speed"
     PRECISION = "precision"
 
 
 class GameMode(str, Enum):
-    """Modes de jeu multijoueur"""
+    """Modes de jeu disponibles"""
     SINGLE = "single"
     MULTIPLAYER = "multiplayer"
     BATTLE_ROYALE = "battle_royale"
@@ -44,7 +43,7 @@ class GameMode(str, Enum):
 
 
 class GameStatus(str, Enum):
-    """États d'une partie"""
+    """Statuts d'une partie"""
     WAITING = "waiting"
     STARTING = "starting"
     ACTIVE = "active"
@@ -64,56 +63,48 @@ class Difficulty(str, Enum):
 
 
 class ParticipationStatus(str, Enum):
-    """États de participation d'un joueur"""
+    """Statuts de participation"""
     WAITING = "waiting"
     READY = "ready"
     ACTIVE = "active"
     FINISHED = "finished"
-    DISCONNECTED = "disconnected"
     ELIMINATED = "eliminated"
+    DISCONNECTED = "disconnected"
 
 
 # === FONCTIONS UTILITAIRES ===
 
 def generate_room_code() -> str:
     """Génère un code de room unique"""
-    return ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 
-def generate_solution(length: int = 4, colors: int = 6) -> List[int]:
-    """Génère une solution aléatoire classique (fallback)"""
-    return [secrets.randbelow(colors) + 1 for _ in range(length)]
+def generate_solution(length: int, colors: int) -> List[int]:
+    """Génère une solution aléatoire"""
+    return [random.randint(1, colors) for _ in range(length)]
 
 
-def calculate_game_score(attempts: int, time_taken: int, max_attempts: int = 12) -> int:
+def calculate_game_score(attempts: int, max_attempts: int, time_taken: int = 0) -> int:
     """Calcule le score d'une partie"""
-    if attempts > max_attempts:
-        return 0
-
-    base_score = 1000
-    attempt_penalty = (attempts - 1) * 50
-    time_penalty = min(time_taken // 10, 200)
-
-    return max(0, base_score - attempt_penalty - time_penalty)
+    base_score = max(0, (max_attempts - attempts + 1) * 100)
+    time_bonus = max(0, 1000 - time_taken // 1000)
+    return base_score + time_bonus
 
 
-# === MODÈLES SQLALCHEMY ===
+# === MODÈLES ===
 
 class Game(Base):
     """
-    Modèle principal d'une partie de jeu
-    MODIFIÉ: Ajout du support quantique
-    CORRECTION: Synchronisation des relations avec user.py
+    Modèle d'une partie de Quantum Mastermind
+    CORRECTION: Synchronisé exactement avec init.sql
     """
     __tablename__ = "games"
 
-    # === CLÉS ET IDENTIFICATION ===
-
+    # === CLÉS ===
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        default=uuid4,
-        index=True
+        default=uuid4
     )
 
     room_code: Mapped[str] = mapped_column(
@@ -123,38 +114,33 @@ class Game(Base):
         index=True
     )
 
-    # === CONFIGURATION DU JEU ===
-
-    game_type: Mapped[GameType] = mapped_column(
+    # === CONFIGURATION DU JEU (selon init.sql) ===
+    game_type: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
-        default=GameType.CLASSIC,
+        default="classic"
+    )
+
+    game_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="single"
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="waiting",
         index=True
     )
 
-    game_mode: Mapped[GameMode] = mapped_column(
+    difficulty: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
-        default=GameMode.SINGLE,
-        index=True
+        default="medium"
     )
 
-    status: Mapped[GameStatus] = mapped_column(
-        String(20),
-        nullable=False,
-        default=GameStatus.WAITING,
-        index=True
-    )
-
-    difficulty: Mapped[Difficulty] = mapped_column(
-        String(20),
-        nullable=False,
-        default=Difficulty.MEDIUM,
-        index=True
-    )
-
-    # === PARAMÈTRES DE JEU ===
-
+    # === PARAMÈTRES DE JEU (selon init.sql) ===
     combination_length: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -184,22 +170,13 @@ class Game(Base):
         default=1
     )
 
-    # === DONNÉES DE JEU ===
-
+    # === SOLUTION SECRÈTE (selon init.sql) ===
     solution: Mapped[List[int]] = mapped_column(
         JSONB,
         nullable=False
     )
 
-    # NOUVEAU: Données quantiques
-    quantum_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
-        JSONB,
-        nullable=True,
-        comment="Données quantiques de la partie (circuits, états, résultats)"
-    )
-
-    # === CONFIGURATION AVANCÉE ===
-
+    # === CONFIGURATION AVANCÉE (selon init.sql) ===
     is_private: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -218,16 +195,13 @@ class Game(Base):
         default=True
     )
 
-    # NOUVEAU: Support quantique
     quantum_enabled: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
-        default=False,
-        comment="Active les fonctionnalités quantiques pour cette partie"
+        default=False
     )
 
-    # === RÉFÉRENCE CRÉATEUR - CORRECTION: Nom cohérent avec user.py ===
-
+    # === RÉFÉRENCE CRÉATEUR (selon init.sql) ===
     creator_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -235,23 +209,20 @@ class Game(Base):
         index=True
     )
 
-    # === PARAMÈTRES AVANCÉS ===
-
-    settings: Mapped[Dict[str, Any]] = mapped_column(
+    # === PARAMÈTRES AVANCÉS (selon init.sql) ===
+    settings: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSONB,
-        nullable=False,
-        default=lambda: {
-            "allow_duplicates": True,
-            "allow_blanks": False,
-            "quantum_enabled": False,
-            "hint_cost": 10,
-            "auto_reveal_pegs": True,
-            "show_statistics": True
-        }
+        nullable=True,
+        default=None
     )
 
-    # === TIMESTAMPS ===
+    quantum_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True,
+        default=None
+    )
 
+    # === TIMESTAMPS (selon init.sql) ===
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -276,9 +247,7 @@ class Game(Base):
         nullable=True
     )
 
-    # === RELATIONS SQLALCHEMY - CORRECTION: Ajout de la relation creator ===
-
-    # Relation avec le créateur de la partie
+    # === RELATIONS SQLALCHEMY ===
     creator: Mapped["User"] = relationship(
         "User",
         back_populates="created_games",
@@ -286,7 +255,6 @@ class Game(Base):
         lazy="select"
     )
 
-    # Participations à la partie
     participations: Mapped[List["GameParticipation"]] = relationship(
         "GameParticipation",
         back_populates="game",
@@ -294,7 +262,6 @@ class Game(Base):
         lazy="select"
     )
 
-    # Tentatives dans la partie
     attempts: Mapped[List["GameAttempt"]] = relationship(
         "GameAttempt",
         back_populates="game",
@@ -303,88 +270,63 @@ class Game(Base):
     )
 
     # === PROPRIÉTÉS CALCULÉES ===
-
     @hybrid_property
     def is_quantum_enabled(self) -> bool:
-        """Vérifie si le mode quantique est activé pour cette partie"""
+        """Vérifie si le mode quantique est activé"""
         return (
-            self.game_type == GameType.QUANTUM or
+            self.game_type == GameType.QUANTUM.value or
             self.quantum_enabled or
             (self.settings and self.settings.get("quantum_enabled", False))
         )
 
-    @hybrid_property
-    def current_players_count(self) -> int:
-        """Nombre de joueurs actuellement actifs"""
-        return len([p for p in self.participations if p.status in [
-            ParticipationStatus.ACTIVE, ParticipationStatus.WAITING
-        ]])
+    def get_current_player_count(self) -> int:
+        """Retourne le nombre de joueurs actuels"""
+        return len([p for p in self.participations if p.status != ParticipationStatus.DISCONNECTED.value])
 
-    @hybrid_property
     def is_full(self) -> bool:
         """Vérifie si la partie est pleine"""
-        return self.current_players_count >= self.max_players
+        return self.get_current_player_count() >= self.max_players
 
-    @hybrid_property
     def can_start(self) -> bool:
         """Vérifie si la partie peut démarrer"""
         return (
-            self.status == GameStatus.WAITING and
-            self.current_players_count >= 1 and
-            (self.game_mode == GameMode.SINGLE or self.current_players_count >= 2)
+            self.status == GameStatus.WAITING.value and
+            self.get_current_player_count() >= 1
         )
 
-    @hybrid_property
-    def is_active(self) -> bool:
-        """Vérifie si la partie est active"""
-        return self.status in [GameStatus.ACTIVE, GameStatus.STARTING]
+    def get_quantum_config(self) -> Dict[str, Any]:
+        """Retourne la configuration quantique"""
+        base_config = {
+            "shots": 1024,
+            "max_qubits": 5,
+            "use_quantum_solution": False,
+            "use_quantum_hints": False
+        }
 
-    @hybrid_property
-    def duration(self) -> Optional[int]:
-        """Durée de la partie en secondes"""
-        if self.started_at and self.finished_at:
-            return int((self.finished_at - self.started_at).total_seconds())
-        elif self.started_at:
-            return int((datetime.now(timezone.utc) - self.started_at).total_seconds())
-        return None
+        if self.quantum_data and "settings" in self.quantum_data:
+            base_config.update(self.quantum_data["settings"])
 
-    # === MÉTHODES UTILITAIRES ===
+        return base_config
 
-    def add_quantum_data(self, data: Dict[str, Any]) -> None:
-        """Ajoute des données quantiques à la partie"""
+    def set_quantum_solution_generated(self, generation_data: Dict[str, Any]):
+        """Marque qu'une solution quantique a été générée"""
         if self.quantum_data is None:
             self.quantum_data = {}
-        self.quantum_data.update(data)
-
-    def enable_quantum_mode(self) -> None:
-        """Active le mode quantique pour cette partie"""
-        self.quantum_enabled = True
-        if self.settings:
-            self.settings["quantum_enabled"] = True
-        else:
-            self.settings = {"quantum_enabled": True}
-
-    def get_quantum_metrics(self) -> Dict[str, Any]:
-        """Retourne les métriques quantiques de la partie"""
-        if not self.is_quantum_enabled or not self.quantum_data:
-            return {}
-
-        return self.quantum_data.get("metrics", {})
+        self.quantum_data["solution_generation"] = generation_data
 
     def __repr__(self) -> str:
         quantum_marker = " [Q]" if self.is_quantum_enabled else ""
-        return f"<Game(id={self.id}, room_code={self.room_code}, status={self.status}){quantum_marker}>"
+        return f"<Game(id={self.id}, code={self.room_code}, status={self.status}){quantum_marker}>"
 
 
 class GameParticipation(Base):
     """
     Modèle de participation d'un joueur à une partie
-    MODIFIÉ: Ajout des métriques quantiques
+    CORRECTION: Synchronisé exactement avec init.sql (SANS quantum_score)
     """
     __tablename__ = "game_participations"
 
-    # === CLÉS ===
-
+    # === CLÉS (selon init.sql) ===
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
@@ -405,14 +347,31 @@ class GameParticipation(Base):
         index=True
     )
 
-    # === DONNÉES DE PARTICIPATION ===
-
-    status: Mapped[ParticipationStatus] = mapped_column(
+    # === STATUT ET RÔLE (selon init.sql) ===
+    status: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
-        default=ParticipationStatus.WAITING
+        default="waiting"
     )
 
+    role: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="player"
+    )
+
+    # === ORDRE ET POSITION (selon init.sql) ===
+    join_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False
+    )
+
+    finish_position: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True
+    )
+
+    # === SCORING ET STATISTIQUES (selon init.sql) ===
     score: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -425,44 +384,48 @@ class GameParticipation(Base):
         default=0
     )
 
-    # NOUVEAU: Score quantique spécifique
-    quantum_score: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        comment="Score basé sur l'utilisation des fonctionnalités quantiques"
-    )
-
-    hints_used: Mapped[int] = mapped_column(
+    quantum_hints_used: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0
     )
 
-    # NOUVEAU: Hints quantiques utilisés
-    quantum_hints_used: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        comment="Nombre de hints quantiques utilisés"
-    )
+    # REMARQUE: quantum_score N'EXISTE PAS dans init.sql, donc supprimé
 
     time_taken: Mapped[Optional[int]] = mapped_column(
-        Integer,  # en secondes
+        Integer,  # en secondes selon init.sql
         nullable=True
     )
 
-    rank: Mapped[Optional[int]] = mapped_column(
-        Integer,
-        nullable=True
+    # === FLAGS (selon init.sql) ===
+    is_ready: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
     )
 
-    # === TIMESTAMPS ===
+    is_winner: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
 
+    is_eliminated: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
+
+    # === TIMESTAMPS (selon init.sql) ===
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc)
+    )
+
+    left_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
     )
 
     finished_at: Mapped[Optional[datetime]] = mapped_column(
@@ -470,8 +433,20 @@ class GameParticipation(Base):
         nullable=True
     )
 
-    # === RELATIONS SQLALCHEMY ===
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
+    )
 
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+    # === RELATIONS SQLALCHEMY ===
     game: Mapped["Game"] = relationship(
         "Game",
         back_populates="participations",
@@ -490,12 +465,9 @@ class GameParticipation(Base):
     )
 
     # === MÉTHODES UTILITAIRES ===
-
     def calculate_total_score(self) -> int:
-        """Calcule le score total incluant le bonus quantique"""
-        base_score = self.score
-        quantum_bonus = int(self.quantum_score * 1.5)  # Bonus de 50%
-        return base_score + quantum_bonus
+        """Calcule le score total (pour l'instant, juste score normal)"""
+        return self.score  # quantum_score supprimé
 
     def get_quantum_efficiency(self) -> float:
         """Calcule l'efficacité quantique du joueur"""
@@ -510,12 +482,11 @@ class GameParticipation(Base):
 class GameAttempt(Base):
     """
     Modèle d'une tentative dans une partie
-    MODIFIÉ: Ajout du support quantique pour les calculs d'indices
+    CORRECTION: Synchronisé exactement avec init.sql
     """
     __tablename__ = "game_attempts"
 
-    # === CLÉS ===
-
+    # === CLÉS (selon init.sql) ===
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
@@ -536,8 +507,7 @@ class GameAttempt(Base):
         index=True
     )
 
-    # === DONNÉES DE TENTATIVE ===
-
+    # === DONNÉES DE TENTATIVE (selon init.sql) ===
     attempt_number: Mapped[int] = mapped_column(
         Integer,
         nullable=False
@@ -548,57 +518,69 @@ class GameAttempt(Base):
         nullable=False
     )
 
-    # Résultats classiques
-    correct_position: Mapped[int] = mapped_column(
+    # === RÉSULTATS (selon init.sql) ===
+    correct_positions: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0
     )
 
-    correct_color: Mapped[int] = mapped_column(
+    correct_colors: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0
     )
 
-    # NOUVEAU: Résultats calculés quantiquement
-    quantum_calculated: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-        comment="Indique si les indices ont été calculés avec des algorithmes quantiques"
-    )
-
-    # === MÉTADONNÉES ===
-
-    time_taken: Mapped[Optional[int]] = mapped_column(
-        Integer,  # en millisecondes
-        nullable=True
-    )
-
-    hint_used: Mapped[bool] = mapped_column(
+    is_correct: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=False
     )
 
-    # NOUVEAU: Données quantiques de la tentative
-    quantum_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
-        JSONB,
-        nullable=True,
-        comment="Données quantiques associées à cette tentative"
+    # === SCORING (selon init.sql) ===
+    attempt_score: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0
     )
 
-    # === TIMESTAMP ===
+    time_taken: Mapped[Optional[int]] = mapped_column(
+        Integer,  # en millisecondes selon init.sql
+        nullable=True
+    )
 
+    # === DONNÉES QUANTIQUES (selon init.sql) ===
+    quantum_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True
+    )
+
+    used_quantum_hint: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False
+    )
+
+    hint_type: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True
+    )
+
+    # === TIMESTAMPS (selon init.sql) ===
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc)
     )
 
-    # === RELATIONS SQLALCHEMY ===
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
 
+    # === RELATIONS SQLALCHEMY ===
     game: Mapped["Game"] = relationship(
         "Game",
         back_populates="attempts",
@@ -616,8 +598,33 @@ class GameAttempt(Base):
         Index('idx_attempt_unique', 'game_id', 'player_id', 'attempt_number', unique=True),
     )
 
-    # === MÉTHODES UTILITAIRES ===
+    # === PROPRIÉTÉS CALCULÉES ===
+    @property
+    def exact_matches(self) -> int:
+        """Alias pour correct_positions (compatibilité)"""
+        return self.correct_positions
 
+    @exact_matches.setter
+    def exact_matches(self, value: int):
+        """Setter pour exact_matches"""
+        self.correct_positions = value
+
+    @property
+    def position_matches(self) -> int:
+        """Alias pour correct_colors (compatibilité)"""
+        return self.correct_colors
+
+    @position_matches.setter
+    def position_matches(self, value: int):
+        """Setter pour position_matches"""
+        self.correct_colors = value
+
+    @property
+    def quantum_calculated(self) -> bool:
+        """Indique si calculé quantiquement"""
+        return self.quantum_data is not None and "calculation" in self.quantum_data
+
+    # === MÉTHODES UTILITAIRES ===
     def add_quantum_data(self, data: Dict[str, Any]) -> None:
         """Ajoute des données quantiques"""
         if self.quantum_data is None:
@@ -626,20 +633,21 @@ class GameAttempt(Base):
 
     def set_quantum_calculated(self, calculation_data: Optional[Dict[str, Any]] = None):
         """Marque que les indices ont été calculés quantiquement"""
-        self.quantum_calculated = True
+        if self.quantum_data is None:
+            self.quantum_data = {}
+        self.quantum_data["quantum_calculated"] = True
         if calculation_data:
-            self.add_quantum_data({"calculation": calculation_data})
+            self.quantum_data["calculation"] = calculation_data
 
     def get_quantum_efficiency(self) -> float:
         """Calcule l'efficacité quantique de la tentative"""
         if not self.quantum_calculated:
             return 0.0
 
-        # Plus d'informations quantiques = meilleure efficacité
         if self.quantum_data:
             return min(1.0, len(self.quantum_data) * 0.2)
 
-        return 0.5  # Efficacité de base
+        return 0.5
 
     def __repr__(self) -> str:
         quantum_marker = " [Q]" if self.quantum_calculated else ""
@@ -658,7 +666,7 @@ def generate_room_code_on_insert(mapper, connection, target):
 @event.listens_for(Game, 'before_insert')
 def set_quantum_defaults(mapper, connection, target):
     """Configure les paramètres quantiques par défaut"""
-    if target.game_type == GameType.QUANTUM and not target.quantum_enabled:
+    if target.game_type == GameType.QUANTUM.value and not target.quantum_enabled:
         target.quantum_enabled = True
 
     if target.quantum_enabled and target.settings:
@@ -668,12 +676,11 @@ def set_quantum_defaults(mapper, connection, target):
 # === EXPORTS ===
 
 __all__ = [
-    # Énumérations
+
     "GameType", "GameMode", "GameStatus", "Difficulty", "ParticipationStatus",
 
-    # Modèles
     "Game", "GameParticipation", "GameAttempt",
 
-    # Fonctions utilitaires
     "generate_room_code", "generate_solution", "calculate_game_score"
+
 ]

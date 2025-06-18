@@ -20,13 +20,13 @@ from app.schemas.auth import MessageResponse
 from app.schemas.game import (
     GameCreate, GameJoin, AttemptCreate,
     GameFull, GameList, AttemptResult, SolutionReveal,
-    QuantumGameInfo, QuantumHintRequest, QuantumHintResponse
+    QuantumGameInfo, QuantumHintRequest, QuantumHintResponse, GameCreateResponse
 )
 from app.services.game import game_service
 from app.services.quantum import quantum_service
 from app.utils.exceptions import (
     EntityNotFoundError, GameError, GameNotActiveError,
-    GameFullError, ValidationError
+    GameFullError, ValidationError, AuthorizationError
 )
 
 # Configuration du router
@@ -39,56 +39,41 @@ router = APIRouter(prefix="/games", tags=["Jeux"])
 
 @router.post(
     "/create",
-    response_model=Dict[str, Any],
-    summary="Créer une partie",
-    description="Crée une nouvelle partie de Quantum Mastermind avec support quantique"
+    response_model=GameCreateResponse,  # CORRECTION: Utiliser le bon schéma
+    summary="Créer une nouvelle partie",
+    description="Crée une nouvelle partie avec option auto-leave"
 )
 async def create_game(
         game_data: GameCreate,
-        auto_leave: bool = Query(
-            default=False,
-            description="Quitter automatiquement les parties actives avant de créer la nouvelle"
-        ),
+        auto_leave: bool = Query(False, description="Quitter automatiquement les parties actives"),
         current_user: User = Depends(get_current_verified_user),
         db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
+) -> GameCreateResponse:  # CORRECTION: Type de retour précis
     """
-    Crée une nouvelle partie de Quantum Mastermind
+    Crée une nouvelle partie
 
-    NOUVEAU: Support complet du mode quantique
-    - **auto_leave**: Si true, quitte automatiquement les parties actives
-    - **game_data**: Configuration de la partie à créer
-    - **quantum_enabled**: Active les fonctionnalités quantiques
+    CORRECTION: Retour avec schéma validé
     """
     try:
-        result = await game_service.create_game_with_auto_leave(
-            db, game_data, current_user.id, auto_leave
-        )
-        return result
-
-    except ValidationError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Données de création invalides: {str(e)}"
-        )
-
-    except GameError as e:
-        # Gestion spécifique pour le cas où l'utilisateur est déjà dans une partie
-        if "participez déjà" in str(e):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"{str(e)} Utilisez le paramètre auto_leave=true pour quitter automatiquement vos parties actives."
+        #  Appeler la méthode appropriée selon auto_leave
+        if auto_leave:
+            result = await game_service.create_game_with_auto_leave(
+                db, game_data, current_user.id, auto_leave=True
             )
         else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e)
-            )
+            result = await game_service.create_game(db, game_data, current_user.id)
+
+        #  Valider et retourner selon le schéma
+        return GameCreateResponse(**result)
+
+    except (ValidationError, GameError) as e:
+        raise create_http_exception_from_error(e)
 
     except Exception as e:
+        print(f"Erreur création partie: {e}")  # Pour debug
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de la création de la partie"
+            detail=f"Erreur lors de la création de la partie: {str(e)}"
         )
 
 
@@ -142,22 +127,9 @@ async def get_my_current_game(
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Optional[Dict[str, Any]]:
-    """
-    Récupère la partie actuellement active de l'utilisateur connecté
-
-    MODIFIÉ: Inclut les informations quantiques
-    """
+    """Récupère la partie active de l'utilisateur"""
     try:
         current_game = await game_service.get_user_current_game(db, current_user.id)
-
-        if current_game:
-            # NOUVEAU: Ajouter les informations quantiques
-            if current_game.get("quantum_enabled"):
-                quantum_info = await game_service.get_quantum_game_info(
-                    db, UUID(current_game["game_id"])
-                )
-                current_game["quantum_info"] = quantum_info
-
         return current_game
 
     except Exception as e:
@@ -402,7 +374,7 @@ async def start_game(
         result = await game_service.start_game(db, game_id, current_user.id)
         return result
 
-    except (EntityNotFoundError, GameError) as e:
+    except (EntityNotFoundError, GameError, AuthorizationError) as e:
         raise create_http_exception_from_error(e)
 
     except Exception as e:
@@ -416,7 +388,7 @@ async def start_game(
     "/{game_id}/attempt",
     response_model=AttemptResult,
     summary="Faire une tentative",
-    description="Soumet une tentative de solution avec calcul quantique optionnel"
+    description="Soumet une tentative de solution"
 )
 async def make_attempt(
         game_id: UUID,
@@ -424,13 +396,7 @@ async def make_attempt(
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> AttemptResult:
-    """
-    Soumet une tentative de solution
-
-    MODIFIÉ: Support du calcul quantique des indices
-    - **combination**: Combinaison proposée (liste de couleurs)
-    - **use_quantum_hint**: Utiliser un hint quantique (optionnel)
-    """
+    """Soumet une tentative de solution"""
     try:
         result = await game_service.make_attempt(db, game_id, current_user.id, attempt)
         return result
