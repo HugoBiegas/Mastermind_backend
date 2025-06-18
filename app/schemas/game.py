@@ -254,8 +254,7 @@ class GameFull(GameInfo):
     quantum_data: Optional[Dict[str, Any]] = Field(None, description="Données quantiques")
 
     # Solution (seulement pour le créateur ou partie terminée)
-    solution: Optional[List[int]] = Field(None, description="Solution secrète")
-
+    solution: Optional[List[int]] = Field(None, description="Solution secrète (non exposée)")
 
 class GamePublic(BaseModel):
     """Informations publiques d'une partie (pour les listes)"""

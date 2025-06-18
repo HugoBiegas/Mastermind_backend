@@ -54,49 +54,35 @@ class GameService:
             )
 
             if active_participations:
-                # Récupérer les informations de la partie active
-                active_game = active_participations[0].game
+                #  Accès sécurisé aux données de la partie active
+                participation = active_participations[0]
+                # Les données game sont déjà chargées via selectinload dans get_user_active_participations
+                active_game = participation.game
                 raise GameError(
                     f"Vous participez déjà à une partie active (Room: {active_game.room_code}). "
                     "Quittez d'abord cette partie avant d'en créer une nouvelle."
                 )
 
-            # CORRECTION: Utiliser les valeurs des Enums
-            difficulty_config = self._get_difficulty_config(game_data.difficulty)
+            # Configuration des paramètres selon la difficulté
+            if hasattr(game_data, 'difficulty') and game_data.difficulty:
+                difficulty_value = game_data.difficulty
+            else:
+                difficulty_value = "easy"  # Valeur par défaut
 
-            # CORRECTION: Utiliser les valeurs de difficulty_config ou celles du game_data si spécifiées
-            combination_length = getattr(game_data, 'combination_length', difficulty_config["length"])
-            available_colors = getattr(game_data, 'available_colors', difficulty_config["colors"])
-            max_attempts = getattr(game_data, 'max_attempts', difficulty_config["attempts"])
+            # Configuration de la longueur de combinaison
+            combination_length = getattr(game_data, 'combination_length', 4)
+            available_colors = getattr(game_data, 'available_colors', 6)
+            max_attempts = getattr(game_data, 'max_attempts', None)
 
-            # Validation des données avec les valeurs finales
-            if combination_length < 2 or combination_length > 8:
-                raise ValidationError("La longueur de combinaison doit être entre 2 et 8")
+            # Génération de la solution
+            solution = generate_solution(combination_length, available_colors)
 
-            if available_colors < 3 or available_colors > 10:
-                raise ValidationError("Le nombre de couleurs doit être entre 3 et 10")
-
-            if max_attempts and (max_attempts < 1 or max_attempts > 50):
-                raise ValidationError("Le nombre de tentatives doit être entre 1 et 50")
-
-            if game_data.max_players < 1 or game_data.max_players > 8:
-                raise ValidationError("Le nombre de joueurs doit être entre 1 et 8")
-
-            # Génération du code de room unique
-            room_code = await self._generate_unique_room_code(db)
-
-            # Génération de la solution avec les valeurs finales
-            solution = self._generate_solution(combination_length, available_colors)
-
-            # CORRECTION: Création de la partie avec les valeurs d'Enums
+            # Création de la partie
             game = Game(
-                room_code=room_code,
-                game_type=game_data.game_type.value if isinstance(game_data.game_type,
-                                                                  GameType) else game_data.game_type,
-                game_mode=game_data.game_mode.value if isinstance(game_data.game_mode,
-                                                                  GameMode) else game_data.game_mode,
-                difficulty=game_data.difficulty.value if isinstance(game_data.difficulty,
-                                                                    Difficulty) else game_data.difficulty,
+                room_code=generate_room_code(),
+                game_type=game_data.game_type.value if hasattr(game_data.game_type, 'value') else game_data.game_type,
+                game_mode=game_data.game_mode.value if hasattr(game_data.game_mode, 'value') else game_data.game_mode,
+                difficulty=difficulty_value,
                 combination_length=combination_length,
                 available_colors=available_colors,
                 max_attempts=max_attempts,
@@ -119,39 +105,44 @@ class GameService:
             # Ajouter TOUJOURS le créateur comme participant
             await self._add_participant(db, game.id, creator_id, join_order=1)
 
-            # CORRECTION: Récupérer l'utilisateur créateur pour le nom
+            #  Récupérer l'utilisateur créateur pour le nom
             creator = await self.user_repo.get_by_id(db, creator_id)
             creator_username = creator.username if creator else "Inconnu"
 
             # Retour des informations COMPLÈTES selon le schéma attendu
             return {
+                # Identification
                 "id": str(game.id),
                 "room_code": game.room_code,
+
+                # Configuration de base
                 "game_type": game.game_type,
                 "game_mode": game.game_mode,
                 "difficulty": game.difficulty,
                 "status": game.status,
                 "quantum_enabled": game.quantum_enabled,
 
-                # CORRECTION: Ajouter tous les champs manquants
-                "combination_length": combination_length,
-                "available_colors": available_colors,
+                # Paramètres de jeu
+                "combination_length": game.combination_length,
+                "available_colors": game.available_colors,
                 "max_players": game.max_players,
+
+                # Configuration avancée
                 "is_private": game.is_private,
                 "allow_spectators": game.allow_spectators,
                 "enable_chat": game.enable_chat,
 
-                # CORRECTION: Ajouter les champs créateur
+                # Créateur
                 "creator_id": str(game.creator_id),
                 "creator_username": creator_username,
 
-                # CORRECTION: Ajouter les timestamps
+                # Timestamps
                 "created_at": game.created_at.isoformat(),
                 "started_at": game.started_at.isoformat() if game.started_at else None,
                 "finished_at": game.finished_at.isoformat() if game.finished_at else None,
 
-                # CORRECTION: Ajouter les compteurs
-                "current_players": game.get_current_player_count(),
+                # Statistiques
+                "current_players": 1,  # Le créateur vient d'être ajouté
 
                 # Message de succès
                 "message": "Partie créée avec succès - vous avez été automatiquement ajouté à la partie"
@@ -571,25 +562,147 @@ class GameService:
             "pages": 0
         }
 
+    async def _format_participant_info(self, participation: GameParticipation) -> Dict[str, Any]:
+        """Formate les informations d'un participant"""
+        return {
+            "id": participation.id,
+            "player_id": participation.player_id,
+            "player_username": participation.player.username if participation.player else "Inconnu",
+            "player_full_name": participation.player.full_name if participation.player else None,
+            "status": participation.status,
+            "role": participation.role,
+            "join_order": participation.join_order,
+            "score": participation.score,
+            "attempts_made": participation.attempts_made,
+            "quantum_hints_used": participation.quantum_hints_used,
+            "quantum_score": 0,  # Calculé si nécessaire
+            "is_ready": participation.is_ready,
+            "is_winner": participation.is_winner,
+            "is_eliminated": participation.is_eliminated,
+            "joined_at": participation.joined_at,
+            "finished_at": participation.finished_at
+        }
+
+    async def _format_attempt_info(self, attempt: GameAttempt) -> Dict[str, Any]:
+        """Formate les informations d'une tentative"""
+        return {
+            "id": attempt.id,
+            "attempt_number": attempt.attempt_number,
+            "combination": attempt.combination,
+            "correct_positions": attempt.correct_positions,
+            "correct_colors": attempt.correct_colors,
+            "is_correct": attempt.is_correct,
+            "used_quantum_hint": attempt.used_quantum_hint,
+            "hint_type": attempt.hint_type,
+            "quantum_data": attempt.quantum_data,
+            "attempt_score": attempt.attempt_score,
+            "time_taken": attempt.time_taken,
+            "created_at": attempt.created_at
+        }
+
     async def get_game_details(
             self,
             db: AsyncSession,
             game_id: UUID,
             user_id: UUID
     ) -> Dict[str, Any]:
-        """Récupère les détails d'une partie"""
-        game = await self.game_repo.get_by_id(db, game_id)
-        if not game:
-            raise EntityNotFoundError("Partie non trouvée")
+        """
+        Récupère les détails complets d'une partie avec tous les champs requis
+        CORRECTION: Retour complet pour le schéma GameFull SANS la solution
+        """
+        try:
+            # Récupérer la partie avec tous les détails (participants, tentatives, créateur)
+            game = await self.game_repo.get_game_with_full_details(db, game_id)
+            if not game:
+                raise EntityNotFoundError("Partie non trouvée")
 
-        return {
-            "id": str(game.id),
-            "room_code": game.room_code,
-            "status": game.status,
-            "quantum_enabled": game.quantum_enabled,
-            "game_type": game.game_type,
-            "game_mode": game.game_mode
-        }
+            # Récupérer le créateur
+            creator = await self.user_repo.get_by_id(db, game.creator_id)
+            creator_username = creator.username if creator else "Inconnu"
+
+            # Formater les participants
+            participants = []
+            for participation in game.participations:
+                participant_info = {
+                    "id": participation.id,
+                    "player_id": participation.player_id,
+                    "player_username": participation.player.username if participation.player else "Inconnu",
+                    "player_full_name": participation.player.full_name if participation.player else None,
+                    "status": participation.status,
+                    "role": participation.role,
+                    "join_order": participation.join_order,
+                    "score": participation.score,
+                    "attempts_made": participation.attempts_made,
+                    "quantum_hints_used": participation.quantum_hints_used,
+                    "quantum_score": 0,  # Calculé si nécessaire
+                    "is_ready": participation.is_ready,
+                    "is_winner": participation.is_winner,
+                    "is_eliminated": participation.is_eliminated,
+                    "joined_at": participation.joined_at,
+                    "finished_at": participation.finished_at
+                }
+                participants.append(participant_info)
+
+            # Formater les tentatives
+            attempts = []
+            for attempt in game.attempts:
+                attempt_info = {
+                    "id": attempt.id,
+                    "attempt_number": attempt.attempt_number,
+                    "combination": attempt.combination,
+                    "correct_positions": attempt.correct_positions,
+                    "correct_colors": attempt.correct_colors,
+                    "is_correct": attempt.is_correct,
+                    "used_quantum_hint": attempt.used_quantum_hint,
+                    "hint_type": attempt.hint_type,
+                    "quantum_data": attempt.quantum_data,
+                    "attempt_score": attempt.attempt_score,
+                    "time_taken": attempt.time_taken,
+                    "created_at": attempt.created_at
+                }
+                attempts.append(attempt_info)
+
+            # Calculer le nombre de joueurs actuels
+            current_players = len([p for p in game.participations if p.status in ['waiting', 'ready', 'active']])
+
+            # Construire la réponse complète selon le schéma GameFull
+            #La solution n'est JAMAIS exposée ici
+            return {
+                # GameInfo base fields
+                "id": game.id,
+                "room_code": game.room_code,
+                "game_type": game.game_type,
+                "game_mode": game.game_mode,
+                "status": game.status,
+                "difficulty": game.difficulty,
+                "combination_length": game.combination_length,
+                "available_colors": game.available_colors,
+                "max_attempts": game.max_attempts,
+                "time_limit": game.time_limit,
+                "max_players": game.max_players,
+                "is_private": game.is_private,
+                "allow_spectators": game.allow_spectators,
+                "enable_chat": game.enable_chat,
+                "quantum_enabled": game.quantum_enabled,
+                "creator_id": game.creator_id,
+                "creator_username": creator_username,
+                "created_at": game.created_at,
+                "started_at": game.started_at,
+                "finished_at": game.finished_at,
+                "current_players": current_players,
+
+                # GameFull additional fields
+                "participants": participants,
+                "attempts": attempts,
+                "settings": game.settings or {},
+                "quantum_data": game.quantum_data,
+                "solution": None
+            }
+
+        except Exception as e:
+            if isinstance(e, EntityNotFoundError):
+                raise
+            raise GameError(f"Erreur lors de la récupération des détails de la partie: {str(e)}")
 
     async def get_quantum_game_info(
             self,
@@ -709,7 +822,3 @@ class GameService:
         """Génère une solution aléatoire"""
         import random
         return [random.randint(1, colors) for _ in range(length)]
-
-
-# Instance globale du service de jeu
-game_service = GameService()

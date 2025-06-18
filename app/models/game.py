@@ -252,21 +252,21 @@ class Game(Base):
         "User",
         back_populates="created_games",
         foreign_keys=[creator_id],
-        lazy="select"
+        lazy="noload"
     )
 
     participations: Mapped[List["GameParticipation"]] = relationship(
         "GameParticipation",
         back_populates="game",
         cascade="all, delete-orphan",
-        lazy="select"
+        lazy="noload"
     )
 
     attempts: Mapped[List["GameAttempt"]] = relationship(
         "GameAttempt",
         back_populates="game",
         cascade="all, delete-orphan",
-        lazy="select"
+        lazy="noload"
     )
 
     # === PROPRIÉTÉS CALCULÉES ===
@@ -450,13 +450,13 @@ class GameParticipation(Base):
     game: Mapped["Game"] = relationship(
         "Game",
         back_populates="participations",
-        lazy="select"
+        lazy="noload"
     )
 
     player: Mapped["User"] = relationship(
         "User",
         back_populates="game_participations",
-        lazy="select"
+        lazy="noload"
     )
 
     # === CONTRAINTES ===
@@ -584,13 +584,13 @@ class GameAttempt(Base):
     game: Mapped["Game"] = relationship(
         "Game",
         back_populates="attempts",
-        lazy="select"
+        lazy="noload"
     )
 
     player: Mapped["User"] = relationship(
         "User",
         back_populates="game_attempts",
-        lazy="select"
+        lazy="noload"
     )
 
     # === CONTRAINTES ===

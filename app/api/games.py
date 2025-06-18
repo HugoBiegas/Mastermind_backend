@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (
     get_database, get_current_active_user, get_current_verified_user,
     get_current_superuser, validate_game_access, get_pagination_params, get_search_params,
-    create_http_exception_from_error,
+    create_http_exception_from_error,get_game_service,
     PaginationParams, SearchParams
 )
 from app.models.game import GameType, GameMode, GameStatus
@@ -22,7 +22,6 @@ from app.schemas.game import (
     GameFull, GameList, AttemptResult, SolutionReveal,
     QuantumGameInfo, QuantumHintRequest, QuantumHintResponse, GameCreateResponse
 )
-from app.services.game import game_service
 from app.services.quantum import quantum_service
 from app.utils.exceptions import (
     EntityNotFoundError, GameError, GameNotActiveError,
@@ -47,7 +46,8 @@ async def create_game(
         game_data: GameCreate,
         auto_leave: bool = Query(False, description="Quitter automatiquement les parties actives"),
         current_user: User = Depends(get_current_verified_user),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> GameCreateResponse:  # CORRECTION: Type de retour précis
     """
     Crée une nouvelle partie
@@ -92,7 +92,8 @@ async def search_games(
         is_public: bool = Query(True, description="Afficher uniquement les parties publiques"),
         quantum_only: bool = Query(False, description="Parties quantiques uniquement"),  # NOUVEAU
         current_user: Optional[User] = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> GameList:
     """
     Recherche des parties selon des critères
@@ -125,7 +126,8 @@ async def search_games(
 )
 async def get_my_current_game(
         current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> Optional[Dict[str, Any]]:
     """Récupère la partie active de l'utilisateur"""
     try:
@@ -147,7 +149,8 @@ async def get_my_current_game(
 )
 async def leave_all_active_games(
         current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> Dict[str, Any]:
     """
     Quitte toutes les parties actives de l'utilisateur
@@ -195,7 +198,8 @@ async def get_quantum_game_info(
         game_id: UUID,
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database),
-        _: bool = Depends(validate_game_access)
+        _: bool = Depends(validate_game_access),
+        game_service = Depends(get_game_service)
 ) -> QuantumGameInfo:
     """
     Récupère les informations quantiques détaillées d'une partie
@@ -227,7 +231,8 @@ async def request_quantum_hint(
         hint_request: QuantumHintRequest,
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database),
-        _: bool = Depends(validate_game_access)
+        _: bool = Depends(validate_game_access),
+        game_service = Depends(get_game_service)
 ) -> QuantumHintResponse:
     """
     Demande un hint quantique pour aider à résoudre la partie
@@ -341,7 +346,8 @@ async def join_game(
         game_id: UUID,
         join_data: GameJoin,
         current_user: User = Depends(get_current_verified_user),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> Dict[str, Any]:
     """Rejoint une partie existante"""
     try:
@@ -367,7 +373,8 @@ async def join_game(
 async def start_game(
         game_id: UUID,
         current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> Dict[str, Any]:
     """Démarre officiellement une partie"""
     try:
@@ -394,7 +401,8 @@ async def make_attempt(
         game_id: UUID,
         attempt: AttemptCreate,
         current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> AttemptResult:
     """Soumet une tentative de solution"""
     try:
@@ -420,7 +428,8 @@ async def make_attempt(
 async def leave_game(
         game_id: UUID,
         current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> MessageResponse:
     """Quitte une partie en cours"""
     try:
@@ -448,7 +457,8 @@ async def get_leaderboard(
         time_period: str = Query("all", description="Période (all, month, week)"),
         limit: int = Query(10, ge=1, le=100, description="Nombre de joueurs"),
         include_quantum: bool = Query(True, description="Inclure les scores quantiques"),  # NOUVEAU
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> Dict[str, Any]:
     """
     Récupère le classement des meilleurs joueurs
@@ -483,7 +493,8 @@ async def get_game(
         game_id: UUID,
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database),
-        _: bool = Depends(validate_game_access)
+        _: bool = Depends(validate_game_access),
+        game_service = Depends(get_game_service)
 ) -> GameFull:
     """
     Récupère les détails complets d'une partie
@@ -516,7 +527,8 @@ async def export_game(
         include_quantum: bool = Query(True, description="Inclure les données quantiques"),  # NOUVEAU
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database),
-        _: bool = Depends(validate_game_access)
+        _: bool = Depends(validate_game_access),
+        game_service = Depends(get_game_service)
 ) -> Dict[str, Any]:
     """
     Exporte les données d'une partie
@@ -553,7 +565,8 @@ async def export_game(
 async def debug_reveal_solution(
         game_id: UUID,
         current_user: User = Depends(get_current_superuser),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> SolutionReveal:
     """Route de debug pour révéler la solution (développement uniquement)"""
 
@@ -588,7 +601,8 @@ async def debug_reveal_solution(
 async def admin_force_leave_all_games(
         user_id: UUID,
         current_user: User = Depends(get_current_superuser),
-        db: AsyncSession = Depends(get_database)
+        db: AsyncSession = Depends(get_database),
+        game_service = Depends(get_game_service)
 ) -> Dict[str, Any]:
     """Force un utilisateur à quitter toutes ses parties actives (Admin uniquement)"""
     try:

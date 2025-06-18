@@ -20,6 +20,7 @@ from app.services.auth import auth_service
 from app.utils.exceptions import (
     AuthenticationError, get_http_status_code, get_exception_details
 )
+from app.services.game import GameService
 
 # === CONFIGURATION DE SÉCURITÉ ===
 
@@ -38,6 +39,16 @@ async def get_database() -> AsyncSession:
     async for db in get_db():
         yield db
 
+
+def get_game_service() -> GameService:
+    """
+    Dépendance pour obtenir une instance de GameService
+
+    Returns:
+        Instance de GameService
+    """
+    from app.services.game import GameService
+    return GameService()
 
 async def get_client_info(request: Request) -> Dict[str, Any]:
     """
@@ -602,7 +613,6 @@ def create_http_exception_from_error(error: Exception) -> HTTPException:
         headers={"X-Error-Code": details['error']} if details['error'] else None
     )
 
-
 # === MIDDLEWARE HELPERS ===
 
 async def get_request_context(
@@ -644,6 +654,9 @@ __all__ = [
     # Authentification
     "get_current_user", "get_current_user_optional",
     "get_current_active_user", "get_current_verified_user", "get_current_superuser",
+
+    # Services
+    "get_game_service",
 
     # Pagination et recherche
     "PaginationParams", "SearchParams",

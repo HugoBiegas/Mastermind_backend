@@ -227,7 +227,7 @@ class User(Base):
         back_populates="creator",
         foreign_keys="Game.creator_id",
         cascade="all, delete-orphan",
-        lazy="select"
+        lazy="noload"
     )
 
     # Participations aux parties (CORRECTION: utilise player_id)
@@ -236,7 +236,7 @@ class User(Base):
         back_populates="player",
         foreign_keys="GameParticipation.player_id",
         cascade="all, delete-orphan",
-        lazy="select"
+        lazy="noload"
     )
 
     # Tentatives dans les parties (CORRECTION: utilise player_id)
@@ -245,7 +245,7 @@ class User(Base):
         back_populates="player",
         foreign_keys="GameAttempt.player_id",
         cascade="all, delete-orphan",
-        lazy="select"
+        lazy="noload"
     )
 
     # === PROPRIÉTÉS CALCULÉES ===
