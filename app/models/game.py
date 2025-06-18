@@ -552,7 +552,8 @@ class GameAttempt(Base):
     # === DONNÉES QUANTIQUES (selon init.sql) ===
     quantum_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSONB,
-        nullable=True
+        nullable=True,
+        comment="Données quantiques détaillées (probabilités, etc.)"
     )
 
     used_quantum_hint: Mapped[bool] = mapped_column(

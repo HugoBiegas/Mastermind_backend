@@ -1,38 +1,22 @@
-"""
-Service quantique pour Quantum Mastermind
-Compatible avec Qiskit 2.0.2 et qiskit-aer 0.17.1
-NOUVELLES FONCTIONNALITÉS: Génération quantique de solution et calcul d'indices
-"""
 import math
 import secrets
 from typing import Any, Dict, List, Tuple
-from uuid import UUID
-
 import numpy as np
-# Imports Qiskit 2.0.2 compatibles
 from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
-from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class QuantumService:
-    """Service pour les opérations quantiques avec Qiskit 2.0.2"""
+    """Service quantique optimisé pour Mastermind"""
 
     def __init__(self):
-        # Configuration du backend quantique pour Qiskit 2.0.2
         try:
             self.backend = AerSimulator()
-        except Exception as e:
-            print(f"Erreur lors de l'initialisation du backend quantique: {e}")
+        except Exception:
             self.backend = None
 
-        # Paramètres par défaut
-        self.default_shots = 1024
-        self.max_qubits = 5
-
-    # ========================================
-    # NOUVELLES FONCTIONS QUANTIQUES MASTERMIND
-    # ========================================
+        self.default_shots = 1024  # Bon compromis précision/performance
+        self.max_qubits = 8
 
     async def generate_quantum_solution(
         self,
@@ -40,208 +24,169 @@ class QuantumService:
         available_colors: int = 6,
         shots: int = None
     ) -> List[int]:
-        """
-        Génère une solution quantique pour le Mastermind
-
-        Cette fonction utilise la superposition quantique pour générer
-        de vrais nombres aléatoires, contrairement aux générateurs pseudo-aléatoires
-
-        Args:
-            combination_length: Longueur de la combinaison (défaut: 4)
-            available_colors: Nombre de couleurs disponibles (défaut: 6)
-            shots: Nombre de mesures (défaut: self.default_shots)
-
-        Returns:
-            List[int]: Solution générée quantiquement (ex: [1, 3, 2, 6])
-        """
+        """Génère une solution quantique avec superposition"""
         if not self.backend:
-            # Fallback classique si le backend quantique n'est pas disponible
             return [secrets.randbelow(available_colors) + 1 for _ in range(combination_length)]
 
         shots = shots or self.default_shots
         solution = []
 
         try:
-            # Calculer le nombre de qubits nécessaires pour représenter les couleurs
             qubits_per_color = math.ceil(math.log2(available_colors))
 
-            for position in range(combination_length):
-                # Créer un circuit quantique pour générer un nombre aléatoire
+            for _ in range(combination_length):
                 circuit = QuantumCircuit(qubits_per_color, qubits_per_color)
 
-                # Appliquer des portes Hadamard pour créer la superposition
+                # Superposition
                 for qubit in range(qubits_per_color):
                     circuit.h(qubit)
 
-                # Mesurer tous les qubits
                 circuit.measure_all()
 
-                # Exécuter le circuit
                 job = self.backend.run(circuit, shots=shots)
                 result = job.result()
                 counts = result.get_counts()
 
-                # Extraire le résultat le plus fréquent (ou aléatoire parmi les plus fréquents)
+                # Résultat le plus fréquent
                 max_count = max(counts.values())
                 most_frequent = [state for state, count in counts.items() if count == max_count]
-
-                # Choisir aléatoirement parmi les états les plus fréquents
                 chosen_state = secrets.choice(most_frequent)
 
-                # Convertir le binaire en entier et s'assurer qu'il est dans la plage
                 color_value = int(chosen_state, 2) % available_colors + 1
                 solution.append(color_value)
 
-        except Exception as e:
-            print(f"Erreur dans la génération quantique: {e}")
-            # Fallback classique en cas d'erreur
+        except Exception:
             return [secrets.randbelow(available_colors) + 1 for _ in range(combination_length)]
 
         return solution
 
-    async def calculate_quantum_hints(
+    async def calculate_quantum_hints_with_probabilities(
         self,
         solution: List[int],
         attempt: List[int],
         shots: int = None
-    ) -> Tuple[int, int]:
-        """
-        Calcule les indices quantiques (bien placé, mal placé) en utilisant
-        la distance de Hamming quantique et l'intrication
-
-        Args:
-            solution: La solution secrète
-            attempt: La tentative du joueur
-            shots: Nombre de mesures quantiques
-
-        Returns:
-            Tuple[int, int]: (bien_place, mal_place)
-        """
+    ) -> Dict[str, Any]:
+        """Calcule les indices avec probabilités quantiques détaillées"""
         if not self.backend or len(solution) != len(attempt):
-            # Fallback classique
-            return self._calculate_classical_hints(solution, attempt)
+            return self._classical_fallback(solution, attempt)
 
         shots = shots or self.default_shots
 
         try:
-            # Calcul quantique des positions exactes (bien placé)
-            exact_matches = await self._quantum_exact_match_count(solution, attempt, shots)
+            position_probabilities = await self._analyze_position_probabilities(solution, attempt, shots)
+            exact_matches = sum(1 for pos in position_probabilities if pos["exact_match_probability"] > 0.5)
+            wrong_position = self._calculate_wrong_position(solution, attempt, exact_matches)
 
-            # Calcul quantique des correspondances totales
-            total_matches = await self._quantum_total_match_count(solution, attempt, shots)
+            return {
+                "exact_matches": exact_matches,
+                "wrong_position": wrong_position,
+                "position_probabilities": position_probabilities,
+                "quantum_calculated": True,
+                "shots_used": shots
+            }
 
-            # Les mal placés = correspondances totales - bien placés
-            wrong_position = max(0, total_matches - exact_matches)
+        except Exception:
+            return self._classical_fallback(solution, attempt)
 
-            return exact_matches, wrong_position
-
-        except Exception as e:
-            print(f"Erreur dans le calcul quantique des indices: {e}")
-            # Fallback classique en cas d'erreur
-            return self._calculate_classical_hints(solution, attempt)
-
-    async def _quantum_exact_match_count(
+    async def _analyze_position_probabilities(
         self,
         solution: List[int],
         attempt: List[int],
         shots: int
-    ) -> int:
-        """
-        Calcule le nombre de positions exactement correspondantes en utilisant
-        l'intrication quantique
-        """
-        if len(solution) > self.max_qubits:
-            # Si trop de qubits nécessaires, utiliser la méthode classique
-            return sum(1 for s, a in zip(solution, attempt) if s == a)
+    ) -> List[Dict[str, Any]]:
+        """Analyse les probabilités quantiques par position"""
+        if len(solution) > self.max_qubits or not self.backend:
+            return self._classical_position_probabilities(solution, attempt)
 
         try:
-            # Créer un circuit avec un qubit par position
             n_positions = len(solution)
-            circuit = QuantumCircuit(n_positions * 2, n_positions)
+            circuit = QuantumCircuit(n_positions, n_positions)
 
-            # Pour chaque position, encoder la comparaison
+            # Encoder chaque position selon la correspondance
             for i, (sol_color, att_color) in enumerate(zip(solution, attempt)):
-                sol_qubit = i * 2
-                att_qubit = i * 2 + 1
-
-                # Encoder les couleurs en binaire dans les qubits
-                # Si les couleurs sont identiques, créer de l'intrication
                 if sol_color == att_color:
-                    # Intrication: même résultat pour les deux qubits
-                    circuit.h(sol_qubit)
-                    circuit.cx(sol_qubit, att_qubit)
+                    angle = 7 * np.pi / 8  # ~97% probabilité
+                elif att_color in solution:
+                    angle = np.pi / 3      # ~75% probabilité
                 else:
-                    # Pas d'intrication: résultats différents
-                    circuit.h(sol_qubit)
-                    circuit.x(att_qubit)
-                    circuit.h(att_qubit)
+                    angle = np.pi / 16     # ~6% probabilité
 
-                # Mesurer la correspondance
-                circuit.measure(sol_qubit, i)
+                circuit.ry(angle, i)
+                circuit.measure(i, i)
 
-            # Exécuter le circuit
             job = self.backend.run(circuit, shots=shots)
             result = job.result()
             counts = result.get_counts()
 
-            # Compter les correspondances exactes
-            exact_matches = 0
-            for state, count in counts.items():
-                # Compter le nombre de bits à 1 (correspondances)
-                matches_in_state = state.count('1')
-                exact_matches += matches_in_state * count
+            position_probabilities = []
+            for position in range(n_positions):
+                prob_data = self._extract_position_probability(position, counts, shots, solution, attempt)
+                # Sécurité : ne pas exposer la solution
+                prob_data_safe = {k: v for k, v in prob_data.items() if k != "solution_color"}
+                position_probabilities.append(prob_data_safe)
 
-            # Moyenne pondérée
-            return round(exact_matches / shots)
+            return position_probabilities
 
-        except Exception as e:
-            print(f"Erreur dans quantum_exact_match_count: {e}")
-            return sum(1 for s, a in zip(solution, attempt) if s == a)
+        except Exception:
+            return self._classical_position_probabilities(solution, attempt)
 
-    async def _quantum_total_match_count(
+    def _extract_position_probability(
         self,
+        position: int,
+        counts: Dict[str, int],
+        shots: int,
         solution: List[int],
-        attempt: List[int],
-        shots: int
-    ) -> int:
-        """
-        Calcule le nombre total de correspondances (incluant les mal placés)
-        en utilisant un algorithme quantique de correspondance
-        """
-        try:
-            # Compter les correspondances pour chaque couleur
-            total_matches = 0
+        attempt: List[int]
+    ) -> Dict[str, Any]:
+        """Extrait la probabilité quantique pour une position"""
+        total_ones = 0
+        total_measurements = 0
 
-            # Obtenir toutes les couleurs uniques
-            all_colors = set(solution + attempt)
+        if not counts:
+            quantum_probability = 0.0
+            total_measurements = shots
+        else:
+            for state, count in counts.items():
+                if len(state) > position:
+                    bit_at_position = state[-(position + 1)]
+                    if bit_at_position == '1':
+                        total_ones += count
+                    total_measurements += count
 
-            for color in all_colors:
-                sol_count = solution.count(color)
-                att_count = attempt.count(color)
-                # Le nombre de correspondances pour cette couleur
-                total_matches += min(sol_count, att_count)
+            quantum_probability = total_ones / total_measurements if total_measurements > 0 else 0
 
-            return total_matches
+        # Classification
+        sol_color = solution[position]
+        att_color = attempt[position]
 
-        except Exception as e:
-            print(f"Erreur dans quantum_total_match_count: {e}")
-            return 0
+        if sol_color == att_color:
+            match_type = "exact_match"
+            confidence = "high" if quantum_probability > 0.8 else "medium"
+        elif att_color in solution:
+            match_type = "color_present"
+            confidence = "medium" if quantum_probability > 0.5 else "low"
+        else:
+            match_type = "no_match"
+            confidence = "high" if quantum_probability < 0.2 else "uncertain"
 
-    def _calculate_classical_hints(self, solution: List[int], attempt: List[int]) -> Tuple[int, int]:
-        """Calcul classique des indices en fallback"""
-        if len(solution) != len(attempt):
-            return 0, 0
+        return {
+            "position": position,
+            "exact_match_probability": round(quantum_probability, 3),
+            "match_type": match_type,
+            "confidence": confidence,
+            "solution_color": sol_color,
+            "attempt_color": att_color,
+            "quantum_measurements": total_ones,
+            "total_shots": total_measurements
+        }
 
-        # Bien placés
-        exact_matches = sum(1 for s, a in zip(solution, attempt) if s == a)
-
-        # Compter les correspondances totales
+    def _calculate_wrong_position(self, solution: List[int], attempt: List[int], exact_matches: int) -> int:
+        """Calcule les mal placés (hybride classique-quantique)"""
         solution_counts = {}
         attempt_counts = {}
 
         for color in solution:
             solution_counts[color] = solution_counts.get(color, 0) + 1
-
         for color in attempt:
             attempt_counts[color] = attempt_counts.get(color, 0) + 1
 
@@ -250,237 +195,57 @@ class QuantumService:
             if color in attempt_counts:
                 total_matches += min(solution_counts[color], attempt_counts[color])
 
-        # Mal placés = correspondances totales - bien placés
-        wrong_position = total_matches - exact_matches
+        return max(0, total_matches - exact_matches)
 
-        return exact_matches, wrong_position
+    def _classical_fallback(self, solution: List[int], attempt: List[int]) -> Dict[str, Any]:
+        """Fallback classique si quantique indisponible"""
+        if len(solution) != len(attempt):
+            return {"exact_matches": 0, "wrong_position": 0, "quantum_calculated": False}
 
-    # ========================================
-    # FONCTIONS QUANTIQUES EXISTANTES (inchangées)
-    # ========================================
+        exact_matches = sum(1 for s, a in zip(solution, attempt) if s == a)
+        wrong_position = self._calculate_wrong_position(solution, attempt, exact_matches)
 
-    async def generate_quantum_hint(
-        self,
-        db: AsyncSession,
-        game_id: UUID,
-        player_id: UUID,
-        hint_type: str = "grover"
-    ) -> Dict[str, Any]:
-        """
-        Génère un hint quantique pour aider le joueur
-
-        Args:
-            db: Session de base de données
-            game_id: ID de la partie
-            player_id: ID du joueur
-            hint_type: Type de hint quantique
-
-        Returns:
-            Hint quantique généré
-        """
-        try:
-            # Vérifications préliminaires
-            if not self.backend:
-                return {
-                    "message": "Backend quantique non disponible",
-                    "type": hint_type,
-                    "confidence": 0.0,
-                    "error": "backend_unavailable"
-                }
-
-            # Générer le hint selon le type
-            if hint_type == "grover":
-                hint_data = await self._generate_grover_hint()
-            elif hint_type == "superposition":
-                hint_data = await self._generate_superposition_hint()
-            elif hint_type == "entanglement":
-                hint_data = await self._generate_entanglement_hint()
-            else:
-                hint_data = await self._generate_basic_hint()
-
-            return {
-                "message": hint_data["message"],
-                "type": hint_type,
-                "confidence": hint_data["confidence"],
-                "algorithm": hint_data["algorithm"],
-                "qubits": hint_data["qubits"],
-                "execution_time": hint_data["time"]
-            }
-
-        except Exception as e:
-            return {
-                "message": f"Erreur lors de la génération du hint: {str(e)}",
-                "type": hint_type,
-                "confidence": 0.0,
-                "error": str(e)
-            }
-
-    async def _generate_grover_hint(self) -> Dict[str, Any]:
-        """Génère un hint utilisant l'algorithme de Grover simulé"""
-        try:
-            if self.backend:
-                # Créer un circuit de recherche de Grover simplifié
-                qc = QuantumCircuit(2, 2)
-
-                # Superposition initiale
-                qc.h([0, 1])
-
-                # Oracle simplifié (marquer un état)
-                qc.cz(0, 1)
-
-                # Diffuseur de Grover
-                qc.h([0, 1])
-                qc.x([0, 1])
-                qc.cz(0, 1)
-                qc.x([0, 1])
-                qc.h([0, 1])
-
-                qc.measure_all()
-
-                # Exécution
-                job = self.backend.run(qc, shots=100)
-                result = job.result()
-                counts = result.get_counts()
-
-                # Analyser les résultats
-                max_state = max(counts, key=counts.get)
-                confidence = counts[max_state] / 100
-
-                return {
-                    "message": f"L'algorithme de Grover suggère l'état {max_state} avec une probabilité de {confidence:.2%}",
-                    "confidence": confidence,
-                    "algorithm": "grover",
-                    "qubits": 2,
-                    "time": 0.05,
-                    "quantum_state": max_state
-                }
-            else:
-                return {
-                    "message": "Grover non disponible",
-                    "confidence": 0.0,
-                    "algorithm": "grover",
-                    "qubits": 2,
-                    "time": 0.0
-                }
-
-        except Exception as e:
-            return {
-                "message": f"Erreur Grover: {str(e)}",
-                "confidence": 0.0,
-                "algorithm": "grover",
-                "qubits": 2,
-                "time": 0.0
-            }
-
-    async def _generate_superposition_hint(self) -> Dict[str, Any]:
-        """Génère un hint utilisant la superposition quantique"""
-        try:
-            if self.backend:
-                # Circuit de superposition
-                qc = QuantumCircuit(3, 3)
-                qc.h([0, 1, 2])  # Superposition sur 3 qubits
-                qc.measure_all()
-
-                # Exécution
-                job = self.backend.run(qc, shots=200)
-                result = job.result()
-                counts = result.get_counts()
-
-                # Analyser la distribution
-                entropy = -sum((count/200) * np.log2(count/200) for count in counts.values() if count > 0)
-                uniformity = entropy / 3  # Entropie maximale pour 3 qubits
-
-                return {
-                    "message": f"La superposition révèle une distribution avec {uniformity:.2%} d'uniformité",
-                    "confidence": uniformity,
-                    "algorithm": "superposition",
-                    "qubits": 3,
-                    "time": 0.03,
-                    "entropy": entropy
-                }
-            else:
-                return {
-                    "message": "Superposition non disponible",
-                    "confidence": 0.0,
-                    "algorithm": "superposition",
-                    "qubits": 3,
-                    "time": 0.0
-                }
-
-        except Exception as e:
-            return {
-                "message": f"Erreur superposition: {str(e)}",
-                "confidence": 0.0,
-                "algorithm": "superposition",
-                "qubits": 3,
-                "time": 0.0
-            }
-
-    async def _generate_entanglement_hint(self) -> Dict[str, Any]:
-        """Génère un hint utilisant l'intrication quantique"""
-        try:
-            if self.backend:
-                # Circuit d'intrication Bell
-                qc = QuantumCircuit(2, 2)
-                qc.h(0)
-                qc.cx(0, 1)
-                qc.measure_all()
-
-                # Exécution
-                job = self.backend.run(qc, shots=150)
-                result = job.result()
-                counts = result.get_counts()
-
-                # Mesurer la corrélation
-                correlated_states = counts.get('00', 0) + counts.get('11', 0)
-                entanglement_ratio = correlated_states / 150
-
-                if entanglement_ratio > 0.7:
-                    return {
-                        "message": f"L'intrication révèle une corrélation de {entanglement_ratio:.2%}",
-                        "confidence": entanglement_ratio,
-                        "algorithm": "entanglement",
-                        "qubits": 2,
-                        "time": 0.04,
-                        "correlation": entanglement_ratio
-                    }
-                else:
-                    return {
-                        "message": "Intrication non disponible",
-                        "confidence": 0.0,
-                        "algorithm": "entanglement",
-                        "qubits": 2,
-                        "time": 0.0
-                    }
-            else:
-                return {
-                    "message": "Intrication non disponible",
-                    "confidence": 0.0,
-                    "algorithm": "entanglement",
-                    "qubits": 2,
-                    "time": 0.0
-                }
-
-        except Exception as e:
-            return {
-                "message": f"Erreur intrication: {str(e)}",
-                "confidence": 0.0,
-                "algorithm": "entanglement",
-                "qubits": 2,
-                "time": 0.0
-            }
-
-    async def _generate_basic_hint(self) -> Dict[str, Any]:
-        """Génère un hint quantique basique"""
         return {
-            "message": "Indice quantique générique généré",
-            "confidence": 0.5,
-            "algorithm": "basic",
-            "qubits": 1,
-            "time": 0.01
+            "exact_matches": exact_matches,
+            "wrong_position": wrong_position,
+            "position_probabilities": self._classical_position_probabilities(solution, attempt),
+            "quantum_calculated": False
         }
 
-    # === MÉTHODES DE DIAGNOSTIC ===
+    def _classical_position_probabilities(self, solution: List[int], attempt: List[int]) -> List[Dict[str, Any]]:
+        """Probabilités déterministes classiques"""
+        position_probabilities = []
+        for i, (sol_color, att_color) in enumerate(zip(solution, attempt)):
+            prob = 1.0 if sol_color == att_color else 0.0
+            match_type = "exact_match" if sol_color == att_color else ("color_present" if att_color in solution else "no_match")
+
+            position_probabilities.append({
+                "position": i,
+                "exact_match_probability": prob,
+                "match_type": match_type,
+                "confidence": "high",
+                "attempt_color": att_color
+            })
+        return position_probabilities
+
+    # Méthode legacy pour compatibilité
+    async def calculate_quantum_hints(self, solution: List[int], attempt: List[int], shots: int = None) -> Tuple[int, int]:
+        """Compatibilité avec l'ancien code"""
+        result = await self.calculate_quantum_hints_with_probabilities(solution, attempt, shots)
+        return result["exact_matches"], result["wrong_position"]
+
+    def get_quantum_info(self) -> Dict[str, Any]:
+        """Infos sur les capacités quantiques"""
+        return {
+            "backend": "AerSimulator" if self.backend else "None",
+            "max_qubits": self.max_qubits,
+            "default_shots": self.default_shots,
+            "status": "available" if self.backend else "unavailable"
+        }
+
+    # ========================================
+    # DIAGNOSTIC ET TESTS
+    # ========================================
 
     async def test_quantum_backend(self) -> Dict[str, Any]:
         """Teste le backend quantique"""
@@ -498,7 +263,6 @@ class QuantumService:
             qc.cx(0, 1)
             qc.measure_all()
 
-            # Exécution
             job = self.backend.run(qc, shots=100)
             result = job.result()
             counts = result.get_counts()
@@ -508,9 +272,7 @@ class QuantumService:
                 "backend": "AerSimulator",
                 "test_results": counts,
                 "qiskit_version": "2.0.2",
-                "aer_version": "0.17.1",
-                "available_algorithms": ["grover", "superposition", "entanglement"],
-                "new_features": ["quantum_solution_generation", "quantum_hints_calculation"]
+                "aer_version": "0.17.1"
             }
 
         except Exception as e:
@@ -520,85 +282,5 @@ class QuantumService:
                 "backend": "AerSimulator"
             }
 
-    def get_quantum_info(self) -> Dict[str, Any]:
-        """Retourne les informations sur les capacités quantiques"""
-        return {
-            "backend": "AerSimulator",
-            "qiskit_version": "2.0.2",
-            "aer_version": "0.17.1",
-            "max_qubits": self.max_qubits,
-            "default_shots": self.default_shots,
-            "status": "available" if self.backend else "unavailable",
-            "supported_hints": [
-                {
-                    "type": "grover",
-                    "name": "Algorithme de Grover",
-                    "description": "Recherche quantique optimisée",
-                    "cost": 50,
-                    "available": bool(self.backend)
-                },
-                {
-                    "type": "superposition",
-                    "name": "Superposition Quantique",
-                    "description": "Exploration d'états multiples",
-                    "cost": 25,
-                    "available": bool(self.backend)
-                },
-                {
-                    "type": "entanglement",
-                    "name": "Intrication Quantique",
-                    "description": "Révélation de corrélations",
-                    "cost": 35,
-                    "available": bool(self.backend)
-                }
-            ],
-            "new_quantum_features": [
-                {
-                    "type": "solution_generation",
-                    "name": "Génération Quantique de Solution",
-                    "description": "Génération vraiment aléatoire de combinaisons",
-                    "available": bool(self.backend)
-                },
-                {
-                    "type": "hints_calculation",
-                    "name": "Calcul Quantique d'Indices",
-                    "description": "Calcul quantique des bien/mal placés",
-                    "available": bool(self.backend)
-                }
-            ]
-        }
-
-    # === MÉTHODES UTILITAIRES ===
-
-    def create_simple_circuit(self, n_qubits: int = 2) -> 'QuantumCircuit':
-        """Crée un circuit quantique simple pour tests"""
-        qc = QuantumCircuit(n_qubits, n_qubits)
-        qc.h(range(n_qubits))  # Superposition
-        qc.measure_all()
-        return qc
-
-    async def execute_circuit(self, circuit: 'QuantumCircuit', shots: int = None) -> Dict[str, Any]:
-        """Exécute un circuit quantique"""
-        try:
-            if not self.backend:
-                return {"error": "Backend non disponible"}
-
-            shots = shots or self.default_shots
-            job = self.backend.run(circuit, shots=shots)
-            result = job.result()
-
-            return {
-                "counts": result.get_counts(),
-                "shots": shots,
-                "success": True
-            }
-
-        except Exception as e:
-            return {
-                "error": str(e),
-                "success": False
-            }
-
-
-# Instance globale du service quantique
+# Instance globale
 quantum_service = QuantumService()

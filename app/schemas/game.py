@@ -79,23 +79,17 @@ class AttemptCreate(BaseModel):
 
 
 class AttemptResult(BaseModel):
-    """
-    Résultat d'une tentative avec informations quantiques
-     Champs synchronisés avec les modèles
-    """
     model_config = ConfigDict(from_attributes=True)
 
     attempt_number: int = Field(..., description="Numéro de la tentative")
-    combination: List[int] = Field(..., description="Combinaison proposée")
-    exact_matches: int = Field(..., description="Couleurs bien placées (pegs noirs)")
-    position_matches: int = Field(..., description="Couleurs mal placées (pegs blancs)")
+    combination: List[int] = Field(..., description="Combinaison tentée")
+    exact_matches: int = Field(..., description="Nombre de correspondances exactes")
+    position_matches: int = Field(..., description="Nombre de correspondances de position")
     is_correct: bool = Field(..., description="Solution trouvée")
-
-    #  Champs quantiques ajoutés
-    quantum_calculated: bool = Field(default=False, description="Calculé avec algorithmes quantiques")
-    quantum_hint_used: bool = Field(default=False, description="Hint quantique utilisé")
-    quantum_efficiency: Optional[float] = Field(None, description="Efficacité quantique (0-1)")
-
+    quantum_calculated: bool = Field(default=False, description="Calculé quantiquement")
+    quantum_probabilities: Optional[Dict[str, Any]] = Field(None,
+                                                            description="Probabilités quantiques détaillées")  # NOUVEAU !
+    quantum_hint_used: bool = Field(default=False, description="Indice quantique utilisé")
     remaining_attempts: Optional[int] = Field(None, description="Tentatives restantes")
     game_finished: bool = Field(default=False, description="Partie terminée")
 

@@ -437,8 +437,7 @@ class GameService:
             attempt_data: AttemptCreate
     ) -> AttemptResult:
         """
-        Effectue une tentative avec gestion complète de fin de partie
-         Ajout de la logique d'élimination et fin de partie
+        MODIFIÉ: Effectue une tentative avec gestion des probabilités quantiques
         """
         try:
             # Récupération de la partie et vérifications
@@ -474,86 +473,84 @@ class GameService:
             if not all(1 <= color <= game.available_colors for color in attempt_data.combination):
                 raise ValidationError(f"Les couleurs doivent être entre 1 et {game.available_colors}")
 
-
-            # Calcul du résultat
-            result = self._calculate_attempt_result(
+            # === MODIFICATION PRINCIPALE: Calcul avec support quantique ===
+            result = await self._calculate_attempt_result(
                 attempt_data.combination,
-                game.solution
+                game.solution,
+                game  # NOUVEAU: Passer l'objet game complet
             )
 
-            # Création de la tentative
+            # Créer la tentative en base avec les nouvelles données
             attempt = GameAttempt(
-                game_id=game_id,    
+                game_id=game_id,
                 player_id=player_id,
                 attempt_number=current_attempts + 1,
                 combination=attempt_data.combination,
                 correct_positions=result["correct_positions"],
                 correct_colors=result["correct_colors"],
                 is_correct=result["is_winning"],
+                used_quantum_hint=result.get("quantum_calculated", False),
+                hint_type=None,
+                quantum_data=result.get("quantum_probabilities"),  # NOUVEAU: Sauvegarder les données quantiques
                 attempt_score=result["score"],
-                used_quantum_hint=getattr(attempt_data, 'use_quantum_hint', False),
-                hint_type=getattr(attempt_data, 'hint_type', None)
+                time_taken=None
             )
 
             db.add(attempt)
 
             # Mise à jour de la participation
-            participation.attempts_made += 1
+            participation.attempts_made = current_attempts + 1
             participation.score += result["score"]
 
-            # Gestion des cas de fin de partie
+            # Gestion de la fin de partie
             game_finished = False
-            player_eliminated = False
-
-            # Si la tentative est gagnante
             if result["is_winning"]:
-                participation.is_winner = True
                 participation.status = ParticipationStatus.FINISHED.value
-                participation.finished_at = datetime.now(timezone.utc)
+                participation.is_winner = True
+                participation.finished_at = datetime.utcnow()
+                game_finished = True
 
-                # Terminer la partie si mode solo ou si c'est le premier gagnant
-                if game.game_mode == GameMode.SINGLE.value:
+                # Vérifier si c'est le premier gagnant
+                existing_winners = [p for p in game.participations if p.is_winner]
+                if len(existing_winners) <= 1:  # Ce joueur est le premier ou seul gagnant
                     game.status = GameStatus.FINISHED.value
-                    game.finished_at = datetime.now(timezone.utc)
-                    game_finished = True
+                    game.finished_at = datetime.utcnow()
+            else:
+                # Vérifier si le joueur a épuisé ses tentatives
+                if game.max_attempts and participation.attempts_made >= game.max_attempts:
+                    participation.status = ParticipationStatus.ELIMINATED.value
+                    participation.is_eliminated = True
+                    participation.finished_at = datetime.utcnow()
 
-            # Vérifier si le joueur a épuisé ses tentatives
-            elif game.max_attempts and participation.attempts_made >= game.max_attempts:
-                # Le joueur est éliminé
-                participation.is_eliminated = True
-                participation.status = ParticipationStatus.ELIMINATED.value
-                participation.finished_at = datetime.now(timezone.utc)
-                player_eliminated = True
-
-            # Vérifier si la partie doit se terminer
-            if not game_finished:
-                # Vérifier si tous les joueurs sont dans un état final
-                all_players_finished = await self._check_all_players_finished(db, game)
-                if all_players_finished:
-                    game.status = GameStatus.FINISHED.value
-                    game.finished_at = datetime.now(timezone.utc)
-                    game_finished = True
+                    # Vérifier si tous les joueurs sont finis
+                    if await self._check_all_players_finished(db, game):
+                        game.status = GameStatus.FINISHED.value
+                        game.finished_at = datetime.utcnow()
+                        game_finished = True
 
             await db.commit()
             await db.refresh(attempt)
 
-            #Calculer les tentatives restantes
+            # Calculer les tentatives restantes
             remaining_attempts = None
             if game.max_attempts:
                 remaining_attempts = max(0, game.max_attempts - participation.attempts_made)
 
-            # Construire le résultat selon le nouveau schéma
-            return AttemptResult(
+            # === NOUVEAU: Construire le résultat avec données quantiques ===
+            attempt_result = AttemptResult(
                 attempt_number=attempt.attempt_number,
                 combination=attempt.combination,
                 exact_matches=attempt.correct_positions,
                 position_matches=attempt.correct_colors,
                 is_correct=attempt.is_correct,
-                quantum_calculated=False,
+                quantum_calculated=result.get("quantum_calculated", False),
+                quantum_probabilities=result.get("quantum_probabilities"),  # NOUVEAU !
                 quantum_hint_used=attempt.used_quantum_hint,
                 remaining_attempts=remaining_attempts,
                 game_finished=game_finished
             )
+
+            return attempt_result
 
         except Exception as e:
             await db.rollback()
@@ -561,7 +558,147 @@ class GameService:
                 raise
             raise GameError(f"Erreur lors de la tentative: {str(e)}")
 
+    async def _calculate_attempt_result(
+            self,
+            combination: List[int],
+            solution: List[int],
+            game: Game = None  # NOUVEAU: Paramètre game pour détecter le mode quantique
+    ) -> Dict[str, Any]:
+        """
+        MODIFIÉ: Calcule le résultat d'une tentative avec support quantique
+        """
+        is_quantum_game = game and (game.game_type == GameType.QUANTUM.value or game.quantum_enabled)
 
+        if is_quantum_game:
+            # === MODE QUANTIQUE: Utiliser la nouvelle API avec probabilités ===
+            try:
+                quantum_result = await quantum_service.calculate_quantum_hints_with_probabilities(
+                    solution, combination
+                )
+
+                correct_positions = quantum_result["exact_matches"]
+                correct_colors = quantum_result["wrong_position"]
+
+                # Vérifier si c'est gagnant
+                is_winning = correct_positions == len(solution)
+
+                # Calcul du score avec bonus quantique
+                score = calculate_game_score(
+                    len(combination) + 1,
+                    len(solution) * 2,
+                    0  # temps sera ajouté plus tard
+                )
+
+                if is_winning:
+                    score += 500  # Bonus de victoire
+
+                # Bonus quantique supplémentaire
+                if quantum_result.get("quantum_calculated", False):
+                    score += 100  # Bonus pour calcul quantique
+
+                    # Bonus d'incertitude (plus c'est incertain, plus c'est impressionnant)
+                    uncertainty = quantum_result.get("quantum_analysis", {}).get("total_uncertainty", 0)
+                    uncertainty_bonus = int(uncertainty * 50)  # Max 50 points
+                    score += uncertainty_bonus
+
+                print(f"Calcul quantique utilisé: positions={correct_positions}, couleurs={correct_colors}")
+
+                return {
+                    "correct_positions": correct_positions,
+                    "correct_colors": correct_colors,
+                    "is_winning": is_winning,
+                    "score": score,
+                    "quantum_calculated": True,
+                    "quantum_probabilities": quantum_result  # NOUVEAU: Inclure toutes les données quantiques
+                }
+
+            except Exception as e:
+                print(f"Erreur dans le calcul quantique, fallback classique: {e}")
+                # Fallback vers le calcul classique
+                return await self._calculate_classical_attempt_result(combination, solution)
+
+        else:
+            # === MODE CLASSIQUE: Logique existante ===
+            return await self._calculate_classical_attempt_result(combination, solution)
+
+    async def _calculate_classical_attempt_result(
+            self,
+            combination: List[int],
+            solution: List[int]
+    ) -> Dict[str, Any]:
+        """
+        NOUVEAU: Calcul classique séparé pour clarté
+        """
+        correct_positions = 0
+        correct_colors = 0
+
+        # Positions correctes (pegs noirs)
+        solution_copy = solution[:]
+        combination_copy = combination[:]
+
+        for i in range(len(combination)):
+            if combination[i] == solution[i]:
+                correct_positions += 1
+                solution_copy[i] = -1
+                combination_copy[i] = -1
+
+        # Couleurs correctes mais mal placées (pegs blancs)
+        for i, color in enumerate(combination_copy):
+            if color != -1 and color in solution_copy:
+                correct_colors += 1
+                idx = solution_copy.index(color)
+                solution_copy[idx] = -1
+
+        # Vérifier si c'est gagnant
+        is_winning = correct_positions == len(solution)
+
+        # Calcul du score
+        score = calculate_game_score(
+            len([x for x in combination_copy if x != -1]) + 1,
+            len(solution) * 2,
+            0
+        )
+
+        if is_winning:
+            score += 500  # Bonus de victoire
+
+        print(f"Calcul classique utilisé: positions={correct_positions}, couleurs={correct_colors}")
+
+        return {
+            "correct_positions": correct_positions,
+            "correct_colors": correct_colors,
+            "is_winning": is_winning,
+            "score": score,
+            "quantum_calculated": False,
+            "quantum_probabilities": None
+        }
+
+    def _calculate_classical_hints(self, combination: List[int], solution: List[int]) -> tuple[int, int]:
+        """
+        Calcule les indices de manière classique (méthode de fallback)
+        NOUVEAU: Extraite pour réutilisation
+        """
+        correct_positions = 0
+        correct_colors = 0
+
+        # Positions correctes (pegs noirs)
+        solution_copy = solution[:]
+        combination_copy = combination[:]
+
+        for i in range(len(combination)):
+            if combination[i] == solution[i]:
+                correct_positions += 1
+                solution_copy[i] = -1
+                combination_copy[i] = -1
+
+        # Couleurs correctes mais mal placées (pegs blancs)
+        for i, color in enumerate(combination_copy):
+            if color != -1 and color in solution_copy:
+                correct_colors += 1
+                idx = solution_copy.index(color)
+                solution_copy[idx] = -1
+
+        return correct_positions, correct_colors
 
     # === MÉTHODES UTILITAIRES ===
     async def _check_all_players_finished(
@@ -831,52 +968,6 @@ class GameService:
         # Si on n'arrive pas à générer un code unique, utiliser un UUID
         return str(uuid4())[:8].upper()
 
-    def _calculate_attempt_result(
-            self,
-            combination: List[int],
-            solution: List[int]
-    ) -> Dict[str, Any]:
-        """Calcule le résultat d'une tentative"""
-        correct_positions = 0
-        correct_colors = 0
-
-        # Positions correctes (pegs noirs)
-        solution_copy = solution[:]
-        combination_copy = combination[:]
-
-        for i in range(len(combination)):
-            if combination[i] == solution[i]:
-                correct_positions += 1
-                solution_copy[i] = -1
-                combination_copy[i] = -1
-
-        # Couleurs correctes mais mal placées (pegs blancs)
-        for i, color in enumerate(combination_copy):
-            if color != -1 and color in solution_copy:
-                correct_colors += 1
-                idx = solution_copy.index(color)
-                solution_copy[idx] = -1
-
-        # Vérifier si c'est gagnant
-        is_winning = correct_positions == len(solution)
-
-        # Calcul du score
-        score = calculate_game_score(
-            len([x for x in combination_copy if x != -1]) + 1,
-            len(solution) * 2,  # max_attempts basé sur la longueur
-            0  # temps sera ajouté plus tard
-        )
-
-        if is_winning:
-            score += 500  # Bonus de victoire
-
-        return {
-            "correct_positions": correct_positions,
-            "correct_colors": correct_colors,
-            "is_winning": is_winning,
-            "score": score
-        }
-
     async def _add_participant(
             self,
             db: AsyncSession,
@@ -886,12 +977,11 @@ class GameService:
             player_name: Optional[str] = None
     ) -> GameParticipation:
         """Ajoute un participant à une partie"""
-
         participation = GameParticipation(
             game_id=game_id,
             player_id=player_id,
             join_order=join_order,
-            status=ParticipationStatus.WAITING.value  #  utiliser .value
+            status=ParticipationStatus.WAITING.value
         )
 
         db.add(participation)
