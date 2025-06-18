@@ -45,7 +45,7 @@ class GameService:
     ) -> Dict[str, Any]:
         """
         Crée une nouvelle partie
-        CORRECTION: Adaptation aux vrais Enums
+        CORRECTION: Gestion correcte des valeurs None
         """
         try:
             # VÉRIFICATION: Empêcher la création si l'utilisateur est déjà dans une partie active
@@ -54,47 +54,68 @@ class GameService:
             )
 
             if active_participations:
-                #  Accès sécurisé aux données de la partie active
                 participation = active_participations[0]
-                # Les données game sont déjà chargées via selectinload dans get_user_active_participations
                 active_game = participation.game
                 raise GameError(
                     f"Vous participez déjà à une partie active (Room: {active_game.room_code}). "
                     "Quittez d'abord cette partie avant d'en créer une nouvelle."
                 )
 
-            # Configuration des paramètres selon la difficulté
-            if hasattr(game_data, 'difficulty') and game_data.difficulty:
-                difficulty_value = game_data.difficulty
-            else:
-                difficulty_value = "easy"  # Valeur par défaut
+            # CORRECTION: Récupérer la configuration de difficulté
+            difficulty_config = self._get_difficulty_config(game_data.difficulty)
 
-            # Configuration de la longueur de combinaison
-            combination_length = getattr(game_data, 'combination_length', 4)
-            available_colors = getattr(game_data, 'available_colors', 6)
-            max_attempts = getattr(game_data, 'max_attempts', None)
+            # CORRECTION: Assigner les valeurs finales d'abord
+            combination_length = game_data.combination_length if game_data.combination_length is not None else \
+            difficulty_config["length"]
+            available_colors = game_data.available_colors if game_data.available_colors is not None else \
+            difficulty_config["colors"]
+            max_attempts = game_data.max_attempts if game_data.max_attempts is not None else difficulty_config[
+                "attempts"]
 
-            # Génération de la solution
-            solution = generate_solution(combination_length, available_colors)
+            # CORRECTION: Gestion du quantum_enabled selon le game_type
+            quantum_enabled = game_data.quantum_enabled
+            if game_data.game_type == GameType.QUANTUM or (
+                    hasattr(game_data.game_type, 'value') and game_data.game_type.value == 'quantum'):
+                quantum_enabled = True
 
-            # Création de la partie
+            # CORRECTION: Validation après assignation des valeurs
+            if combination_length < 2 or combination_length > 8:
+                raise ValidationError("La longueur de combinaison doit être entre 2 et 8")
+
+            if available_colors < 3 or available_colors > 15:
+                raise ValidationError("Le nombre de couleurs doit être entre 3 et 15")
+
+            if max_attempts is not None and (max_attempts < 1 or max_attempts > 50):
+                raise ValidationError("Le nombre de tentatives doit être entre 1 et 50")
+
+            if game_data.max_players < 1 or game_data.max_players > 8:
+                raise ValidationError("Le nombre de joueurs doit être entre 1 et 8")
+
+            # Génération du code de room unique
+            room_code = await self._generate_unique_room_code(db)
+
+            # Génération de la solution avec les valeurs finales
+            solution = self._generate_solution(combination_length, available_colors)
+
+            # CORRECTION: Création de la partie avec les bonnes valeurs
             game = Game(
-                room_code=generate_room_code(),
-                game_type=game_data.game_type.value if hasattr(game_data.game_type, 'value') else game_data.game_type,
+                room_code=room_code,
+                game_type=str(game_data.game_type.value) if hasattr(game_data.game_type, 'value') else str(game_data.game_type),
                 game_mode=game_data.game_mode.value if hasattr(game_data.game_mode, 'value') else game_data.game_mode,
-                difficulty=difficulty_value,
+                difficulty=game_data.difficulty.value if hasattr(game_data.difficulty,
+                                                                 'value') else game_data.difficulty,
                 combination_length=combination_length,
                 available_colors=available_colors,
                 max_attempts=max_attempts,
-                time_limit=getattr(game_data, 'time_limit', None),
+                time_limit=game_data.time_limit,
                 max_players=game_data.max_players,
                 solution=solution,
-                is_private=getattr(game_data, 'is_private', False),
-                allow_spectators=getattr(game_data, 'allow_spectators', True),
-                enable_chat=getattr(game_data, 'enable_chat', True),
-                quantum_enabled=getattr(game_data, 'quantum_enabled', False),
+                is_private=game_data.is_private,
+                allow_spectators=game_data.allow_spectators,
+                enable_chat=game_data.enable_chat,
+                quantum_enabled=quantum_enabled,
                 creator_id=creator_id,
-                settings=getattr(game_data, 'settings', {})
+                settings=game_data.settings or {}
             )
 
             # Ajout à la base de données
@@ -105,7 +126,7 @@ class GameService:
             # Ajouter TOUJOURS le créateur comme participant
             await self._add_participant(db, game.id, creator_id, join_order=1)
 
-            #  Récupérer l'utilisateur créateur pour le nom
+            # CORRECTION: Récupérer l'utilisateur créateur pour le nom
             creator = await self.user_repo.get_by_id(db, creator_id)
             creator_username = creator.username if creator else "Inconnu"
 
@@ -122,9 +143,9 @@ class GameService:
                 "status": game.status,
                 "quantum_enabled": game.quantum_enabled,
 
-                # Paramètres de jeu
-                "combination_length": game.combination_length,
-                "available_colors": game.available_colors,
+                # Paramètres de jeu (CORRECTION: utiliser les valeurs finales)
+                "combination_length": combination_length,
+                "available_colors": available_colors,
                 "max_players": game.max_players,
 
                 # Configuration avancée
@@ -413,8 +434,8 @@ class GameService:
             attempt_data: AttemptCreate
     ) -> AttemptResult:
         """
-        Effectue une tentative
-        CORRECTION: Compatible avec les nouveaux schémas
+        Effectue une tentative avec gestion complète de fin de partie
+        CORRECTION: Ajout de la logique d'élimination et fin de partie
         """
         try:
             # Récupération de la partie et vérifications
@@ -476,33 +497,58 @@ class GameService:
             participation.attempts_made += 1
             participation.score += result["score"]
 
+            # Gestion des cas de fin de partie
+            game_finished = False
+            player_eliminated = False
+
             # Si la tentative est gagnante
             if result["is_winning"]:
                 participation.is_winner = True
+                participation.status = ParticipationStatus.FINISHED.value
                 participation.finished_at = datetime.now(timezone.utc)
 
                 # Terminer la partie si mode solo ou si c'est le premier gagnant
                 if game.game_mode == GameMode.SINGLE.value:
                     game.status = GameStatus.FINISHED.value
                     game.finished_at = datetime.now(timezone.utc)
+                    game_finished = True
+
+            # Vérifier si le joueur a épuisé ses tentatives
+            elif game.max_attempts and participation.attempts_made >= game.max_attempts:
+                # Le joueur est éliminé
+                participation.is_eliminated = True
+                participation.status = ParticipationStatus.ELIMINATED.value
+                participation.finished_at = datetime.now(timezone.utc)
+                player_eliminated = True
+
+            # Vérifier si la partie doit se terminer
+            if not game_finished:
+                # Vérifier si tous les joueurs sont dans un état final
+                all_players_finished = await self._check_all_players_finished(db, game)
+                if all_players_finished:
+                    game.status = GameStatus.FINISHED.value
+                    game.finished_at = datetime.now(timezone.utc)
+                    game_finished = True
 
             await db.commit()
             await db.refresh(attempt)
 
-            # CORRECTION: Construire le résultat selon le nouveau schéma
+            #Calculer les tentatives restantes
+            remaining_attempts = None
+            if game.max_attempts:
+                remaining_attempts = max(0, game.max_attempts - participation.attempts_made)
+
+            # Construire le résultat selon le nouveau schéma
             return AttemptResult(
                 attempt_number=attempt.attempt_number,
                 combination=attempt.combination,
-                exact_matches=attempt.correct_positions,  # Mapping correct
-                position_matches=attempt.correct_colors,  # Mapping correct
+                exact_matches=attempt.correct_positions,
+                position_matches=attempt.correct_colors,
                 is_correct=attempt.is_correct,
                 quantum_calculated=False,
                 quantum_hint_used=attempt.used_quantum_hint,
-                remaining_attempts=(
-                    game.max_attempts - participation.attempts_made
-                    if game.max_attempts else None
-                ),
-                game_finished=game.status == GameStatus.FINISHED.value
+                remaining_attempts=remaining_attempts,
+                game_finished=game_finished
             )
 
         except Exception as e:
@@ -511,7 +557,39 @@ class GameService:
                 raise
             raise GameError(f"Erreur lors de la tentative: {str(e)}")
 
+
+
     # === MÉTHODES UTILITAIRES ===
+    async def _check_all_players_finished(
+            self,
+            db: AsyncSession,
+            game: Game
+    ) -> bool:
+        """
+        Vérifie si tous les joueurs de la partie sont dans un état final
+
+        Returns:
+            True si tous les joueurs sont 'finished', 'eliminated', ou 'disconnected'
+        """
+        try:
+            final_statuses = [
+                ParticipationStatus.FINISHED.value,
+                ParticipationStatus.ELIMINATED.value,
+                ParticipationStatus.DISCONNECTED.value
+            ]
+
+            # Récupérer toutes les participations de la partie
+            active_participations = [
+                p for p in game.participations
+                if p.status not in final_statuses
+            ]
+
+            # Si aucun joueur actif, la partie peut se terminer
+            return len(active_participations) == 0
+
+        except Exception as e:
+            print(f"Erreur lors de la vérification des joueurs: {e}")
+            return False
 
     async def get_user_current_game(
             self,

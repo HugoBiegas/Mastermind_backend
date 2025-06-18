@@ -22,11 +22,11 @@ class GameCreate(BaseModel):
     game_mode: GameMode = Field(default=GameMode.SINGLE, description="Mode de jeu")
     difficulty: Difficulty = Field(default=Difficulty.MEDIUM, description="Niveau de difficulté")
 
-    # Paramètres de jeu
-    combination_length: int = Field(default=4, ge=2, le=8, description="Longueur de la combinaison")
-    available_colors: int = Field(default=6, ge=3, le=15, description="Nombre de couleurs disponibles")
-    max_attempts: Optional[int] = Field(default=12, ge=1, le=50, description="Tentatives maximales")
-    time_limit: Optional[int] = Field(default=None, ge=60, le=3600, description="Limite de temps (secondes)")
+    # Paramètres de jeu (Pas de valeurs par défaut pour laisser la priorité à la difficulté)
+    combination_length: Optional[int] = Field(None, ge=2, le=8, description="Longueur de la combinaison")
+    available_colors: Optional[int] = Field(None, ge=3, le=15, description="Nombre de couleurs disponibles")
+    max_attempts: Optional[int] = Field(None, ge=1, le=50, description="Tentatives maximales")
+    time_limit: Optional[int] = Field(None, ge=60, le=3600, description="Limite de temps (secondes)")
     max_players: int = Field(default=1, ge=1, le=8, description="Nombre maximum de joueurs")
 
     # Configuration
@@ -47,7 +47,6 @@ class GameCreate(BaseModel):
         if v == GameType.QUANTUM:
             values['quantum_enabled'] = True
         return v
-
 
 class GameUpdate(BaseModel):
     """Schéma pour modifier une partie"""

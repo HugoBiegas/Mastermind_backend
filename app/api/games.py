@@ -220,82 +220,6 @@ async def get_quantum_game_info(
         )
 
 
-@router.post(
-    "/{game_id}/quantum-hint",
-    response_model=QuantumHintResponse,
-    summary="Demander un hint quantique",
-    description="Demande un hint quantique pour aider à résoudre la partie"
-)
-async def request_quantum_hint(
-        game_id: UUID,
-        hint_request: QuantumHintRequest,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database),
-        _: bool = Depends(validate_game_access),
-        game_service = Depends(get_game_service)
-) -> QuantumHintResponse:
-    """
-    Demande un hint quantique pour aider à résoudre la partie
-
-    NOUVEAU: Génération de hints avec algorithmes quantiques
-    """
-    try:
-        # Vérifier que la partie est active et quantique
-        game = await game_service.get_game_details(db, game_id, current_user.id)
-
-        if not game.quantum_enabled:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Les hints quantiques ne sont disponibles que pour les parties quantiques"
-            )
-
-        if game.status != GameStatus.ACTIVE:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La partie doit être active pour demander un hint"
-            )
-
-        # Générer le hint quantique
-        hint_data = await quantum_service.generate_quantum_hint(
-            db=db,
-            game_id=game_id,
-            player_id=current_user.id,
-            hint_type=hint_request.hint_type
-        )
-
-        # Calculer le coût
-        hint_costs = {
-            "grover": 50,
-            "superposition": 25,
-            "entanglement": 35,
-            "basic": 10
-        }
-        cost = hint_costs.get(hint_request.hint_type, 10)
-
-        # Enregistrer l'utilisation du hint (si nécessaire)
-        # await game_service.record_quantum_hint_usage(db, game_id, current_user.id, hint_request.hint_type, cost)
-
-        return QuantumHintResponse(
-            message=hint_data["message"],
-            type=hint_data["type"],
-            confidence=hint_data["confidence"],
-            algorithm=hint_data.get("algorithm", "unknown"),
-            qubits=hint_data.get("qubits", 1),
-            execution_time=hint_data.get("execution_time", 0.0),
-            cost=cost,
-            quantum_data=hint_data
-        )
-
-    except EntityNotFoundError as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la génération du hint quantique: {str(e)}"
-        )
-
-
 @router.get(
     "/quantum/backend-status",
     response_model=Dict[str, Any],
@@ -417,34 +341,6 @@ async def make_attempt(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Erreur lors du traitement de la tentative"
         )
-
-
-@router.post(
-    "/{game_id}/leave",
-    response_model=MessageResponse,
-    summary="Quitter une partie",
-    description="Quitte une partie en cours"
-)
-async def leave_game(
-        game_id: UUID,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database),
-        game_service = Depends(get_game_service)
-) -> MessageResponse:
-    """Quitte une partie en cours"""
-    try:
-        result = await game_service.leave_game(db, game_id, current_user.id)
-        return MessageResponse(message=result["message"])
-
-    except (EntityNotFoundError, GameError) as e:
-        raise create_http_exception_from_error(e)
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Erreur lors de l'abandon de la partie"
-        )
-
 
 @router.get(
     "/leaderboard",
