@@ -1,7 +1,7 @@
 """
 Service de gestion des jeux pour Quantum Mastermind
 Logique métier pour les parties, tentatives et scoring
-CORRECTION: Version fonctionnelle avec les vrais Enums
+ Version fonctionnelle avec les vrais Enums
 """
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -9,18 +9,18 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# CORRECTION: Import des vrais Enums depuis models
+#  Import des vrais Enums depuis models
 from app.models.game import (
     Game, GameParticipation, GameAttempt,
-    GameType, GameMode, GameStatus, Difficulty, ParticipationStatus,
-    generate_room_code, calculate_game_score, generate_solution
+    GameType, GameMode, GameStatus, ParticipationStatus,
+    generate_room_code, calculate_game_score
 )
 from app.repositories.game import GameRepository, GameParticipationRepository, GameAttemptRepository
 from app.repositories.user import UserRepository
 from app.schemas.game import (
-    GameCreate, GameJoin, AttemptCreate, GameFull, GameList,
-    AttemptResult, ParticipantInfo, AttemptInfo
+    GameCreate, GameJoin, AttemptCreate, AttemptResult
 )
+from app.services.quantum import quantum_service
 from app.utils.exceptions import (
     EntityNotFoundError, GameError, GameNotActiveError,
     GameFullError, ValidationError, AuthorizationError
@@ -45,7 +45,7 @@ class GameService:
     ) -> Dict[str, Any]:
         """
         Crée une nouvelle partie
-        CORRECTION: Gestion correcte des valeurs None
+         Gestion correcte des valeurs None
         """
         try:
             # VÉRIFICATION: Empêcher la création si l'utilisateur est déjà dans une partie active
@@ -61,10 +61,10 @@ class GameService:
                     "Quittez d'abord cette partie avant d'en créer une nouvelle."
                 )
 
-            # CORRECTION: Récupérer la configuration de difficulté
+            #  Récupérer la configuration de difficulté
             difficulty_config = self._get_difficulty_config(game_data.difficulty)
 
-            # CORRECTION: Assigner les valeurs finales d'abord
+            #  Assigner les valeurs finales d'abord
             combination_length = game_data.combination_length if game_data.combination_length is not None else \
             difficulty_config["length"]
             available_colors = game_data.available_colors if game_data.available_colors is not None else \
@@ -72,13 +72,13 @@ class GameService:
             max_attempts = game_data.max_attempts if game_data.max_attempts is not None else difficulty_config[
                 "attempts"]
 
-            # CORRECTION: Gestion du quantum_enabled selon le game_type
+            #  Gestion du quantum_enabled selon le game_type
             quantum_enabled = game_data.quantum_enabled
             if game_data.game_type == GameType.QUANTUM or (
                     hasattr(game_data.game_type, 'value') and game_data.game_type.value == 'quantum'):
                 quantum_enabled = True
 
-            # CORRECTION: Validation après assignation des valeurs
+            #  Validation après assignation des valeurs
             if combination_length < 2 or combination_length > 8:
                 raise ValidationError("La longueur de combinaison doit être entre 2 et 8")
 
@@ -94,10 +94,13 @@ class GameService:
             # Génération du code de room unique
             room_code = await self._generate_unique_room_code(db)
 
-            # Génération de la solution avec les valeurs finales
-            solution = self._generate_solution(combination_length, available_colors)
+            # Génération de la solution avec les valeurs finales en quantique si nésésére
+            if quantum_enabled:
+                solution = await quantum_service.generate_quantum_solution(combination_length, available_colors,1024)
+            else:
+                solution = self._generate_solution(combination_length, available_colors)
 
-            # CORRECTION: Création de la partie avec les bonnes valeurs
+            #  Création de la partie avec les bonnes valeurs
             game = Game(
                 room_code=room_code,
                 game_type=str(game_data.game_type.value) if hasattr(game_data.game_type, 'value') else str(game_data.game_type),
@@ -126,7 +129,7 @@ class GameService:
             # Ajouter TOUJOURS le créateur comme participant
             await self._add_participant(db, game.id, creator_id, join_order=1)
 
-            # CORRECTION: Récupérer l'utilisateur créateur pour le nom
+            #  Récupérer l'utilisateur créateur pour le nom
             creator = await self.user_repo.get_by_id(db, creator_id)
             creator_username = creator.username if creator else "Inconnu"
 
@@ -143,7 +146,7 @@ class GameService:
                 "status": game.status,
                 "quantum_enabled": game.quantum_enabled,
 
-                # Paramètres de jeu (CORRECTION: utiliser les valeurs finales)
+                # Paramètres de jeu ( utiliser les valeurs finales)
                 "combination_length": combination_length,
                 "available_colors": available_colors,
                 "max_players": game.max_players,
@@ -231,7 +234,7 @@ class GameService:
     ) -> Dict[str, Any]:
         """
         Rejoint une partie existante
-        CORRECTION: Utilisation des valeurs d'Enums
+         Utilisation des valeurs d'Enums
         """
         try:
             # NOUVELLE VÉRIFICATION : Empêcher de rejoindre si l'utilisateur est déjà dans une partie active
@@ -279,7 +282,7 @@ class GameService:
             if not game:
                 raise EntityNotFoundError("Partie non trouvée")
 
-            # CORRECTION: Vérifications avec les valeurs d'Enums
+            #  Vérifications avec les valeurs d'Enums
             if game.is_full():
                 raise GameFullError(
                     "Partie complète",
@@ -331,7 +334,7 @@ class GameService:
     ) -> Dict[str, Any]:
         """
         Quitte une partie
-        CORRECTION: Retour d'un Dict
+         Retour d'un Dict
         """
         try:
             # Récupération de la participation
@@ -380,7 +383,7 @@ class GameService:
     ) -> Dict[str, Any]:
         """
         Démarre une partie
-        CORRECTION: Utilisation des valeurs d'Enums
+         Utilisation des valeurs d'Enums
         """
         try:
             # Récupération de la partie
@@ -435,7 +438,7 @@ class GameService:
     ) -> AttemptResult:
         """
         Effectue une tentative avec gestion complète de fin de partie
-        CORRECTION: Ajout de la logique d'élimination et fin de partie
+         Ajout de la logique d'élimination et fin de partie
         """
         try:
             # Récupération de la partie et vérifications
@@ -471,6 +474,7 @@ class GameService:
             if not all(1 <= color <= game.available_colors for color in attempt_data.combination):
                 raise ValidationError(f"Les couleurs doivent être entre 1 et {game.available_colors}")
 
+
             # Calcul du résultat
             result = self._calculate_attempt_result(
                 attempt_data.combination,
@@ -479,7 +483,7 @@ class GameService:
 
             # Création de la tentative
             attempt = GameAttempt(
-                game_id=game_id,
+                game_id=game_id,    
                 player_id=player_id,
                 attempt_number=current_attempts + 1,
                 combination=attempt_data.combination,
@@ -686,7 +690,7 @@ class GameService:
     ) -> Dict[str, Any]:
         """
         Récupère les détails complets d'une partie avec tous les champs requis
-        CORRECTION: Retour complet pour le schéma GameFull SANS la solution
+         Retour complet pour le schéma GameFull SANS la solution
         """
         try:
             # Récupérer la partie avec tous les détails (participants, tentatives, créateur)
@@ -804,7 +808,7 @@ class GameService:
 
     def _get_difficulty_config(self, difficulty) -> Dict[str, int]:
         """Récupère la configuration d'une difficulté"""
-        # CORRECTION: Gestion des Enums et des strings
+        #  Gestion des Enums et des strings
         difficulty_value = difficulty.value if hasattr(difficulty, 'value') else difficulty
 
         configs = {
@@ -887,7 +891,7 @@ class GameService:
             game_id=game_id,
             player_id=player_id,
             join_order=join_order,
-            status=ParticipationStatus.WAITING.value  # CORRECTION: utiliser .value
+            status=ParticipationStatus.WAITING.value  #  utiliser .value
         )
 
         db.add(participation)

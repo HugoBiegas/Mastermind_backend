@@ -22,7 +22,7 @@ class QuantumHintType(str, Enum):
 
 
 class QuantumAlgorithm(str, Enum):
-    """Algorithmes quantiques supportés - CORRECTION: Ajout des valeurs du service"""
+    """Algorithmes quantiques supportés - Ajout des valeurs du service"""
     GROVER = "grover"                           # Valeur retournée par le service
     GROVER_SEARCH = "grover_search"            # Nom complet
     QUANTUM = "quantum"                         # Valeur générique
