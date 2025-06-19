@@ -437,7 +437,7 @@ class GameService:
             attempt_data: AttemptCreate
     ) -> AttemptResult:
         """
-        MODIFIÉ: Effectue une tentative avec gestion des probabilités quantiques
+        Effectue une tentative avec gestion des probabilités quantiques et solution automatique
         """
         try:
             # Récupération de la partie et vérifications
@@ -473,14 +473,14 @@ class GameService:
             if not all(1 <= color <= game.available_colors for color in attempt_data.combination):
                 raise ValidationError(f"Les couleurs doivent être entre 1 et {game.available_colors}")
 
-            # === MODIFICATION PRINCIPALE: Calcul avec support quantique ===
+            # === Calcul du résultat avec support quantique ===
             result = await self._calculate_attempt_result(
                 attempt_data.combination,
                 game.solution,
-                game  # NOUVEAU: Passer l'objet game complet
+                game
             )
 
-            # Créer la tentative en base avec les nouvelles données
+            # Créer la tentative en base
             attempt = GameAttempt(
                 game_id=game_id,
                 player_id=player_id,
@@ -491,7 +491,7 @@ class GameService:
                 is_correct=result["is_winning"],
                 used_quantum_hint=result.get("quantum_calculated", False),
                 hint_type=None,
-                quantum_data=result.get("quantum_probabilities"),  # NOUVEAU: Sauvegarder les données quantiques
+                quantum_data=result.get("quantum_probabilities"),
                 attempt_score=result["score"],
                 time_taken=None
             )
@@ -504,7 +504,10 @@ class GameService:
 
             # Gestion de la fin de partie
             game_finished = False
+            player_eliminated = False
+
             if result["is_winning"]:
+                # Le joueur a gagné
                 participation.status = ParticipationStatus.FINISHED.value
                 participation.is_winner = True
                 participation.finished_at = datetime.utcnow()
@@ -521,6 +524,7 @@ class GameService:
                     participation.status = ParticipationStatus.ELIMINATED.value
                     participation.is_eliminated = True
                     participation.finished_at = datetime.utcnow()
+                    player_eliminated = True
 
                     # Vérifier si tous les joueurs sont finis
                     if await self._check_all_players_finished(db, game):
@@ -536,18 +540,41 @@ class GameService:
             if game.max_attempts:
                 remaining_attempts = max(0, game.max_attempts - participation.attempts_made)
 
-            # === NOUVEAU: Construire le résultat avec données quantiques ===
+            # === DÉTERMINER SI LA SOLUTION DOIT ÊTRE RÉVÉLÉE ===
+            revealed_solution = None
+            should_reveal_solution = (
+                    result["is_winning"] or  # Joueur a gagné
+                    player_eliminated or  # Joueur éliminé
+                    game_finished  # Partie terminée
+            )
+
+            if should_reveal_solution:
+                revealed_solution = game.solution
+                print(
+                    f"🎯 Solution révélée: {revealed_solution} (raison: {'victoire' if result['is_winning'] else 'élimination' if player_eliminated else 'fin de partie'})")
+
+            # === CONSTRUCTION DU RÉSULTAT AVEC TOUS LES CHAMPS OBLIGATOIRES ===
             attempt_result = AttemptResult(
+                id=attempt.id,
                 attempt_number=attempt.attempt_number,
                 combination=attempt.combination,
-                exact_matches=attempt.correct_positions,
-                position_matches=attempt.correct_colors,
-                is_correct=attempt.is_correct,
-                quantum_calculated=result.get("quantum_calculated", False),
-                quantum_probabilities=result.get("quantum_probabilities"),  # NOUVEAU !
-                quantum_hint_used=attempt.used_quantum_hint,
+                exact_matches=attempt.correct_positions,  # Mapping correct
+                position_matches=attempt.correct_colors,  # Mapping correct
+                is_winning=attempt.is_correct,  # Champ principal
+                score=attempt.attempt_score,  # Score
+                time_taken=attempt.time_taken,
+                game_finished=game_finished or player_eliminated,
+                game_status=game.status,
                 remaining_attempts=remaining_attempts,
-                game_finished=game_finished
+                quantum_calculated=result.get("quantum_calculated", False),
+                quantum_probabilities=result.get("quantum_probabilities"),
+                quantum_hint_used=attempt.used_quantum_hint,
+                solution=revealed_solution,
+
+                # Champs legacy automatiquement calculés par les validators
+                is_correct=attempt.is_correct,
+                correct_positions=attempt.correct_positions,
+                correct_colors=attempt.correct_colors
             )
 
             return attempt_result
@@ -558,26 +585,35 @@ class GameService:
                 raise
             raise GameError(f"Erreur lors de la tentative: {str(e)}")
 
+    async def _check_all_players_finished(self, db: AsyncSession, game) -> bool:
+        """Vérifie si tous les joueurs ont terminé leur partie"""
+        active_players = [
+            p for p in game.participations
+            if p.status in [ParticipationStatus.ACTIVE.value, ParticipationStatus.READY.value]
+        ]
+        return len(active_players) == 0
+
     async def _calculate_attempt_result(
             self,
             combination: List[int],
             solution: List[int],
-            game: Game = None  # NOUVEAU: Paramètre game pour détecter le mode quantique
+            game: Game = None
     ) -> Dict[str, Any]:
         """
-        MODIFIÉ: Calcule le résultat d'une tentative avec support quantique
+        Calcule le résultat d'une tentative avec support quantique - CORRIGÉ
         """
         is_quantum_game = game and (game.game_type == GameType.QUANTUM.value or game.quantum_enabled)
 
         if is_quantum_game:
-            # === MODE QUANTIQUE: Utiliser la nouvelle API avec probabilités ===
+            # === MODE QUANTIQUE ===
             try:
                 quantum_result = await quantum_service.calculate_quantum_hints_with_probabilities(
                     solution, combination
                 )
 
-                correct_positions = quantum_result["exact_matches"]
-                correct_colors = quantum_result["wrong_position"]
+                # CORRECTION: Utiliser les bons noms de champs du service quantique
+                correct_positions = quantum_result["exact_matches"]  # correct_positions vient de exact_matches
+                correct_colors = quantum_result["wrong_position"]  # correct_colors vient de wrong_position
 
                 # Vérifier si c'est gagnant
                 is_winning = correct_positions == len(solution)
@@ -596,20 +632,15 @@ class GameService:
                 if quantum_result.get("quantum_calculated", False):
                     score += 100  # Bonus pour calcul quantique
 
-                    # Bonus d'incertitude (plus c'est incertain, plus c'est impressionnant)
-                    uncertainty = quantum_result.get("quantum_analysis", {}).get("total_uncertainty", 0)
-                    uncertainty_bonus = int(uncertainty * 50)  # Max 50 points
-                    score += uncertainty_bonus
-
                 print(f"Calcul quantique utilisé: positions={correct_positions}, couleurs={correct_colors}")
 
                 return {
-                    "correct_positions": correct_positions,
-                    "correct_colors": correct_colors,
+                    "correct_positions": correct_positions,  # Ce que la DB attend
+                    "correct_colors": correct_colors,  # Ce que la DB attend
                     "is_winning": is_winning,
                     "score": score,
                     "quantum_calculated": True,
-                    "quantum_probabilities": quantum_result  # NOUVEAU: Inclure toutes les données quantiques
+                    "quantum_probabilities": quantum_result
                 }
 
             except Exception as e:
@@ -618,7 +649,7 @@ class GameService:
                 return await self._calculate_classical_attempt_result(combination, solution)
 
         else:
-            # === MODE CLASSIQUE: Logique existante ===
+            # === MODE CLASSIQUE ===
             return await self._calculate_classical_attempt_result(combination, solution)
 
     async def _calculate_classical_attempt_result(
@@ -627,7 +658,7 @@ class GameService:
             solution: List[int]
     ) -> Dict[str, Any]:
         """
-        NOUVEAU: Calcul classique séparé pour clarté
+        Calcul classique séparé pour clarté - CORRIGÉ
         """
         correct_positions = 0
         correct_colors = 0
@@ -654,7 +685,7 @@ class GameService:
 
         # Calcul du score
         score = calculate_game_score(
-            len([x for x in combination_copy if x != -1]) + 1,
+            len(combination) + 1,
             len(solution) * 2,
             0
         )
@@ -665,8 +696,8 @@ class GameService:
         print(f"Calcul classique utilisé: positions={correct_positions}, couleurs={correct_colors}")
 
         return {
-            "correct_positions": correct_positions,
-            "correct_colors": correct_colors,
+            "correct_positions": correct_positions,  # Ce que la DB attend
+            "correct_colors": correct_colors,  # Ce que la DB attend
             "is_winning": is_winning,
             "score": score,
             "quantum_calculated": False,

@@ -79,20 +79,53 @@ class AttemptCreate(BaseModel):
 
 
 class AttemptResult(BaseModel):
+    """Résultat d'une tentative - SCHEMA FINAL CORRIGÉ"""
     model_config = ConfigDict(from_attributes=True)
 
+    # Champs obligatoires de base
+    id: UUID = Field(..., description="ID de la tentative")
     attempt_number: int = Field(..., description="Numéro de la tentative")
     combination: List[int] = Field(..., description="Combinaison tentée")
+
+    # Résultats - NOMS CORRECTS pour l'API
     exact_matches: int = Field(..., description="Nombre de correspondances exactes")
     position_matches: int = Field(..., description="Nombre de correspondances de position")
-    is_correct: bool = Field(..., description="Solution trouvée")
-    quantum_calculated: bool = Field(default=False, description="Calculé quantiquement")
-    quantum_probabilities: Optional[Dict[str, Any]] = Field(None,
-                                                            description="Probabilités quantiques détaillées")  # NOUVEAU !
-    quantum_hint_used: bool = Field(default=False, description="Indice quantique utilisé")
-    remaining_attempts: Optional[int] = Field(None, description="Tentatives restantes")
-    game_finished: bool = Field(default=False, description="Partie terminée")
+    is_winning: bool = Field(..., description="Tentative gagnante")
+    score: int = Field(..., description="Score de la tentative")
 
+    # Champs optionnels
+    time_taken: Optional[int] = Field(None, description="Temps pris (ms)")
+    game_finished: bool = Field(default=False, description="Partie terminée")
+    game_status: Optional[str] = Field(None, description="Statut de la partie")
+    remaining_attempts: Optional[int] = Field(None, description="Tentatives restantes")
+
+    # Champs quantiques
+    quantum_calculated: bool = Field(default=False, description="Calculé quantiquement")
+    quantum_probabilities: Optional[Dict[str, Any]] = Field(None, description="Probabilités quantiques détaillées")
+    quantum_hint_used: bool = Field(default=False, description="Hint quantique utilisé")
+
+    #Solution automatique
+    solution: Optional[List[int]] = Field(None, description="Solution révélée si partie terminée")
+
+    # Propriétés legacy pour rétrocompatibilité frontend
+    is_correct: Optional[bool] = Field(None, description="Alias pour is_winning")
+    correct_positions: Optional[int] = Field(None, description="Alias pour exact_matches")
+    correct_colors: Optional[int] = Field(None, description="Alias pour position_matches")
+
+    @validator('is_correct', pre=True, always=True)
+    def set_is_correct(cls, v, values):
+        """Assure la rétrocompatibilité avec is_correct"""
+        return values.get('is_winning', v)
+
+    @validator('correct_positions', pre=True, always=True)
+    def set_correct_positions(cls, v, values):
+        """Assure la rétrocompatibilité avec correct_positions"""
+        return values.get('exact_matches', v)
+
+    @validator('correct_colors', pre=True, always=True)
+    def set_correct_colors(cls, v, values):
+        """Assure la rétrocompatibilité avec correct_colors"""
+        return values.get('position_matches', v)
 
 class GameCreateResponse(BaseModel):
     """Réponse de création de partie avec tous les champs nécessaires"""
