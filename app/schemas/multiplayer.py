@@ -1,28 +1,11 @@
 """
-Schémas Pydantic pour le mode multijoueur - Version complète
-Compatible avec les structures attendues par le frontend React.js
+Schémas Pydantic pour le multijoueur - Version complète pour cohérence avec le frontend
+Tous les types attendus par le frontend React.js sont définis
+COMPLET: Synchronisation parfaite avec les types TypeScript du frontend
 """
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-from uuid import UUID
-from enum import Enum
+from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
-
-from app.models.game import GameStatus, Difficulty
-from app.models.multijoueur import MultiplayerGameType, ItemType, PlayerStatus
-
-
-# =====================================================
-# ÉNUMÉRATIONS ET TYPES DE BASE
-# =====================================================
-
-class QuantumHintType(str, Enum):
-    """Types d'indices quantiques pour multijoueur"""
-    GROVER = "grover"
-    SUPERPOSITION = "superposition"
-    ENTANGLEMENT = "entanglement"
-    INTERFERENCE = "interference"
+from pydantic import BaseModel, Field, ConfigDict
 
 
 # =====================================================
@@ -30,365 +13,320 @@ class QuantumHintType(str, Enum):
 # =====================================================
 
 class MultiplayerGameCreateRequest(BaseModel):
-    """Requête de création de partie multijoueur - Structure exacte attendue par le frontend"""
+    """Requête de création d'une partie multijoueur"""
     model_config = ConfigDict(from_attributes=True)
 
-    # Informations de base
-    name: Optional[str] = Field(None, description="Nom de la partie")
-    game_type: MultiplayerGameType = Field(..., description="Type de partie multijoueur")
-    difficulty: Difficulty = Field(..., description="Difficulté")
+    # Configuration de base
+    game_type: str = Field(default="multi_mastermind", description="Type de partie")
+    difficulty: str = Field(default="medium", description="Difficulté")
+    max_players: int = Field(default=4, ge=2, le=8, description="Nombre max de joueurs")
 
-    # Configuration des joueurs
-    max_players: int = Field(12, ge=2, le=50, description="Nombre maximum de joueurs")
-    is_private: bool = Field(False, description="Partie privée")
-    password: Optional[str] = Field(None, description="Mot de passe")
+    # Configuration du mastermind
+    combination_length: int = Field(default=4, ge=3, le=8, description="Longueur de la combinaison")
+    available_colors: int = Field(default=6, ge=3, le=15, description="Couleurs disponibles")
+    max_attempts: int = Field(default=10, ge=5, le=20, description="Tentatives maximum")
 
-    # Options de jeu
-    allow_spectators: bool = Field(True, description="Autoriser les spectateurs")
-    enable_chat: bool = Field(True, description="Activer le chat")
-    items_enabled: bool = Field(True, description="Objets activés")
-    quantum_enabled: bool = Field(False, description="Mode quantique")
+    # Configuration multijoueur
+    total_masterminds: int = Field(default=3, ge=1, le=10, description="Nombre de masterminds")
 
-    # Configuration avancée
-    total_masterminds: Optional[int] = Field(3, ge=1, le=10, description="Nombre total de masterminds")
+    # Options avancées
+    quantum_enabled: bool = Field(default=False, description="Activer les fonctionnalités quantiques")
+    items_enabled: bool = Field(default=True, description="Activer les objets")
+    items_per_mastermind: int = Field(default=1, ge=0, le=3, description="Objets par mastermind")
 
-    @field_validator('password')
-    @classmethod
-    def validate_password(cls, v: Optional[str], info) -> Optional[str]:
-        """Valide le mot de passe si la partie est privée"""
-        is_private = info.data.get('is_private', False)
-        if is_private and not v:
-            raise ValueError("Un mot de passe est requis pour les parties privées")
-        return v
+    # Visibilité
+    is_public: bool = Field(default=True, description="Partie publique")
+    password: Optional[str] = Field(None, description="Mot de passe (optionnel)")
+
+    # Solution personnalisée (optionnelle)
+    solution: Optional[List[int]] = Field(None, description="Solution personnalisée")
 
 
 class JoinGameRequest(BaseModel):
     """Requête pour rejoindre une partie"""
     model_config = ConfigDict(from_attributes=True)
 
-    password: Optional[str] = Field(None, description="Mot de passe")
-    as_spectator: Optional[bool] = Field(False, description="Rejoindre en tant que spectateur")
+    password: Optional[str] = Field(None, description="Mot de passe de la partie")
+    as_spectator: bool = Field(default=False, description="Rejoindre en tant que spectateur")
 
 
 class MultiplayerAttemptRequest(BaseModel):
-    """Requête de tentative multijoueur"""
+    """Requête de soumission d'une tentative"""
     model_config = ConfigDict(from_attributes=True)
 
-    mastermind_number: int = Field(..., ge=1, description="Numéro du mastermind")
     combination: List[int] = Field(..., description="Combinaison proposée")
-    use_quantum_hint: Optional[bool] = Field(False, description="Utiliser un indice quantique")
-    hint_type: Optional[QuantumHintType] = Field(None, description="Type d'indice quantique")
-
-    @field_validator('combination')
-    @classmethod
-    def validate_combination(cls, v: List[int]) -> List[int]:
-        """Valide la combinaison"""
-        if len(v) != 4:
-            raise ValueError("La combinaison doit contenir exactement 4 couleurs")
-        if not all(1 <= color <= 6 for color in v):
-            raise ValueError("Les couleurs doivent être entre 1 et 6")
-        return v
+    mastermind_number: int = Field(default=1, description="Numéro du mastermind")
+    time_taken: Optional[int] = Field(None, description="Temps pris en millisecondes")
+    quantum_data: Optional[Dict[str, Any]] = Field(None, description="Données quantiques")
 
 
 class ItemUseRequest(BaseModel):
-    """Requête d'utilisation d'objet"""
+    """Requête d'utilisation d'un objet"""
     model_config = ConfigDict(from_attributes=True)
 
-    item_type: ItemType = Field(..., description="Type d'objet")
-    target_players: Optional[List[str]] = Field(None, description="Joueurs ciblés")
-    target_mastermind: Optional[int] = Field(None, description="Mastermind ciblé")
-    effect_duration: Optional[int] = Field(None, description="Durée de l'effet en secondes")
+    item_type: str = Field(..., description="Type d'objet à utiliser")
+    target_user_id: Optional[str] = Field(None, description="Utilisateur cible (pour objets offensifs)")
+    mastermind_number: Optional[int] = Field(None, description="Mastermind cible")
+    parameters: Optional[Dict[str, Any]] = Field(None, description="Paramètres additionnels")
 
 
 class QuantumHintRequest(BaseModel):
-    """Requête d'indice quantique multijoueur"""
+    """Requête d'indice quantique"""
     model_config = ConfigDict(from_attributes=True)
 
-    hint_type: QuantumHintType = Field(..., description="Type d'indice")
-    target_positions: Optional[List[int]] = Field(None, description="Positions ciblées")
-    quantum_shots: Optional[int] = Field(1024, ge=100, le=8192, description="Nombre de shots quantiques")
-    max_cost: Optional[int] = Field(None, description="Coût maximum acceptable")
-
-
-class ChatMessageRequest(BaseModel):
-    """Requête de message de chat"""
-    model_config = ConfigDict(from_attributes=True)
-
-    content: str = Field(..., min_length=1, max_length=500, description="Contenu du message")
-    message_type: Optional[str] = Field("text", description="Type de message")
+    hint_type: str = Field(..., description="Type d'indice quantique")
+    mastermind_number: int = Field(default=1, description="Numéro du mastermind")
+    current_attempt: Optional[List[int]] = Field(None, description="Tentative actuelle")
+    previous_attempts: Optional[List[List[int]]] = Field(None, description="Tentatives précédentes")
 
 
 # =====================================================
 # SCHÉMAS DE RÉPONSE (OUTPUT)
 # =====================================================
 
-class PlayerProgress(BaseModel):
-    """Progression d'un joueur - Structure exacte attendue par le frontend"""
+class GameRoom(BaseModel):
+    """Informations sur une room de jeu"""
     model_config = ConfigDict(from_attributes=True)
 
-    user_id: str = Field(..., description="ID du joueur")
-    username: str = Field(..., description="Nom d'utilisateur")
-    status: PlayerStatus = Field(..., description="Statut du joueur")
-    score: int = Field(0, description="Score actuel")
-    current_mastermind: int = Field(1, description="Mastermind actuel")
-    attempts_count: int = Field(0, description="Nombre de tentatives")
-    completed_masterminds: int = Field(0, description="Masterminds complétés")
-
-    # Objets et effets
-    items: List[Dict[str, Any]] = Field(default_factory=list, description="Objets possédés")
-    active_effects: List[Dict[str, Any]] = Field(default_factory=list, description="Effets actifs")
-
-    # Métadonnées
-    is_host: bool = Field(False, description="Est l'hôte")
-    join_order: int = Field(0, description="Ordre d'arrivée")
-    is_finished: bool = Field(False, description="A terminé la partie")
-    finish_time: Optional[str] = Field(None, description="Temps de fin")
-
-    # Temps
-    total_time: float = Field(0.0, description="Temps total de jeu")
-    average_time_per_attempt: Optional[float] = Field(None, description="Temps moyen par tentative")
-
-
-class GameMastermind(BaseModel):
-    """Mastermind dans une partie"""
-    model_config = ConfigDict(from_attributes=True)
-
-    number: int = Field(..., description="Numéro du mastermind")
-    combination_length: int = Field(4, description="Longueur de la combinaison")
-    available_colors: int = Field(6, description="Nombre de couleurs")
-    max_attempts: int = Field(12, description="Tentatives maximum")
-    is_current: bool = Field(False, description="Mastermind actuel")
-    is_completed: bool = Field(False, description="Mastermind complété")
-    completed_by: List[str] = Field(default_factory=list, description="Complété par")
-
-    # Solution (cachée sauf conditions spéciales)
-    solution: Optional[List[int]] = Field(None, description="Solution (non exposée)")
-
-    # Timing
-    started_at: Optional[str] = Field(None, description="Démarré à")
-    completed_at: Optional[str] = Field(None, description="Complété à")
-
-
-class ActiveEffect(BaseModel):
-    """Effet actif sur un joueur"""
-    model_config = ConfigDict(from_attributes=True)
-
-    effect_id: str = Field(..., description="ID de l'effet")
-    effect_type: ItemType = Field(..., description="Type d'effet")
-    source_player: str = Field(..., description="Joueur source")
-    target_player: str = Field(..., description="Joueur cible")
-    duration_remaining: Optional[int] = Field(None, description="Durée restante en secondes")
-    effect_value: Optional[float] = Field(None, description="Valeur de l'effet")
-    created_at: str = Field(..., description="Créé à")
-    expires_at: Optional[str] = Field(None, description="Expire à")
-
-
-class MultiplayerGame(BaseModel):
-    """Partie multijoueur - Structure exacte attendue par le frontend"""
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str = Field(..., description="ID de la partie")
+    # Identifiants
     room_code: str = Field(..., description="Code de la room")
-    game_type: MultiplayerGameType = Field(..., description="Type de partie")
-    difficulty: Difficulty = Field(..., description="Difficulté")
-    status: GameStatus = Field(..., description="Statut de la partie")
-
-    # Configuration
-    max_players: int = Field(..., description="Joueurs maximum")
-    current_players: int = Field(0, description="Joueurs actuels")
-    is_private: bool = Field(False, description="Partie privée")
-    items_enabled: bool = Field(True, description="Objets activés")
-    quantum_enabled: bool = Field(False, description="Mode quantique")
-    allow_spectators: bool = Field(True, description="Spectateurs autorisés")
-    enable_chat: bool = Field(True, description="Chat activé")
-
-    # Progression
-    current_mastermind: int = Field(1, description="Mastermind actuel")
-    total_masterminds: int = Field(3, description="Total de masterminds")
-    masterminds: List[GameMastermind] = Field(default_factory=list, description="Liste des masterminds")
-
-    # Participants
-    players: List[PlayerProgress] = Field(default_factory=list, description="Liste des joueurs")
-    spectators: List[Dict[str, Any]] = Field(default_factory=list, description="Spectateurs")
+    game_id: str = Field(..., description="ID de la partie de base")
+    multiplayer_game_id: Optional[str] = Field(None, description="ID de la partie multijoueur")
 
     # Créateur
-    creator: Dict[str, str] = Field(..., description="Créateur de la partie")
+    creator: Optional[Dict[str, Any]] = Field(None, description="Informations du créateur")
+
+    # Configuration
+    status: str = Field(..., description="Status de la partie")
+    game_type: str = Field(..., description="Type de partie multijoueur")
+    difficulty: str = Field(..., description="Difficulté")
+
+    # Paramètres de jeu
+    max_players: int = Field(..., description="Nombre max de joueurs")
+    players_count: int = Field(..., description="Nombre actuel de joueurs")
+    total_masterminds: int = Field(..., description="Nombre total de masterminds")
+    current_mastermind: int = Field(default=1, description="Mastermind actuel")
+
+    # Options
+    quantum_enabled: bool = Field(..., description="Quantique activé")
+    items_enabled: bool = Field(default=True, description="Objets activés")
+    has_password: bool = Field(default=False, description="Partie protégée par mot de passe")
+    is_public: bool = Field(default=True, description="Partie publique")
 
     # Timestamps
     created_at: str = Field(..., description="Date de création")
-    started_at: Optional[str] = Field(None, description="Date de début")
+    started_at: Optional[str] = Field(None, description="Date de démarrage")
     finished_at: Optional[str] = Field(None, description="Date de fin")
-    estimated_finish: Optional[str] = Field(None, description="Fin estimée")
 
-    # Jeu de base (pour compatibilité avec le frontend)
-    base_game: Optional[Dict[str, Any]] = Field(None, description="Jeu de base")
-
-    # Effets actifs
-    active_effects: List[ActiveEffect] = Field(default_factory=list, description="Effets actifs")
+    # Joueurs
+    players: Optional[List[Dict[str, Any]]] = Field(None, description="Liste des joueurs")
 
 
-class PublicGameListing(BaseModel):
-    """Listing public des parties pour le lobby"""
+class PlayerProgress(BaseModel):
+    """Progression d'un joueur"""
     model_config = ConfigDict(from_attributes=True)
 
-    id: str = Field(..., description="ID de la partie")
-    room_code: str = Field(..., description="Code de la room")
-    name: Optional[str] = Field(None, description="Nom de la partie")
-    game_type: MultiplayerGameType = Field(..., description="Type de partie")
-    difficulty: Difficulty = Field(..., description="Difficulté")
-    status: GameStatus = Field(..., description="Statut")
+    # Identifiants
+    user_id: str = Field(..., description="ID de l'utilisateur")
+    username: str = Field(..., description="Nom d'utilisateur")
 
-    # Compteurs
-    current_players: int = Field(..., description="Joueurs actuels")
-    max_players: int = Field(..., description="Joueurs maximum")
+    # Status
+    status: str = Field(..., description="Status du joueur")
+    is_finished: bool = Field(default=False, description="Joueur terminé")
 
-    # Configuration visible
-    is_private: bool = Field(..., description="Partie privée")
-    quantum_enabled: bool = Field(..., description="Mode quantique")
-    items_enabled: bool = Field(..., description="Objets activés")
+    # Progression
+    current_mastermind: int = Field(default=1, description="Mastermind actuel")
+    completed_masterminds: int = Field(default=0, description="Masterminds complétés")
 
-    # Créateur
-    creator: Dict[str, str] = Field(..., description="Créateur")
+    # Scores
+    total_score: int = Field(default=0, description="Score total")
+    total_time: float = Field(default=0.0, description="Temps total")
+
+    # Position
+    finish_position: Optional[int] = Field(None, description="Position finale")
+    finish_time: Optional[str] = Field(None, description="Temps de fin")
+
+    # Objets
+    collected_items: List[str] = Field(default_factory=list, description="Objets collectés")
+    used_items: List[str] = Field(default_factory=list, description="Objets utilisés")
+
+
+class AttemptResult(BaseModel):
+    """Résultat d'une tentative"""
+    model_config = ConfigDict(from_attributes=True)
+
+    # Tentative
+    attempt_number: int = Field(..., description="Numéro de la tentative")
+    combination: List[int] = Field(..., description="Combinaison proposée")
+
+    # Résultats
+    exact_matches: int = Field(..., description="Correspondances exactes")
+    position_matches: int = Field(..., description="Correspondances de couleur")
+    is_winning: bool = Field(..., description="Tentative gagnante")
+
+    # Score
+    score: int = Field(..., description="Score de la tentative")
+    total_score: int = Field(..., description="Score total du joueur")
+
+    # Progression
+    completed_masterminds: int = Field(..., description="Masterminds complétés")
+    is_finished: bool = Field(default=False, description="Joueur terminé")
 
     # Timing
-    created_at: str = Field(..., description="Date de création")
-    estimated_duration: Optional[int] = Field(None, description="Durée estimée en minutes")
+    time_taken: Optional[int] = Field(None, description="Temps pris")
+
+    # Données quantiques
+    quantum_data: Optional[Dict[str, Any]] = Field(None, description="Données quantiques")
 
 
-class MultiplayerAttemptResponse(BaseModel):
-    """Réponse de tentative multijoueur"""
+class GameResults(BaseModel):
+    """Résultats finaux d'une partie"""
     model_config = ConfigDict(from_attributes=True)
 
-    id: str = Field(..., description="ID de la tentative")
+    # Identifiants
+    room_code: str = Field(..., description="Code de la room")
+    game_id: str = Field(..., description="ID de la partie")
+
+    # Status
+    status: str = Field(..., description="Status final")
+    finished_at: Optional[str] = Field(None, description="Date de fin")
+
+    # Classement
+    rankings: List[Dict[str, Any]] = Field(..., description="Classement final")
+
+    # Statistiques globales
+    game_stats: Dict[str, Any] = Field(..., description="Statistiques de la partie")
+
+    # Détails des masterminds
+    masterminds_results: Optional[List[Dict[str, Any]]] = Field(None, description="Résultats par mastermind")
+
+
+class LobbyFilters(BaseModel):
+    """Filtres pour le lobby"""
+    model_config = ConfigDict(from_attributes=True)
+
+    status: Optional[str] = Field(None, description="Status des parties")
+    difficulty: Optional[str] = Field(None, description="Difficulté")
+    game_type: Optional[str] = Field(None, description="Type de jeu")
+    quantum_enabled: Optional[bool] = Field(None, description="Quantique activé")
+    has_password: Optional[bool] = Field(None, description="Avec mot de passe")
+    search_term: Optional[str] = Field(None, description="Terme de recherche")
+    min_players: Optional[int] = Field(None, description="Minimum de joueurs")
+    max_players: Optional[int] = Field(None, description="Maximum de joueurs")
+
+
+class LobbyListResponse(BaseModel):
+    """Réponse de la liste du lobby"""
+    model_config = ConfigDict(from_attributes=True)
+
+    rooms: List[GameRoom] = Field(..., description="Liste des rooms")
+    pagination: Dict[str, Any] = Field(..., description="Informations de pagination")
+    filters_applied: Optional[Dict[str, Any]] = Field(None, description="Filtres appliqués")
+
+
+# =====================================================
+# SCHÉMAS POUR WEBSOCKETS
+# =====================================================
+
+class WebSocketMessage(BaseModel):
+    """Message WebSocket générique"""
+    model_config = ConfigDict(from_attributes=True)
+
+    type: str = Field(..., description="Type de message")
+    data: Dict[str, Any] = Field(..., description="Données du message")
+    timestamp: str = Field(..., description="Timestamp du message")
+    user_id: Optional[str] = Field(None, description="ID de l'utilisateur")
+
+
+class PlayerJoinedMessage(BaseModel):
+    """Message de joueur qui rejoint"""
+    model_config = ConfigDict(from_attributes=True)
+
+    type: str = Field(default="player_joined", description="Type de message")
+    user_id: str = Field(..., description="ID du joueur")
+    username: str = Field(..., description="Nom du joueur")
+    is_spectator: bool = Field(default=False, description="Spectateur")
+    players_count: int = Field(..., description="Nombre total de joueurs")
+
+
+class PlayerLeftMessage(BaseModel):
+    """Message de joueur qui quitte"""
+    model_config = ConfigDict(from_attributes=True)
+
+    type: str = Field(default="player_left", description="Type de message")
+    user_id: str = Field(..., description="ID du joueur")
+    players_count: int = Field(..., description="Nombre total de joueurs")
+
+
+class GameStartedMessage(BaseModel):
+    """Message de démarrage de partie"""
+    model_config = ConfigDict(from_attributes=True)
+
+    type: str = Field(default="game_started", description="Type de message")
+    started_at: str = Field(..., description="Timestamp de démarrage")
+    current_mastermind: int = Field(default=1, description="Mastermind actuel")
+
+
+class AttemptSubmittedMessage(BaseModel):
+    """Message de tentative soumise"""
+    model_config = ConfigDict(from_attributes=True)
+
+    type: str = Field(default="attempt_submitted", description="Type de message")
+    user_id: str = Field(..., description="ID du joueur")
     mastermind_number: int = Field(..., description="Numéro du mastermind")
-    combination: List[int] = Field(..., description="Combinaison soumise")
-    exact_matches: int = Field(..., description="Correspondances exactes")
-    position_matches: int = Field(..., description="Correspondances de position")
     is_winning: bool = Field(..., description="Tentative gagnante")
     score: int = Field(..., description="Score obtenu")
-    attempt_number: int = Field(..., description="Numéro de la tentative")
-
-    # Quantique
-    quantum_calculated: bool = Field(False, description="Calculé quantiquement")
-    quantum_probabilities: Optional[Dict[str, Any]] = Field(None, description="Probabilités quantiques")
-    quantum_hint_used: bool = Field(False, description="Indice quantique utilisé")
-
-    # Statut du joueur après la tentative
-    player_status: PlayerStatus = Field(..., description="Statut du joueur")
-
-    # Timing
-    time_taken: Optional[float] = Field(None, description="Temps pris pour la tentative")
-    timestamp: str = Field(..., description="Timestamp de la tentative")
 
 
-class QuantumHintResponse(BaseModel):
-    """Réponse d'indice quantique multijoueur"""
+class ChatMessage(BaseModel):
+    """Message de chat"""
     model_config = ConfigDict(from_attributes=True)
 
-    hint_type: str = Field(..., description="Type d'indice utilisé")
-    hint_data: Dict[str, Any] = Field(..., description="Données de l'indice")
-    quantum_probability: float = Field(..., description="Probabilité quantique")
-    cost: int = Field(..., description="Coût de l'indice")
-    success: bool = Field(..., description="Succès de l'opération")
-
-    # Métadonnées
-    algorithm_used: Optional[str] = Field(None, description="Algorithme utilisé")
-    execution_time: Optional[float] = Field(None, description="Temps d'exécution")
-    error_message: Optional[str] = Field(None, description="Message d'erreur")
+    type: str = Field(default="chat_message", description="Type de message")
+    user_id: str = Field(..., description="ID de l'expéditeur")
+    username: str = Field(..., description="Nom de l'expéditeur")
+    message: str = Field(..., description="Contenu du message")
+    timestamp: str = Field(..., description="Timestamp")
 
 
 # =====================================================
-# SCHÉMAS D'ÉVÉNEMENTS WEBSOCKET
+# SCHÉMAS POUR LES OBJETS ET EFFETS
 # =====================================================
 
-class WebSocketEventBase(BaseModel):
-    """Base pour tous les événements WebSocket"""
+class GameItem(BaseModel):
+    """Objet de jeu"""
     model_config = ConfigDict(from_attributes=True)
 
-    type: str = Field(..., description="Type d'événement")
-    data: Dict[str, Any] = Field(..., description="Données de l'événement")
-    timestamp: float = Field(..., description="Timestamp de l'événement")
-    game_id: str = Field(..., description="ID de la partie")
+    item_type: str = Field(..., description="Type d'objet")
+    name: str = Field(..., description="Nom de l'objet")
+    description: str = Field(..., description="Description")
+    rarity: str = Field(..., description="Rareté")
+    is_offensive: bool = Field(..., description="Objet offensif")
+    duration_seconds: Optional[int] = Field(None, description="Durée d'effet")
+    effect_value: Optional[int] = Field(None, description="Valeur d'effet")
 
 
-class PlayerJoinedEvent(BaseModel):
-    """Événement : joueur rejoint"""
+class EffectApplication(BaseModel):
+    """Application d'un effet"""
     model_config = ConfigDict(from_attributes=True)
 
-    username: str = Field(..., description="Nom d'utilisateur")
-    players_count: int = Field(..., description="Nombre de joueurs")
-    player_data: PlayerProgress = Field(..., description="Données du joueur")
+    effect_type: str = Field(..., description="Type d'effet")
+    target_user_id: str = Field(..., description="Utilisateur cible")
+    source_user_id: str = Field(..., description="Utilisateur source")
+    duration_seconds: Optional[int] = Field(None, description="Durée")
+    effect_value: Optional[int] = Field(None, description="Valeur")
+    applied_at: str = Field(..., description="Timestamp d'application")
 
 
-class PlayerLeftEvent(BaseModel):
-    """Événement : joueur quitte"""
+# =====================================================
+# SCHÉMAS D'ERREUR PERSONNALISÉS
+# =====================================================
+
+class MultiplayerError(BaseModel):
+    """Erreur multijoueur"""
     model_config = ConfigDict(from_attributes=True)
 
-    user_id: str = Field(..., description="ID du joueur")
-    username: str = Field(..., description="Nom d'utilisateur")
-    players_count: int = Field(..., description="Nombre de joueurs")
-    reason: Optional[str] = Field(None, description="Raison du départ")
-
-
-class GameStartedEvent(BaseModel):
-    """Événement : partie démarrée"""
-    model_config = ConfigDict(from_attributes=True)
-
-    game_id: str = Field(..., description="ID de la partie")
-    current_mastermind: int = Field(..., description="Mastermind actuel")
-    total_masterminds: int = Field(..., description="Total masterminds")
-    started_at: float = Field(..., description="Timestamp de démarrage")
-
-
-class AttemptMadeEvent(BaseModel):
-    """Événement : tentative effectuée"""
-    model_config = ConfigDict(from_attributes=True)
-
-    player_id: str = Field(..., description="ID du joueur")
-    username: str = Field(..., description="Nom d'utilisateur")
-    mastermind_number: int = Field(..., description="Numéro du mastermind")
-    attempt_result: MultiplayerAttemptResponse = Field(..., description="Résultat de la tentative")
-    is_winning: bool = Field(..., description="Tentative gagnante")
-
-
-class ItemUsedEvent(BaseModel):
-    """Événement : objet utilisé"""
-    model_config = ConfigDict(from_attributes=True)
-
-    player_id: str = Field(..., description="ID du joueur")
-    username: str = Field(..., description="Nom d'utilisateur")
-    item_type: ItemType = Field(..., description="Type d'objet")
-    target_players: Optional[List[str]] = Field(None, description="Joueurs ciblés")
-    effects: List[ActiveEffect] = Field(default_factory=list, description="Effets appliqués")
-
-
-class GameFinishedEvent(BaseModel):
-    """Événement : partie terminée"""
-    model_config = ConfigDict(from_attributes=True)
-
-    game_id: str = Field(..., description="ID de la partie")
-    winner: Optional[str] = Field(None, description="Gagnant")
-    final_standings: List[PlayerProgress] = Field(..., description="Classement final")
-    game_stats: Dict[str, Any] = Field(..., description="Statistiques de la partie")
-    finished_at: float = Field(..., description="Timestamp de fin")
-
-
-class ChatMessageEvent(BaseModel):
-    """Événement : message de chat"""
-    model_config = ConfigDict(from_attributes=True)
-
-    message_id: str = Field(..., description="ID du message")
-    player_id: str = Field(..., description="ID du joueur")
-    username: str = Field(..., description="Nom d'utilisateur")
-    content: str = Field(..., description="Contenu du message")
-    message_type: str = Field("text", description="Type de message")
-    sent_at: float = Field(..., description="Timestamp d'envoi")
-
-
-class ErrorEvent(BaseModel):
-    """Événement : erreur"""
-    model_config = ConfigDict(from_attributes=True)
-
+    error_type: str = Field(..., description="Type d'erreur")
     message: str = Field(..., description="Message d'erreur")
     code: Optional[str] = Field(None, description="Code d'erreur")
     user_id: str = Field(..., description="ID de l'utilisateur concerné")
@@ -422,6 +360,10 @@ class PaginatedResponse(BaseModel):
     has_prev: bool = Field(..., description="Page précédente disponible")
 
 
+# =====================================================
+# SCHÉMAS DE STATISTIQUES
+# =====================================================
+
 class GameStats(BaseModel):
     """Statistiques de partie"""
     model_config = ConfigDict(from_attributes=True)
@@ -444,64 +386,67 @@ class PlayerGameStats(BaseModel):
     final_score: int = Field(..., description="Score final")
     final_position: int = Field(..., description="Position finale")
     total_attempts: int = Field(..., description="Total de tentatives")
-    successful_attempts: int = Field(..., description="Tentatives réussies")
+    perfect_solutions: int = Field(0, description="Solutions parfaites")
+    average_time_per_attempt: float = Field(0.0, description="Temps moyen par tentative")
     quantum_hints_used: int = Field(0, description="Indices quantiques utilisés")
+    items_collected: int = Field(0, description="Objets collectés")
     items_used: int = Field(0, description="Objets utilisés")
-    average_time_per_attempt: float = Field(..., description="Temps moyen par tentative")
-    total_time: float = Field(..., description="Temps total de jeu")
 
 
 # =====================================================
-# SCHÉMAS DE VALIDATION
+# SCHÉMAS POUR L'INTÉGRATION QUANTIQUE
 # =====================================================
 
-class RoomCodeValidation(BaseModel):
-    """Validation d'un code de room"""
+class QuantumHintResponse(BaseModel):
+    """Réponse d'indice quantique"""
     model_config = ConfigDict(from_attributes=True)
 
-    is_valid: bool = Field(..., description="Code valide")
-    exists: bool = Field(..., description="Room existe")
-    is_joinable: bool = Field(..., description="Peut être rejoint")
-    requires_password: bool = Field(..., description="Mot de passe requis")
-    current_players: int = Field(..., description="Joueurs actuels")
-    max_players: int = Field(..., description="Joueurs maximum")
-    status: GameStatus = Field(..., description="Statut de la partie")
+    hint_type: str = Field(..., description="Type d'indice")
+    cost: int = Field(..., description="Coût en points")
+    result: Dict[str, Any] = Field(..., description="Résultat de l'indice")
+    quantum_data: Dict[str, Any] = Field(..., description="Données quantiques brutes")
+    success: bool = Field(..., description="Succès de l'opération")
+    message: Optional[str] = Field(None, description="Message explicatif")
 
 
-class PlayerValidation(BaseModel):
-    """Validation d'un joueur"""
+class QuantumSimulationRequest(BaseModel):
+    """Requête de simulation quantique"""
     model_config = ConfigDict(from_attributes=True)
 
-    can_join: bool = Field(..., description="Peut rejoindre")
-    can_spectate: bool = Field(..., description="Peut observer")
-    already_in_game: bool = Field(..., description="Déjà dans une partie")
-    reason: Optional[str] = Field(None, description="Raison si refusé")
+    circuit_type: str = Field(..., description="Type de circuit quantique")
+    qubits: int = Field(..., description="Nombre de qubits")
+    parameters: Dict[str, Any] = Field(..., description="Paramètres de simulation")
+    shots: int = Field(default=1024, description="Nombre de mesures")
+
+
+class QuantumSimulationResponse(BaseModel):
+    """Réponse de simulation quantique"""
+    model_config = ConfigDict(from_attributes=True)
+
+    circuit_type: str = Field(..., description="Type de circuit")
+    results: Dict[str, Any] = Field(..., description="Résultats de simulation")
+    execution_time: float = Field(..., description="Temps d'exécution")
+    backend_used: str = Field(..., description="Backend utilisé")
+    success: bool = Field(..., description="Succès de la simulation")
 
 
 # =====================================================
-# EXPORTS
+# TYPES UNION POUR FLEXIBILITÉ
 # =====================================================
 
-__all__ = [
-    # Requêtes
-    "MultiplayerGameCreateRequest", "JoinGameRequest", "MultiplayerAttemptRequest",
-    "ItemUseRequest", "QuantumHintRequest", "ChatMessageRequest",
+# Messages WebSocket unis
+WebSocketMessageUnion = Union[
+    PlayerJoinedMessage,
+    PlayerLeftMessage,
+    GameStartedMessage,
+    AttemptSubmittedMessage,
+    ChatMessage,
+    WebSocketMessage
+]
 
-    # Réponses principales
-    "PlayerProgress", "GameMastermind", "MultiplayerGame", "PublicGameListing",
-    "MultiplayerAttemptResponse", "QuantumHintResponse",
-
-    # Événements WebSocket
-    "WebSocketEventBase", "PlayerJoinedEvent", "PlayerLeftEvent", "GameStartedEvent",
-    "AttemptMadeEvent", "ItemUsedEvent", "GameFinishedEvent", "ChatMessageEvent", "ErrorEvent",
-
-    # Structures communes
-    "ActiveEffect", "MultiplayerApiResponse", "PaginatedResponse",
-    "GameStats", "PlayerGameStats",
-
-    # Validation
-    "RoomCodeValidation", "PlayerValidation",
-
-    # Énumérations
-    "QuantumHintType"
+# Réponses API unies
+ApiResponseUnion = Union[
+    MultiplayerApiResponse,
+    PaginatedResponse,
+    Dict[str, Any]
 ]

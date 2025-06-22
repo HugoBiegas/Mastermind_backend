@@ -1,52 +1,59 @@
 """
-Modèles étendus pour le mode multijoueur de Quantum Mastermind
-Objets bonus/malus, parties multi-masterminds, classements
+Modèles SQLAlchemy pour le système multijoueur
+COMPLET: Synchronisation parfaite avec init.sql et schemas Pydantic
+Version: 2.0.0 - Tous les modèles multijoueur
 """
+import enum
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import List, Optional, Dict, Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
-    Boolean, DateTime, Integer, String, Text, ForeignKey,
-    CheckConstraint, Index, event, Float
+    Boolean, DateTime, Float, Integer, String, Text,
+    ForeignKey, Index, UniqueConstraint, CheckConstraint
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
-from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.models.game import GameStatus, Difficulty
-
-if TYPE_CHECKING:
-    from app.models.user import User
-    from app.models.game import Game
+from app.models.game import Difficulty
 
 
-# === ÉNUMÉRATIONS POUR LE MULTIJOUEUR ===
+# =====================================================
+# ENUMS POUR LE MULTIJOUEUR
+# =====================================================
 
-class MultiplayerGameType(str, Enum):
+class MultiplayerGameType(str, enum.Enum):
     """Types de parties multijoueur"""
-    MULTI_MASTERMIND = "multi_mastermind"  # Plusieurs masterminds par partie
-    BATTLE_ROYALE = "battle_royale"  # Élimination progressive
-    TOURNAMENT = "tournament"  # Tournoi
-
-class ItemType(str, Enum):
-    """Types d'objets bonus/malus"""
-    # Bonus pour soi
-    EXTRA_HINT = "extra_hint"  # Indice supplémentaire
-    TIME_BONUS = "time_bonus"  # Temps bonus
-    SKIP_MASTERMIND = "skip_mastermind"  # Passer un mastermind
-    DOUBLE_SCORE = "double_score"  # Score x2 pour le prochain mastermind
-
-    # Malus pour les adversaires
-    FREEZE_TIME = "freeze_time"  # Geler le temps des adversaires
-    ADD_MASTERMIND = "add_mastermind"  # Ajouter un mastermind à tous
-    REDUCE_ATTEMPTS = "reduce_attempts"  # Réduire les tentatives
-    SCRAMBLE_COLORS = "scramble_colors"  # Mélanger l'affichage des couleurs
+    MULTI_MASTERMIND = "multi_mastermind"
+    BATTLE_ROYALE = "battle_royale"
+    TOURNAMENT = "tournament"
 
 
-class ItemRarity(str, Enum):
+class PlayerStatus(str, enum.Enum):
+    """Statuts des joueurs dans une partie multijoueur"""
+    WAITING = "waiting"
+    READY = "ready"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    FINISHED = "finished"
+    DISCONNECTED = "disconnected"
+    ELIMINATED = "eliminated"
+
+
+class ItemType(str, enum.Enum):
+    """Types d'objets de jeu"""
+    EXTRA_HINT = "extra_hint"
+    TIME_BONUS = "time_bonus"
+    SKIP_MASTERMIND = "skip_mastermind"
+    DOUBLE_SCORE = "double_score"
+    FREEZE_TIME = "freeze_time"
+    ADD_MASTERMIND = "add_mastermind"
+    REDUCE_ATTEMPTS = "reduce_attempts"
+    SCRAMBLE_COLORS = "scramble_colors"
+
+
+class ItemRarity(str, enum.Enum):
     """Rareté des objets"""
     COMMON = "common"
     RARE = "rare"
@@ -54,37 +61,47 @@ class ItemRarity(str, Enum):
     LEGENDARY = "legendary"
 
 
-class PlayerStatus(str, Enum):
-    """Statut des joueurs dans une partie multijoueur"""
-    WAITING = "waiting"
-    PLAYING = "playing"
-    MASTERMIND_COMPLETE = "mastermind_complete"
-    FINISHED = "finished"
-    ELIMINATED = "eliminated"
-
-
-# === MODÈLES PRINCIPAUX ===
+# =====================================================
+# MODÈLE PRINCIPAL MULTIJOUEUR
+# =====================================================
 
 class MultiplayerGame(Base):
-    """Partie multijoueur avec plusieurs masterminds"""
+    """
+    Partie multijoueur principale
+    CORRECTION: Synchronisé exactement avec init.sql
+    """
     __tablename__ = "multiplayer_games"
 
+    # === CLÉS PRIMAIRES ===
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    base_game_id: Mapped[UUID] = mapped_column(ForeignKey("games.id"), unique=True)
+    base_game_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("games.id", ondelete="CASCADE"),
+        unique=True
+    )
 
-    # Configuration multijoueur
-    game_type: Mapped[MultiplayerGameType] = mapped_column(String(50), nullable=False)
+    # === CONFIGURATION MULTIJOUEUR ===
+    game_type: Mapped[MultiplayerGameType] = mapped_column(
+        String(50),
+        nullable=False,
+        default=MultiplayerGameType.MULTI_MASTERMIND
+    )
     total_masterminds: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     current_mastermind: Mapped[int] = mapped_column(Integer, default=1)
     is_final_mastermind: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # === CONFIGURATION DE DIFFICULTÉ (dupliqué pour performance) ===
     difficulty: Mapped[Difficulty] = mapped_column(String(20), nullable=False)
 
-    # Objets et bonus
+    # === CONFIGURATION DES OBJETS ===
     items_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     items_per_mastermind: Mapped[int] = mapped_column(Integer, default=1)
 
-    # Métadonnées temporelles (selon init.sql)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # === MÉTADONNÉES TEMPORELLES (selon init.sql) ===
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc)
+    )
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
@@ -93,23 +110,55 @@ class MultiplayerGame(Base):
         onupdate=lambda: datetime.now(timezone.utc)
     )
 
-    # Relations
+    # === RELATIONS ===
     base_game: Mapped["Game"] = relationship("Game", lazy="select")
-    player_progresses: Mapped[List["PlayerProgress"]] = relationship("PlayerProgress", back_populates="multiplayer_game")
-    masterminds: Mapped[List["GameMastermind"]] = relationship("GameMastermind", back_populates="multiplayer_game")
-    leaderboard: Mapped[List["PlayerLeaderboard"]] = relationship("PlayerLeaderboard", back_populates="multiplayer_game")
+    player_progresses: Mapped[List["PlayerProgress"]] = relationship(
+        "PlayerProgress",
+        back_populates="multiplayer_game",
+        cascade="all, delete-orphan"
+    )
+    masterminds: Mapped[List["GameMastermind"]] = relationship(
+        "GameMastermind",
+        back_populates="multiplayer_game",
+        cascade="all, delete-orphan"
+    )
+    leaderboard: Mapped[List["PlayerLeaderboard"]] = relationship(
+        "PlayerLeaderboard",
+        back_populates="multiplayer_game",
+        cascade="all, delete-orphan"
+    )
 
+    # === CONTRAINTES ===
+    __table_args__ = (
+        CheckConstraint("game_type IN ('multi_mastermind', 'battle_royale', 'tournament')"),
+        CheckConstraint("total_masterminds >= 1 AND total_masterminds <= 10"),
+        CheckConstraint("current_mastermind >= 1 AND current_mastermind <= total_masterminds"),
+        CheckConstraint("difficulty IN ('easy', 'medium', 'hard', 'expert', 'quantum')"),
+        CheckConstraint("items_per_mastermind >= 0"),
+        UniqueConstraint("base_game_id", name="uq_multiplayer_games_base_game"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MultiplayerGame(id={self.id}, type={self.game_type}, masterminds={self.total_masterminds})>"
+
+
+# =====================================================
+# MASTERMINDS INDIVIDUELS
+# =====================================================
 
 class GameMastermind(Base):
     """
     Mastermind individuel dans une partie multijoueur
-    CORRECTION CRITIQUE: Correspond exactement à init.sql (SANS updated_at)
+    CORRECTION: Correspond exactement à init.sql
     """
     __tablename__ = "game_masterminds"
 
     # === CLÉS ===
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    multiplayer_game_id: Mapped[UUID] = mapped_column(ForeignKey("multiplayer_games.id"))
+    multiplayer_game_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("multiplayer_games.id", ondelete="CASCADE")
+    )
     mastermind_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # === CONFIGURATION (selon init.sql) ===
@@ -134,229 +183,379 @@ class GameMastermind(Base):
 
     # === RELATIONS ===
     multiplayer_game: Mapped["MultiplayerGame"] = relationship("MultiplayerGame", back_populates="masterminds")
-    player_attempts: Mapped[List["PlayerMastermindAttempt"]] = relationship("PlayerMastermindAttempt", back_populates="mastermind")
+    player_attempts: Mapped[List["PlayerMastermindAttempt"]] = relationship(
+        "PlayerMastermindAttempt",
+        back_populates="mastermind",
+        cascade="all, delete-orphan"
+    )
 
+    # === CONTRAINTES ===
     __table_args__ = (
+        CheckConstraint("mastermind_number >= 1"),
+        CheckConstraint("combination_length >= 2 AND combination_length <= 8"),
+        CheckConstraint("available_colors >= 3 AND available_colors <= 15"),
+        CheckConstraint("max_attempts > 0"),
+        UniqueConstraint("multiplayer_game_id", "mastermind_number", name="uq_game_masterminds_game_number"),
         Index("idx_multiplayer_mastermind", "multiplayer_game_id", "mastermind_number"),
     )
 
+    def __repr__(self) -> str:
+        return f"<GameMastermind(id={self.id}, number={self.mastermind_number}, active={self.is_active})>"
+
+
+# =====================================================
+# PROGRESSION DES JOUEURS
+# =====================================================
 
 class PlayerProgress(Base):
     """Progression d'un joueur dans une partie multijoueur"""
     __tablename__ = "player_progress"
 
+    # === CLÉS ===
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    multiplayer_game_id: Mapped[UUID] = mapped_column(ForeignKey("multiplayer_games.id"))
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    multiplayer_game_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("multiplayer_games.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
 
-    # Statut du joueur
+    # === STATUT DU JOUEUR ===
     status: Mapped[PlayerStatus] = mapped_column(String(30), default=PlayerStatus.WAITING)
 
-    # Progression
+    # === PROGRESSION ===
     current_mastermind: Mapped[int] = mapped_column(Integer, default=1)
     completed_masterminds: Mapped[int] = mapped_column(Integer, default=0)
 
-    # Scores
+    # === SCORES ===
     total_score: Mapped[int] = mapped_column(Integer, default=0)
 
-    # Temps total
+    # === TEMPS TOTAL ===
     total_time: Mapped[float] = mapped_column(Float, default=0.0)
 
-    # État de fin
+    # === ÉTAT DE FIN ===
     is_finished: Mapped[bool] = mapped_column(Boolean, default=False)
     finish_position: Mapped[Optional[int]] = mapped_column(Integer)
     finish_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
-    # Objets collectés (selon init.sql)
-    collected_items: Mapped[List[Dict[str, Any]]] = mapped_column(JSONB, default=list)
-    used_items: Mapped[List[Dict[str, Any]]] = mapped_column(JSONB, default=list)
+    # === OBJETS COLLECTÉS (JSONB selon init.sql) ===
+    collected_items: Mapped[List[str]] = mapped_column(JSONB, default=list)
+    used_items: Mapped[List[str]] = mapped_column(JSONB, default=list)
 
-    # Métadonnées temporelles (selon init.sql)
+    # === MÉTADONNÉES TEMPORELLES ===
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
         default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc)
     )
 
-    # Relations
+    # === RELATIONS ===
     multiplayer_game: Mapped["MultiplayerGame"] = relationship("MultiplayerGame", back_populates="player_progresses")
-    user: Mapped["User"] = relationship("User")
-    mastermind_attempts: Mapped[List["PlayerMastermindAttempt"]] = relationship("PlayerMastermindAttempt", back_populates="player_progress")
+    user: Mapped["User"] = relationship("User", lazy="select")
 
+    # === CONTRAINTES ===
     __table_args__ = (
-        Index("idx_player_progress", "multiplayer_game_id", "user_id"),
+        CheckConstraint("status IN ('waiting', 'ready', 'playing', 'paused', 'finished', 'disconnected', 'eliminated')"),
+        CheckConstraint("current_mastermind >= 1"),
+        CheckConstraint("completed_masterminds >= 0"),
+        CheckConstraint("total_score >= 0"),
+        CheckConstraint("total_time >= 0"),
+        CheckConstraint("finish_position IS NULL OR finish_position >= 1"),
+        UniqueConstraint("multiplayer_game_id", "user_id", name="uq_player_progress_game_user"),
+        Index("idx_player_progress_game", "multiplayer_game_id"),
+        Index("idx_player_progress_user", "user_id"),
+        Index("idx_player_progress_status", "status"),
     )
 
+    def __repr__(self) -> str:
+        return f"<PlayerProgress(user_id={self.user_id}, status={self.status}, score={self.total_score})>"
+
+
+# =====================================================
+# TENTATIVES PAR MASTERMIND
+# =====================================================
 
 class PlayerMastermindAttempt(Base):
     """Tentative d'un joueur sur un mastermind spécifique"""
     __tablename__ = "player_mastermind_attempts"
 
+    # === CLÉS ===
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    player_progress_id: Mapped[UUID] = mapped_column(ForeignKey("player_progress.id"))
-    mastermind_id: Mapped[UUID] = mapped_column(ForeignKey("game_masterminds.id"))
+    mastermind_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("game_masterminds.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
 
+    # === DONNÉES DE TENTATIVE ===
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     combination: Mapped[List[int]] = mapped_column(JSONB, nullable=False)
-    exact_matches: Mapped[int] = mapped_column(Integer, nullable=False)
-    position_matches: Mapped[int] = mapped_column(Integer, nullable=False)
-    is_correct: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # Temps et score
-    attempt_score: Mapped[int] = mapped_column(Integer, default=0)
-    time_taken: Mapped[Optional[float]] = mapped_column(Float)
+    # === RÉSULTATS ===
+    exact_matches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    position_matches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_winning: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    # Quantique
-    quantum_calculated: Mapped[bool] = mapped_column(Boolean, default=False)
-    quantum_probabilities: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB)
+    # === SCORING ===
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    time_taken: Mapped[Optional[int]] = mapped_column(Integer)  # en millisecondes
 
-    # Métadonnées temporelles (selon init.sql - seulement created_at)
+    # === DONNÉES QUANTIQUES ===
+    quantum_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB)
+    hint_type: Mapped[Optional[str]] = mapped_column(String(50))
+
+    # === MÉTADONNÉES ===
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc)
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
 
-    # Relations
-    player_progress: Mapped["PlayerProgress"] = relationship("PlayerProgress", back_populates="mastermind_attempts")
+    # === RELATIONS ===
     mastermind: Mapped["GameMastermind"] = relationship("GameMastermind", back_populates="player_attempts")
+    user: Mapped["User"] = relationship("User", lazy="select")
 
-class GameItem(Base):
-    """Objet/pouvoir disponible dans le jeu"""
-    __tablename__ = "game_items"
+    # === CONTRAINTES ===
+    __table_args__ = (
+        CheckConstraint("attempt_number > 0"),
+        CheckConstraint("exact_matches >= 0"),
+        CheckConstraint("position_matches >= 0"),
+        CheckConstraint("score >= 0"),
+        CheckConstraint("time_taken IS NULL OR time_taken > 0"),
+        CheckConstraint("hint_type IS NULL OR hint_type IN ('grover', 'superposition', 'entanglement', 'interference')"),
+        UniqueConstraint("mastermind_id", "user_id", "attempt_number", name="uq_player_mastermind_attempts"),
+        Index("idx_player_attempts_mastermind", "mastermind_id"),
+        Index("idx_player_attempts_user", "user_id"),
+    )
 
-    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-    item_type: Mapped[ItemType] = mapped_column(String(30), nullable=False)
-    rarity: Mapped[ItemRarity] = mapped_column(String(20), nullable=False)
+    def __repr__(self) -> str:
+        return f"<PlayerMastermindAttempt(user_id={self.user_id}, attempt={self.attempt_number}, winning={self.is_winning})>"
 
-    # Configuration
-    is_self_target: Mapped[bool] = mapped_column(Boolean,
-                                                 default=True)  # True = bonus pour soi, False = malus pour adversaires
-    duration_seconds: Mapped[Optional[int]] = mapped_column(Integer)  # Pour effets temporaires
-    effect_value: Mapped[Optional[float]] = mapped_column(Float)  # Valeur numérique de l'effet
 
-    # Métadonnées
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
+# =====================================================
+# CLASSEMENTS
+# =====================================================
 
 class PlayerLeaderboard(Base):
     """Classement final d'une partie multijoueur"""
     __tablename__ = "player_leaderboard"
 
+    # === CLÉS ===
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    multiplayer_game_id: Mapped[UUID] = mapped_column(ForeignKey("multiplayer_games.id"))
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    multiplayer_game_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("multiplayer_games.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
 
-    # Classement
+    # === CLASSEMENT ===
     final_position: Mapped[int] = mapped_column(Integer, nullable=False)
     final_score: Mapped[int] = mapped_column(Integer, nullable=False)
     total_time: Mapped[float] = mapped_column(Float, nullable=False)
 
-    # Statistiques détaillées
+    # === STATISTIQUES DÉTAILLÉES ===
     masterminds_completed: Mapped[int] = mapped_column(Integer, default=0)
     total_attempts: Mapped[int] = mapped_column(Integer, default=0)
     perfect_solutions: Mapped[int] = mapped_column(Integer, default=0)
     quantum_hints_used: Mapped[int] = mapped_column(Integer, default=0)
     items_used: Mapped[int] = mapped_column(Integer, default=0)
 
-    # Métadonnées temporelles (selon init.sql - seulement created_at)
+    # === MÉTADONNÉES ===
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc)
     )
 
-    # Relations
+    # === RELATIONS ===
     multiplayer_game: Mapped["MultiplayerGame"] = relationship("MultiplayerGame", back_populates="leaderboard")
-    user: Mapped["User"] = relationship("User")
+    user: Mapped["User"] = relationship("User", lazy="select")
 
+    # === CONTRAINTES ===
     __table_args__ = (
-        Index("idx_leaderboard", "multiplayer_game_id", "final_position"),
+        CheckConstraint("final_position >= 1"),
+        CheckConstraint("final_score >= 0"),
+        CheckConstraint("total_time >= 0"),
+        CheckConstraint("masterminds_completed >= 0"),
+        CheckConstraint("total_attempts >= 0"),
+        CheckConstraint("perfect_solutions >= 0"),
+        CheckConstraint("quantum_hints_used >= 0"),
+        CheckConstraint("items_used >= 0"),
+        UniqueConstraint("multiplayer_game_id", "user_id", name="uq_player_leaderboard_game_user"),
+        Index("idx_leaderboard_game", "multiplayer_game_id"),
+        Index("idx_leaderboard_position", "final_position"),
     )
 
-# === FONCTIONS UTILITAIRES ===
-
-def generate_items_for_mastermind(rarity_weights: Dict[ItemRarity, float] = None) -> List[Dict[str, Any]]:
-    """Génère des objets aléatoirement pour un mastermind complété"""
-    import random
-
-    if rarity_weights is None:
-        rarity_weights = {
-            ItemRarity.COMMON: 0.5,
-            ItemRarity.RARE: 0.3,
-            ItemRarity.EPIC: 0.15,
-            ItemRarity.LEGENDARY: 0.05
-        }
-
-    # Définition des objets disponibles
-    available_items = {
-        ItemType.EXTRA_HINT: {"rarity": ItemRarity.COMMON, "name": "Indice Quantique",
-                              "description": "Révèle une couleur correcte"},
-        ItemType.TIME_BONUS: {"rarity": ItemRarity.COMMON, "name": "Accélération Temporelle",
-                              "description": "+30 secondes de temps"},
-        ItemType.DOUBLE_SCORE: {"rarity": ItemRarity.RARE, "name": "Boost Quantique",
-                                "description": "Score x2 pour le prochain mastermind"},
-        ItemType.SKIP_MASTERMIND: {"rarity": ItemRarity.LEGENDARY, "name": "Saut Dimensionnel",
-                                   "description": "Complète automatiquement un mastermind"},
-        ItemType.FREEZE_TIME: {"rarity": ItemRarity.EPIC, "name": "Gel Temporel",
-                               "description": "Gèle le temps des adversaires pendant 30s"},
-        ItemType.ADD_MASTERMIND: {"rarity": ItemRarity.RARE, "name": "Complexification",
-                                  "description": "Ajoute un mastermind à tous les adversaires"},
-        ItemType.REDUCE_ATTEMPTS: {"rarity": ItemRarity.EPIC, "name": "Sabotage",
-                                   "description": "Réduit les tentatives des adversaires de 2"},
-        ItemType.SCRAMBLE_COLORS: {"rarity": ItemRarity.RARE, "name": "Distorsion",
-                                   "description": "Mélange l'affichage des couleurs des adversaires pendant 60s"}
-    }
-
-    # Sélection aléatoire basée sur la rareté
-    rarity = random.choices(list(rarity_weights.keys()), weights=list(rarity_weights.values()))[0]
-    suitable_items = [item_type for item_type, config in available_items.items() if config["rarity"] == rarity]
-
-    if not suitable_items:
-        suitable_items = [ItemType.EXTRA_HINT]  # Fallback
-
-    selected_item = random.choice(suitable_items)
-    item_config = available_items[selected_item]
-
-    return [{
-        "type": selected_item.value,
-        "name": item_config["name"],
-        "description": item_config["description"],
-        "rarity": rarity.value,
-        "obtained_at": datetime.now(timezone.utc).isoformat()
-    }]
+    def __repr__(self) -> str:
+        return f"<PlayerLeaderboard(user_id={self.user_id}, position={self.final_position}, score={self.final_score})>"
 
 
-def calculate_multiplayer_score(
-        mastermind_number: int,
-        attempts_used: int,
-        max_attempts: int,
-        time_taken: float,
-        is_correct: bool,
-        items_used: int = 0
-) -> int:
-    """Calcule le score pour un mastermind en mode multijoueur"""
-    if not is_correct:
-        return 0
+# =====================================================
+# OBJETS DE JEU
+# =====================================================
 
-    # Score de base basé sur les tentatives
-    base_score = max(0, (max_attempts - attempts_used + 1) * 100)
+class GameItem(Base):
+    """Objets collectibles et utilisables dans les parties"""
+    __tablename__ = "game_items"
 
-    # Bonus de temps (plus on est rapide, plus on gagne)
-    time_bonus = max(0, int(300 - time_taken))  # 5 minutes max bonus
+    # === CLÉS ===
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
 
-    # Multiplicateur selon le numéro du mastermind (plus difficile = plus de points)
-    difficulty_multiplier = 1 + (mastermind_number - 1) * 0.2
+    # === INFORMATIONS DE BASE ===
+    item_type: Mapped[ItemType] = mapped_column(String(50), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    rarity: Mapped[ItemRarity] = mapped_column(String(20), nullable=False)
 
-    # Malus pour utilisation d'objets (encourage le skill)
-    item_penalty = items_used * 50
+    # === PROPRIÉTÉS ===
+    is_offensive: Mapped[bool] = mapped_column(Boolean, default=False)
+    duration_seconds: Mapped[Optional[int]] = mapped_column(Integer)
+    effect_value: Mapped[Optional[int]] = mapped_column(Integer)
 
-    total_score = int((base_score + time_bonus) * difficulty_multiplier - item_penalty)
-    return max(0, total_score)
+    # === MÉTADONNÉES ===
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc)
+    )
+
+    # === CONTRAINTES ===
+    __table_args__ = (
+        CheckConstraint("item_type IN ('extra_hint', 'time_bonus', 'skip_mastermind', 'double_score', 'freeze_time', 'add_mastermind', 'reduce_attempts', 'scramble_colors')"),
+        CheckConstraint("rarity IN ('common', 'rare', 'epic', 'legendary')"),
+        CheckConstraint("duration_seconds IS NULL OR duration_seconds > 0"),
+        Index("idx_game_items_type", "item_type"),
+        Index("idx_game_items_rarity", "rarity"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<GameItem(type={self.item_type}, name={self.name}, rarity={self.rarity})>"
+
+
+# =====================================================
+# SESSIONS WEBSOCKET
+# =====================================================
+
+class WebSocketSession(Base):
+    """Sessions WebSocket actives"""
+    __tablename__ = "websocket_sessions"
+
+    # === CLÉS ===
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+
+    # === IDENTIFICATION ===
+    session_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    connection_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+
+    # === RELATIONS ===
+    user_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    game_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("games.id", ondelete="SET NULL")
+    )
+
+    # === ÉTAT DE LA CONNEXION ===
+    status: Mapped[str] = mapped_column(String(20), default="connected")
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45))  # IPv6 compatible
+    user_agent: Mapped[Optional[str]] = mapped_column(Text)
+
+    # === MÉTADONNÉES TEMPORELLES ===
+    connected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc)
+    )
+    disconnected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_heartbeat: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc)
+    )
+
+    # === STATISTIQUES ===
+    messages_sent: Mapped[int] = mapped_column(Integer, default=0)
+    messages_received: Mapped[int] = mapped_column(Integer, default=0)
+
+    # === DONNÉES DE SESSION ===
+    session_data: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+    # === RELATIONS ===
+    user: Mapped[Optional["User"]] = relationship("User", lazy="select")
+    game: Mapped[Optional["Game"]] = relationship("Game", lazy="select")
+
+    # === CONTRAINTES ===
+    __table_args__ = (
+        CheckConstraint("status IN ('connected', 'disconnected', 'error', 'timeout')"),
+        CheckConstraint("messages_sent >= 0 AND messages_received >= 0"),
+        Index("idx_websocket_user", "user_id"),
+        Index("idx_websocket_game", "game_id"),
+        Index("idx_websocket_status", "status"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WebSocketSession(id={self.session_id}, user_id={self.user_id}, status={self.status})>"
+
+
+# =====================================================
+# FONCTIONS UTILITAIRES POUR LES MODÈLES
+# =====================================================
+
+def get_active_multiplayer_games_count() -> int:
+    """Retourne le nombre de parties multijoueur actives"""
+    # Cette fonction sera implémentée avec une session de base de données
+    pass
+
+
+def get_player_multiplayer_stats(user_id: UUID) -> Dict[str, Any]:
+    """Retourne les statistiques multijoueur d'un joueur"""
+    # Cette fonction sera implémentée avec une session de base de données
+    pass
+
+
+def cleanup_expired_websocket_sessions(timeout_minutes: int = 30) -> int:
+    """Nettoie les sessions WebSocket expirées"""
+    # Cette fonction sera implémentée avec une session de base de données
+    pass
+
+
+# =====================================================
+# EXPORTS
+# =====================================================
+
+__all__ = [
+    # Enums
+    "MultiplayerGameType",
+    "PlayerStatus",
+    "ItemType",
+    "ItemRarity",
+
+    # Modèles principaux
+    "MultiplayerGame",
+    "GameMastermind",
+    "PlayerProgress",
+    "PlayerMastermindAttempt",
+    "PlayerLeaderboard",
+    "GameItem",
+    "WebSocketSession",
+
+    # Fonctions utilitaires
+    "get_active_multiplayer_games_count",
+    "get_player_multiplayer_stats",
+    "cleanup_expired_websocket_sessions"
+]
