@@ -4,6 +4,7 @@ Compatible avec les attentes du code React.js décrites dans le document
 COMPLET: Toutes les routes attendues par le frontend sont implémentées
 """
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,77 @@ router = APIRouter(prefix="/multiplayer", tags=["Multijoueur"])
 # =====================================================
 # GESTION DES ROOMS (CRUD)
 # =====================================================
+
+@router.get(
+    "/rooms/public",
+    response_model=Dict[str, Any],
+    summary="Lister les parties publiques",
+    description="Route pour correspondre aux attentes du frontend"
+)
+async def get_public_rooms_endpoint(
+        page: int = Query(1, ge=1, description="Page"),
+        limit: int = Query(20, ge=1, le=100, description="Limite par page"),
+        filters: Optional[str] = Query(None, description="Filtres JSON"),
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """Route publique pour les parties - correspond aux attentes du frontend"""
+    try:
+        result = await multiplayer_service.get_public_rooms(
+            db, page=page, limit=limit, filters=filters
+        )
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        logger.error(f"Erreur get_public_rooms: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la récupération: {str(e)}"
+        )
+
+
+@router.post(
+    "/rooms/{room_code}/leave",
+    response_model=Dict[str, Any],  # CORRECTION: Type de retour
+    summary="Quitter une partie",
+    description="Quitte une partie multijoueur"
+)
+async def leave_multiplayer_room(
+        room_code: str,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """Route pour quitter une room - CORRIGÉE"""
+    try:
+        await multiplayer_service.leave_room_by_code(db, room_code, current_user.id)
+
+        # CORRECTION: Retour JSON structuré au lieu de Dict[str, str]
+        return {
+            "success": True,
+            "message": "Partie quittée avec succès",
+            "data": {
+                "room_code": room_code,
+                "user_id": str(current_user.id),
+                "left_at": datetime.now(timezone.utc).isoformat()
+            }
+        }
+
+    except EntityNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Erreur quitter room: {e}")
+
+        # CORRECTION: Même en cas d'erreur, retourner un format cohérent
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la sortie: {str(e)}"
+        )
+
 
 @router.post(
     "/rooms/create",
@@ -76,7 +148,7 @@ async def create_multiplayer_room(
 )
 async def join_multiplayer_room(
         room_code: str,
-        join_data: JoinGameRequest,
+        join_data: Optional[Dict[str, Any]] = None,  # CORRECTION: Schéma flexible
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
@@ -89,12 +161,17 @@ async def join_multiplayer_room(
             logger.info(f"✅ Parties actives quittées pour l'utilisateur {current_user.id}")
         except Exception as leave_error:
             logger.warning(f"⚠️ Pas de parties actives à quitter: {leave_error}")
-            # Ne pas bloquer le join pour cette erreur
+
+        # CORRECTION: Utiliser join_data ou valeurs par défaut
+        password = None
+        as_spectator = False
+
+        if join_data:
+            password = join_data.get("password")
+            as_spectator = join_data.get("as_spectator", False)
 
         result = await multiplayer_service.join_room_by_code(
-            db, room_code, current_user.id,
-            join_data.password,
-            join_data.as_spectator or False
+            db, room_code, current_user.id, password, as_spectator
         )
         return {
             "success": True,
@@ -106,22 +183,13 @@ async def join_multiplayer_room(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
-    except GameFullError as e:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(e)
-        )
-    except AuthorizationError as e:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=str(e)
-        )
     except Exception as e:
         logger.error(f"Erreur rejoindre room: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la connexion: {str(e)}"
         )
+
 
 @router.get(
     "/rooms/{room_code}",
@@ -311,7 +379,7 @@ async def start_multiplayer_game(
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route pour démarrer la partie (attendue par le frontend)"""
+    """Route pour démarrer la partie - MANQUANTE"""
     try:
         result = await multiplayer_service.start_game(db, room_code, current_user.id)
         return {
@@ -427,17 +495,45 @@ async def get_room_players(
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route pour récupérer la liste des joueurs"""
+    """Route pour récupérer la liste des joueurs - CORRIGÉE"""
     try:
         room_details = await multiplayer_service.get_room_details(db, room_code, current_user.id)
+
+        # CORRECTION: Extraire participants et les transformer en format PlayerProgress
+        participants = room_details.get("participants", [])
+
+        # Transformer en format PlayerProgress attendu par le frontend
+        players_data = []
+        for participant in participants:
+            # CORRECTION: Format exact attendu par le frontend
+            player_progress = {
+                "user_id": participant["user_id"],
+                "username": participant["username"],
+                "status": participant["status"],
+                "score": participant.get("score", 0),
+                "attempts_count": participant.get("attempts_count", 0),
+                "is_ready": participant.get("is_ready", False),
+                "is_creator": participant.get("is_creator", False),
+                "is_winner": participant.get("is_winner", False),
+                "joined_at": participant.get("joined_at"),
+
+                # Champs additionnels pour PlayerProgress
+                "current_mastermind": 1,
+                "completed_masterminds": 0,
+                "total_score": participant.get("score", 0),
+                "total_time": 0.0,
+                "is_finished": participant.get("status") == "finished",
+                "finish_position": None,
+                "finish_time": None
+            }
+            players_data.append(player_progress)
+
+        # CORRECTION: Retourner le format attendu par multiplayerService.getPlayerProgress()
         return {
             "success": True,
-            "data": {
-                "players": room_details["players"],
-                "players_count": len(room_details["players"]),
-                "max_players": room_details["max_players"]
-            }
+            "data": players_data
         }
+
     except EntityNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -450,7 +546,31 @@ async def get_room_players(
             detail=f"Erreur lors de la récupération: {str(e)}"
         )
 
-
+@router.post(
+    "/rooms/{room_code}/cleanup",
+    response_model=Dict[str, Any],
+    summary="[DEBUG] Nettoyer les participations fantômes",
+    description="Route de debug pour nettoyer les participations corrompues"
+)
+async def cleanup_room_participations(
+        room_code: str,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """Route de debug pour nettoyer une room"""
+    try:
+        result = await multiplayer_service.cleanup_phantom_participations(db, room_code)
+        return {
+            "success": True,
+            "data": result,
+            "message": "Nettoyage effectué"
+        }
+    except Exception as e:
+        logger.error(f"Erreur nettoyage: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors du nettoyage: {str(e)}"
+        )
 @router.get(
     "/rooms/{room_code}/status",
     response_model=Dict[str, Any],

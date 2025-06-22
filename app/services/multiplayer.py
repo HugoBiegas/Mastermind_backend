@@ -7,7 +7,7 @@ import json
 import logging
 import random
 import string
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -39,7 +39,8 @@ except ImportError as e:
     logger.warning(f"⚠️ WebSocket multijoueur non disponible: {e}")
 
 # Imports standards du projet
-from app.models.game import Game, GameStatus, GameParticipation, Difficulty, GameType, ParticipationStatus
+from app.models.game import Game, GameStatus, GameParticipation, Difficulty, GameType, ParticipationStatus, \
+    generate_room_code
 from app.models.multijoueur import (
     MultiplayerGame, PlayerProgress, GameMastermind,
     PlayerMastermindAttempt, MultiplayerGameType, PlayerStatus
@@ -67,19 +68,68 @@ class MultiplayerService:
             game_data: MultiplayerGameCreateRequest,
             creator_id: UUID
     ) -> Dict[str, Any]:
-        """Crée une partie multijoueur SANS champs privés (password, is_private, etc.)"""
-
+        """
+        Crée une nouvelle partie multijoueur
+        CORRECTION FINALE: Sauvegarde COMPLÈTE de tous les paramètres
+        """
         logger.info(f"🎯 Création partie multijoueur par utilisateur {creator_id}")
+        logger.info(
+            f"🔧 Paramètres reçus: type={game_data.game_type}, items={game_data.items_enabled}, masterminds={game_data.total_masterminds}")
 
         try:
             # Générer un code de room unique
             room_code = await self._generate_unique_room_code(db)
             logger.info(f"🔑 Code room généré: {room_code}")
 
-            # CORRECTION: Créer la partie SEULEMENT avec les champs qui existent dans Game
+            # Générer une solution par défaut
+            default_solution = self._generate_default_solution(
+                game_data.combination_length,
+                game_data.available_colors
+            )
+
+            # CORRECTION: Settings TRÈS complets pour tout sauvegarder
+            complete_settings = {
+                # Paramètres multijoueur
+                "total_masterminds": game_data.total_masterminds,
+                "items_enabled": game_data.items_enabled,
+                "items_per_mastermind": game_data.items_per_mastermind,
+
+                # Type de jeu pour l'affichage
+                "game_type_display": game_data.game_type,
+                "game_type_original": game_data.game_type,
+
+                # Configuration standard
+                "allow_duplicates": True,
+                "allow_blanks": False,
+                "quantum_enabled": game_data.quantum_enabled,
+                "hint_cost": 10,
+                "auto_reveal_pegs": True,
+                "show_statistics": True,
+
+                # Solution et multiplayer
+                "solution": default_solution,
+                "is_multiplayer": True,
+                "individual_solutions": True,
+
+                # CORRECTION: Sauvegarder TOUS les paramètres de création
+                "difficulty": game_data.difficulty,
+                "max_players": game_data.max_players,
+                "combination_length": game_data.combination_length,
+                "available_colors": game_data.available_colors,
+                "max_attempts": game_data.max_attempts,
+                "is_public": game_data.is_public,
+                "allow_spectators": game_data.allow_spectators,
+                "enable_chat": game_data.enable_chat,
+
+                # Métadonnées
+                "created_by": str(creator_id),
+                "creation_timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+            # CORRECTION: Créer la partie avec game_type original
             new_game = Game(
                 room_code=room_code,
-                game_type=game_data.game_type,
+                game_type=game_data.game_type,  # CORRECTION: Garder le type original
                 difficulty=game_data.difficulty,
                 status=GameStatus.WAITING.value,
                 creator_id=creator_id,
@@ -88,59 +138,103 @@ class MultiplayerService:
                 available_colors=game_data.available_colors,
                 max_attempts=game_data.max_attempts,
                 quantum_enabled=game_data.quantum_enabled,
-                settings={
-                    "total_masterminds": game_data.total_masterminds,
-                    "items_enabled": game_data.items_enabled,
-                    "items_per_mastermind": game_data.items_per_mastermind,
-                    "solution": game_data.solution
-                }
-                # SUPPRIMÉ: password, is_private, allow_spectators, enable_chat
+                solution=default_solution,
+
+                # Paramètres de visibilité
+                is_private=not game_data.is_public,
+                allow_spectators=game_data.allow_spectators,
+                enable_chat=game_data.enable_chat,
+
+                # CORRECTION: Settings complets
+                settings=complete_settings
             )
 
             db.add(new_game)
-            await db.flush()  # Pour récupérer l'ID
+            await db.flush()
 
-            # Ajouter le créateur comme participant
+            # Créateur participant
             creator_participation = GameParticipation(
                 game_id=new_game.id,
                 player_id=creator_id,
-                status=ParticipationStatus.ACTIVE.value,
-                role="host",
+                status="waiting",
+                role="player",
                 join_order=1,
+                is_ready=False,
                 joined_at=datetime.now(timezone.utc)
             )
 
             db.add(creator_participation)
             await db.commit()
 
-            logger.info(f"✅ Partie multijoueur créée: {room_code}")
+            logger.info(
+                f"✅ Partie {room_code} créée: type={game_data.game_type}, items={game_data.items_enabled}, masterminds={game_data.total_masterminds}")
 
-            # Retourner les données de la room créée
+            # CORRECTION: Retourner avec TOUS les paramètres sauvegardés
             return {
                 "id": str(new_game.id),
                 "room_code": room_code,
                 "name": f"Partie {room_code}",
-                "game_type": new_game.game_type,
+
+                # CORRECTION: Type correct pour l'affichage
+                "game_type": game_data.game_type,
+                "game_type_raw": game_data.game_type,
+
                 "difficulty": new_game.difficulty,
                 "status": new_game.status,
                 "max_players": new_game.max_players,
-                "current_players": 1,  # Le créateur vient d'être ajouté
-                "is_private": False,  # Toujours false maintenant
-                "password_protected": False,  # Toujours false maintenant
-                "allow_spectators": True,  # Valeur par défaut
-                "enable_chat": True,  # Valeur par défaut
+                "current_players": 1,
+
+                # Paramètres de visibilité
+                "is_private": new_game.is_private,
+                "password_protected": bool(getattr(game_data, 'password', None)),
+                "allow_spectators": new_game.allow_spectators,
+                "enable_chat": new_game.enable_chat,
+
+                # Configuration de jeu
                 "quantum_enabled": new_game.quantum_enabled,
+                "combination_length": new_game.combination_length,
+                "available_colors": new_game.available_colors,
+                "max_attempts": new_game.max_attempts,
+
+                # CORRECTION: Paramètres multijoueur corrects
+                "total_masterminds": game_data.total_masterminds,
+                "items_enabled": game_data.items_enabled,
+                "items_per_mastermind": game_data.items_per_mastermind,
+
                 "created_at": new_game.created_at.isoformat(),
                 "creator": {
                     "id": str(creator_id),
-                    "username": "Créateur"  # Sera mis à jour lors de la récupération
-                }
+                    "username": "Créateur"
+                },
+
+                # CORRECTION: Settings pour debug
+                "settings": complete_settings
             }
 
         except Exception as e:
             await db.rollback()
             logger.error(f"❌ Erreur création partie multijoueur: {e}")
             raise GameError(f"Erreur lors de la création: {str(e)}")
+
+    def _generate_default_solution(self, length: int, colors: int) -> List[int]:
+        """Génère une solution par défaut pour les parties multijoueur"""
+        import random
+        return [random.randint(1, colors) for _ in range(length)]
+
+    async def _generate_unique_room_code(self, db: AsyncSession) -> str:
+        """Génère un code de room unique"""
+
+        for _ in range(10):  # Essayer 10 fois
+            code = generate_room_code()
+            existing_query = select(Game).where(Game.room_code == code)
+            result = await db.execute(existing_query)
+            existing = result.scalar_one_or_none()
+            if not existing:
+                return code
+
+        # Si on n'arrive pas à générer un code unique, utiliser un UUID
+        from uuid import uuid4
+        return str(uuid4())[:8].upper()
 
     async def join_room_by_code(
             self,
@@ -150,101 +244,94 @@ class MultiplayerService:
             password: Optional[str] = None,
             as_spectator: bool = False
     ) -> Dict[str, Any]:
-        """Rejoint une partie par son code de room"""
-
+        """
+        Rejoint une partie par son code de room
+        CORRECTION URGENTE: Gestion des doublons et relations
+        """
         logger.info(f"🚪 Utilisateur {user_id} rejoint la room {room_code}")
 
-        # Récupérer la partie de base
-        game_query = select(Game).where(Game.room_code == room_code)
-        result = await db.execute(game_query)
-        base_game = result.scalar_one_or_none()
+        try:
+            # CORRECTION: Récupérer la partie avec toutes les relations nécessaires
+            game_query = select(Game).options(
+                selectinload(Game.participations),
+                selectinload(Game.creator)
+            ).where(Game.room_code == room_code)
 
-        if not base_game:
-            raise EntityNotFoundError(f"Partie avec le code {room_code} introuvable")
+            result = await db.execute(game_query)
+            base_game = result.scalar_one_or_none()
 
-        # Vérifications de sécurité
-        if base_game.status != GameStatus.WAITING:
-            raise GameError("Cette partie a déjà commencé ou est terminée")
+            if not base_game:
+                raise EntityNotFoundError(f"Partie avec le code {room_code} introuvable")
 
-        # Vérifier si l'utilisateur n'est pas déjà dans la partie
-        existing_participation = await db.execute(
-            select(GameParticipation).where(
+            # Vérifications de sécurité
+            if base_game.status not in ["waiting", "starting"]:
+                raise GameError("Cette partie a déjà commencé ou est terminée")
+
+            # CORRECTION: Vérification d'existence plus robuste
+            existing_participation_query = select(GameParticipation).where(
                 and_(
                     GameParticipation.game_id == base_game.id,
-                    GameParticipation.player_id == user_id
+                    GameParticipation.player_id == user_id,
+                    GameParticipation.status.not_in(["left", "disconnected"])
                 )
             )
-        )
-        if existing_participation.scalar_one_or_none():
-            raise GameError("Vous êtes déjà dans cette partie")
+            existing_result = await db.execute(existing_participation_query)
+            existing_participation = existing_result.scalar_one_or_none()
 
-        # Vérifier le nombre de joueurs
-        current_players = await db.execute(
-            select(func.count(GameParticipation.id)).where(
+            if existing_participation:
+                # Si déjà présent et actif, retourner les détails de la room
+                logger.info(f"✅ Utilisateur {user_id} déjà dans la room {room_code}")
+                return await self.get_room_details(db, room_code, user_id)
+
+            # Vérifier le nombre de joueurs actifs
+            active_players_query = select(func.count(GameParticipation.id)).where(
                 and_(
                     GameParticipation.game_id == base_game.id,
-                    GameParticipation.status == "joined"
+                    GameParticipation.status.not_in(["left", "disconnected", "eliminated"])
                 )
             )
-        )
-        players_count = current_players.scalar()
+            active_result = await db.execute(active_players_query)
+            active_players = active_result.scalar()
 
-        if players_count >= base_game.max_players and not as_spectator:
-            raise GameFullError("Cette partie est complète")
+            if active_players >= base_game.max_players and not as_spectator:
+                raise GameFullError("Cette partie est complète")
 
-        # Récupérer la partie multijoueur
-        mp_game_query = select(MultiplayerGame).where(
-            MultiplayerGame.base_game_id == base_game.id
-        )
-        mp_result = await db.execute(mp_game_query)
-        mp_game = mp_result.scalar_one_or_none()
+            # Vérifier le mot de passe si nécessaire
+            if base_game.is_private and password != getattr(base_game, 'password', None):
+                raise AuthorizationError("Mot de passe incorrect")
 
-        if not mp_game:
-            raise EntityNotFoundError("Partie multijoueur introuvable")
+            # CORRECTION: Gérer le cas où une participation existe avec status "left"
+            if existing_participation and existing_participation.status in ["left", "disconnected"]:
+                # Réactiver la participation existante
+                existing_participation.status = "waiting"
+                existing_participation.joined_at = datetime.now(timezone.utc)
+                existing_participation.left_at = None
+                logger.info(f"✅ Participation réactivée pour {user_id} dans {room_code}")
+            else:
+                # Créer une nouvelle participation
+                new_participation = GameParticipation(
+                    game_id=base_game.id,
+                    player_id=user_id,
+                    status="waiting",
+                    role="spectator" if as_spectator else "player",
+                    join_order=active_players + 1,
+                    is_ready=False,
+                    joined_at=datetime.now(timezone.utc)
+                )
+                db.add(new_participation)
+                logger.info(f"✅ Nouvelle participation créée pour {user_id} dans {room_code}")
 
-        result = await db.execute(
-            select(func.count(GameParticipation.id)).where(GameParticipation.game_id == base_game.id)
-        )
+            await db.commit()
 
-        # Ajouter le participant
-        participation = GameParticipation(
-            game_id=base_game.id,
-            player_id=user_id,
-            status="joined",
-            role = "player",
-            join_order = result.scalar_one() + 1
-        )
-        db.add(participation)
+            # Retourner les détails de la room mise à jour
+            return await self.get_room_details(db, room_code, user_id)
 
-        # Créer la progression
-        progress = PlayerProgress(
-            multiplayer_game_id=mp_game.id,
-            user_id=user_id,
-            status=PlayerStatus.WAITING
-        )
-        db.add(progress)
-
-        await db.commit()
-
-        # Notifier via WebSocket si disponible
-        if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
-            await multiplayer_ws_manager.notify_room(room_code, {
-                "type": "player_joined",
-                "user_id": str(user_id),
-                "is_spectator": as_spectator,
-                "players_count": players_count + 1
-            })
-
-        response_data = {
-            "room_code": room_code,
-            "game_id": str(base_game.id),
-            "status": "joined",
-            "is_spectator": as_spectator,
-            "players_count": players_count + 1
-        }
-
-        logger.info(f"✅ Utilisateur {user_id} a rejoint la room {room_code}")
-        return response_data
+        except (EntityNotFoundError, GameError, GameFullError, AuthorizationError):
+            raise
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Erreur rejoindre room {room_code}: {e}")
+            raise GameError(f"Erreur lors de la connexion: {str(e)}")
 
     async def leave_room_by_code(
             self,
@@ -252,55 +339,152 @@ class MultiplayerService:
             room_code: str,
             user_id: UUID
     ) -> None:
-        """Quitte une partie par son code de room"""
-
+        """
+        Quitte une room avec gestion intelligente du statut
+        CORRECTION: Ne plus auto-canceller trop rapidement
+        """
         logger.info(f"🚪 Utilisateur {user_id} quitte la room {room_code}")
 
-        # Récupérer la partie
-        game_query = select(Game).where(Game.room_code == room_code)
-        result = await db.execute(game_query)
-        base_game = result.scalar_one_or_none()
+        try:
+            # Récupérer la partie
+            game_query = select(Game).where(Game.room_code == room_code)
+            result = await db.execute(game_query)
+            game = result.scalar_one_or_none()
 
-        if not base_game:
-            raise EntityNotFoundError(f"Partie avec le code {room_code} introuvable")
+            if not game:
+                # CORRECTION: Si la partie n'existe plus, c'est ok
+                logger.warning(f"Partie {room_code} introuvable pour leave")
+                return
 
-        # Supprimer la participation
-        await db.execute(
-            delete(GameParticipation).where(
-                and_(
-                    GameParticipation.game_id == base_game.id,
-                    GameParticipation.player_id == user_id
+            # CORRECTION: Marquer comme left avec une requête UPDATE sûre
+            update_query = (
+                update(GameParticipation)
+                .where(
+                    and_(
+                        GameParticipation.game_id == game.id,
+                        GameParticipation.player_id == user_id,
+                        GameParticipation.status.not_in(["left", "disconnected"])
+                    )
+                )
+                .values(
+                    status="left",
+                    left_at=datetime.now(timezone.utc)
                 )
             )
-        )
 
-        # Récupérer la partie multijoueur
-        mp_game = await db.execute(
-            select(MultiplayerGame).where(MultiplayerGame.base_game_id == base_game.id)
-        )
-        mp_game = mp_game.scalar_one_or_none()
+            update_result = await db.execute(update_query)
 
-        if mp_game:
-            # Supprimer la progression
-            await db.execute(
-                delete(PlayerProgress).where(
+            if update_result.rowcount == 0:
+                logger.warning(f"Aucune participation active trouvée pour {user_id} dans {room_code}")
+                # Pas d'erreur, juste un warning
+
+            # CORRECTION: Vérifier s'il reste des joueurs actifs
+            remaining_query = select(func.count(GameParticipation.id)).where(
+                and_(
+                    GameParticipation.game_id == game.id,
+                    GameParticipation.status.not_in(["left", "disconnected", "eliminated"])
+                )
+            )
+            remaining_result = await db.execute(remaining_query)
+            remaining_players = remaining_result.scalar()
+
+            # CORRECTION: Ne marquer comme cancelled que si vraiment plus personne ET pas une nouvelle partie
+            if remaining_players == 0:
+                # Vérifier l'âge de la partie
+                age_minutes = (datetime.now(timezone.utc) - game.created_at).total_seconds() / 60
+
+                if age_minutes > 1:  # Seulement après 1 minute d'existence
+                    game.status = "cancelled"
+                    logger.info(f"🚮 Partie {room_code} marquée cancelled (plus de joueurs)")
+                else:
+                    logger.info(f"⏳ Partie {room_code} récente gardée en waiting malgré 0 joueurs")
+
+            await db.commit()
+            logger.info(f"✅ Utilisateur {user_id} a quitté la room {room_code}")
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Erreur quitter room {room_code}: {e}")
+            # CORRECTION: Ne pas raise l'erreur, juste logger
+            # L'utilisateur a quitté côté frontend de toute façon
+
+    async def cleanup_phantom_participations(
+            self,
+            db: AsyncSession,
+            room_code: str
+    ) -> Dict[str, Any]:
+        """
+        Nettoie les participations fantômes (sans player associé)
+        Méthode de debug pour résoudre les problèmes de relations
+        """
+        logger.info(f"🧹 Nettoyage des participations fantômes pour {room_code}")
+
+        try:
+            # Récupérer la partie
+            game_query = select(Game).where(Game.room_code == room_code)
+            result = await db.execute(game_query)
+            game = result.scalar_one_or_none()
+
+            if not game:
+                raise EntityNotFoundError(f"Partie {room_code} introuvable")
+
+            # Requête pour trouver les participations sans player associé
+            phantom_query = (
+                select(GameParticipation)
+                .outerjoin(User, GameParticipation.player_id == User.id)
+                .where(
                     and_(
-                        PlayerProgress.multiplayer_game_id == mp_game.id,
-                        PlayerProgress.user_id == user_id
+                        GameParticipation.game_id == game.id,
+                        User.id.is_(None)  # Pas de user associé
                     )
                 )
             )
 
-        await db.commit()
+            phantom_result = await db.execute(phantom_query)
+            phantom_participations = phantom_result.scalars().all()
 
-        # Notifier via WebSocket
-        if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
-            await multiplayer_ws_manager.notify_room(room_code, {
-                "type": "player_left",
-                "user_id": str(user_id)
-            })
+            cleaned_count = 0
+            for phantom in phantom_participations:
+                await db.delete(phantom)
+                cleaned_count += 1
+                logger.info(f"🗑️ Participation fantôme supprimée: {phantom.id}")
 
-        logger.info(f"✅ Utilisateur {user_id} a quitté la room {room_code}")
+            # Requête pour trouver les doublons (même user, même game)
+            duplicate_query = (
+                select(GameParticipation)
+                .where(GameParticipation.game_id == game.id)
+                .order_by(GameParticipation.created_at.desc())
+            )
+
+            duplicate_result = await db.execute(duplicate_query)
+            all_participations = duplicate_result.scalars().all()
+
+            # Grouper par player_id et garder seulement la plus récente
+            seen_players = set()
+            duplicate_count = 0
+
+            for participation in all_participations:
+                if participation.player_id in seen_players:
+                    await db.delete(participation)
+                    duplicate_count += 1
+                    logger.info(f"🗑️ Participation dupliquée supprimée: {participation.id}")
+                else:
+                    seen_players.add(participation.player_id)
+
+            await db.commit()
+
+            logger.info(f"✅ Nettoyage terminé: {cleaned_count} fantômes, {duplicate_count} doublons supprimés")
+
+            return {
+                "cleaned_phantoms": cleaned_count,
+                "cleaned_duplicates": duplicate_count,
+                "remaining_participations": len(seen_players)
+            }
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Erreur nettoyage {room_code}: {e}")
+            raise GameError(f"Erreur lors du nettoyage: {str(e)}")
 
     async def get_room_details(
             self,
@@ -308,10 +492,12 @@ class MultiplayerService:
             room_code: str,
             user_id: UUID
     ) -> Dict[str, Any]:
-        """Récupère les détails d'une room multijoueur SANS champs privés"""
-
+        """
+        Récupère les détails d'une room avec TOUS les paramètres corrects
+        CORRECTION MAJEURE: Affichage complet des paramètres
+        """
         try:
-            # Requête avec eager loading des relations
+            # Requête avec toutes les relations
             query = (
                 select(Game)
                 .options(
@@ -327,53 +513,119 @@ class MultiplayerService:
             if not game:
                 raise EntityNotFoundError(f"Room {room_code} non trouvée")
 
-            # Construire la liste des participants
+            # Participants
             participants_data = []
+            active_players = 0
+            creator_present = False
+
             for participation in game.participations:
+                if participation.player is None:
+                    continue
+
+                if participation.status not in ["left", "disconnected", "eliminated"]:
+                    active_players += 1
+
+                if participation.player_id == game.creator_id:
+                    creator_present = True
+
+                is_creator = (participation.player_id == game.creator_id)
+
                 participants_data.append({
                     "user_id": str(participation.player_id),
                     "username": participation.player.username,
                     "status": participation.status,
                     "score": participation.score or 0,
                     "attempts_count": participation.attempts_made or 0,
-                    "joined_at": participation.joined_at.isoformat(),
-                    "is_ready": participation.status != "waiting",
-                    "is_winner": participation.status == "finished" and participation.score > 0
+                    "joined_at": participation.joined_at.isoformat() if participation.joined_at else None,
+                    "is_ready": participation.is_ready,
+                    "is_creator": is_creator,
+                    "is_winner": participation.is_winner
                 })
 
-            # Calculer current_players correctement
-            current_players = len([p for p in game.participations
-                                   if p.status not in ["disconnected", "eliminated"]])
+            # Logique de status intelligente
+            current_status = game.status
 
-            # CORRECTION: Construire room_data SANS les champs qui n'existent plus
-            room_data = {
-                "id": str(game.id),
-                "room_code": game.room_code,
-                "name": getattr(game, 'name', f"Partie {game.room_code}"),
-                "game_type": game.game_type,
-                "difficulty": game.difficulty,
-                "status": game.status,
-                "max_players": game.max_players,
-                "current_players": current_players,
+            if active_players == 0 and game.status == "waiting":
+                age_minutes = (datetime.now(timezone.utc) - game.created_at).total_seconds() / 60
+                if age_minutes > 10:  # 10 minutes au lieu de 5
+                    game.status = "cancelled"
+                    await db.commit()
+                    current_status = "cancelled"
+            elif active_players > 0 and current_status == "cancelled":
+                game.status = "waiting"
+                await db.commit()
+                current_status = "waiting"
 
-                # CORRECTION: Valeurs par défaut pour les champs supprimés
-                "is_private": False,  # Toujours false maintenant
-                "password_protected": False,  # Toujours false maintenant
-                "allow_spectators": True,  # Valeur par défaut
-                "enable_chat": True,  # Valeur par défaut
+            # CORRECTION MAJEURE: Extraire TOUS les settings
+            settings = game.settings or {}
 
-                # Champs qui existent encore
-                "quantum_enabled": getattr(game, 'quantum_enabled', False),
-                "created_at": game.created_at.isoformat(),
-                "started_at": game.started_at.isoformat() if game.started_at else None,
-                "creator": {
-                    "id": str(game.creator.id),
-                    "username": game.creator.username
-                },
-                "participants": participants_data
+            # CORRECTION: Mapper les types correctement
+            game_type_original = game.game_type
+            game_type_display = settings.get("game_type_display", game_type_original)
+
+            # Si pas de game_type_display dans settings, utiliser le type original
+            if not game_type_display:
+                game_type_display = game_type_original
+
+            # CORRECTION: Créateur info sécurisée
+            creator_info = {
+                "id": str(game.creator.id),
+                "username": game.creator.username
+            } if game.creator else {
+                "id": str(game.creator_id),
+                "username": "Créateur inconnu"
             }
 
-            logger.info(f"✅ Détails room {room_code} récupérés: {current_players} joueurs")
+            # CORRECTION MAJEURE: Retourner TOUS les paramètres
+            room_data = {
+                # Identifiants
+                "id": str(game.id),
+                "room_code": game.room_code,
+                "name": f"Partie {game.room_code}",
+
+                # CORRECTION: Type de jeu avec toutes les variantes
+                "game_type": game_type_display,  # Type à afficher
+                "game_type_raw": game_type_original,  # Type brut pour la logique
+
+                # Paramètres de base
+                "difficulty": game.difficulty,
+                "status": current_status,
+                "max_players": game.max_players,
+                "current_players": active_players,
+
+                # Configuration de jeu COMPLÈTE
+                "combination_length": game.combination_length,
+                "available_colors": game.available_colors,
+                "max_attempts": game.max_attempts,
+                "quantum_enabled": game.quantum_enabled,
+
+                # CORRECTION: Paramètres multijoueur avec settings
+                "total_masterminds": settings.get("total_masterminds", 3),
+                "items_enabled": settings.get("items_enabled", True),
+                "items_per_mastermind": settings.get("items_per_mastermind", 1),
+
+                # Paramètres de visibilité
+                "is_private": game.is_private,
+                "password_protected": False,
+                "allow_spectators": game.allow_spectators,
+                "enable_chat": game.enable_chat,
+
+                # Métadonnées
+                "created_at": game.created_at.isoformat(),
+                "started_at": game.started_at.isoformat() if game.started_at else None,
+                "creator": creator_info,
+                "participants": participants_data,
+
+                # CORRECTION: Settings complets pour debug
+                "settings": settings,
+
+                # Infos de logique
+                "can_start": active_players >= 1 and current_status == "waiting",
+                "creator_present": creator_present
+            }
+
+            logger.info(
+                f"✅ Room {room_code}: {active_players} joueurs, type={game_type_display}, masterminds={settings.get('total_masterminds', 3)}, items={settings.get('items_enabled', True)}")
             return room_data
 
         except EntityNotFoundError:
@@ -393,8 +645,9 @@ class MultiplayerService:
             limit: int = 20,
             filters: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Récupère la liste des parties publiques pour le lobby"""
-
+        """
+        Récupère la liste des parties publiques pour le lobby
+        """
         logger.info(f"🏛️ Récupération des rooms publiques - Page {page}")
 
         # Parser les filtres JSON
@@ -408,93 +661,130 @@ class MultiplayerService:
         # Construction de la requête de base
         query = select(Game).options(
             selectinload(Game.creator),
-            selectinload(Game.participations)
+            selectinload(Game.participations).selectinload(GameParticipation.player)
         ).where(
             and_(
                 Game.is_private == False,
-                Game.game_type == GameType.CLASSIC,
-                Game.status == GameStatus.WAITING
+                Game.status.in_(["waiting", "starting"]),
             )
         )
 
         # Appliquer les filtres
         if filter_dict.get("difficulty"):
             query = query.where(Game.difficulty == filter_dict["difficulty"])
-
         if filter_dict.get("quantum_enabled") is not None:
             query = query.where(Game.quantum_enabled == filter_dict["quantum_enabled"])
 
-        if filter_dict.get("search_term"):
-            search_term = f"%{filter_dict['search_term']}%"
-            query = query.join(User, Game.creator_id == User.id).where(
-                or_(
-                    Game.room_code.ilike(search_term),
-                    User.username.ilike(search_term)
-                )
-            )
-
-        # Pagination
-        total_query = select(func.count()).select_from(query.subquery())
-        total_result = await db.execute(total_query)
-        total = total_result.scalar()
-
+        # Tri et pagination
+        query = query.order_by(Game.created_at.desc())
         offset = (page - 1) * limit
-        query = query.offset(offset).limit(limit).order_by(desc(Game.created_at))
+        query = query.offset(offset).limit(limit)
 
+        # Exécuter la requête
         result = await db.execute(query)
         games = result.scalars().all()
 
-        # Construire la réponse
-        rooms = []
+        # Formater les données des rooms
+        rooms_data = []
         for game in games:
-            # Récupérer la partie multijoueur associée
-            mp_game_query = select(MultiplayerGame).where(
-                MultiplayerGame.base_game_id == game.id
-            )
-            mp_result = await db.execute(mp_game_query)
-            mp_game = mp_result.scalar_one_or_none()
+            # Calcul du nombre de joueurs actifs
+            active_participants = [
+                p for p in game.participations
+                if p.status not in ["left", "disconnected", "eliminated"]
+            ]
+            current_players = len(active_participants)
 
-            players_count = len([p for p in game.participations])
+            # Si aucun joueur actif, marquer comme cancelled
+            if current_players == 0 and game.status == "waiting":
+                game.status = "cancelled"
+                await db.commit()
+                continue  # Exclure cette partie des résultats
 
             room_data = {
+                "id": str(game.id),
                 "room_code": game.room_code,
-                "game_id": str(game.id),
-                "creator": {
-                    "id": str(game.creator.id),
-                    "username": game.creator.username
-                },
-                "status": game.status,
+                "name": f"Partie {game.room_code}",
+                "game_type": game.game_type,
                 "difficulty": game.difficulty,
-                "quantum_enabled": game.quantum_enabled,
-                "players_count": players_count,
+                "status": game.status,
                 "max_players": game.max_players,
-                "has_password": "False",
-                "created_at": game.created_at.isoformat()
+                "current_players": current_players,
+                "is_private": game.is_private,
+                "password_protected": False,
+                "allow_spectators": game.allow_spectators,
+                "enable_chat": game.enable_chat,
+                "quantum_enabled": game.quantum_enabled,
+                "created_at": game.created_at.isoformat(),
+                "creator": {
+                    "id": str(game.creator_id),
+                    "username": game.creator.username
+                }
             }
+            rooms_data.append(room_data)
 
-            if mp_game:
-                room_data.update({
-                    "game_type": mp_game.game_type,
-                    "total_masterminds": mp_game.total_masterminds,
-                    "items_enabled": mp_game.items_enabled
-                })
+        # Compter le total
+        count_query = select(func.count(Game.id)).where(
+            and_(
+                Game.is_private == False,
+                Game.status.in_(["waiting", "starting"]),
+            )
+        )
+        count_result = await db.execute(count_query)
+        total_count = count_result.scalar()
 
-            rooms.append(room_data)
+        logger.info(f"✅ {len(rooms_data)} rooms publiques récupérées")
 
-        response_data = {
-            "rooms": rooms,
-            "pagination": {
-                "page": page,
-                "limit": limit,
-                "total": total,
-                "pages": (total + limit - 1) // limit,
-                "has_next": page * limit < total,
-                "has_prev": page > 1
-            }
+        return {
+            "rooms": rooms_data,
+            "total": total_count,
+            "page": page,
+            "limit": limit,
+            "has_more": (page * limit) < total_count
         }
 
-        return response_data
+    async def cleanup_abandoned_games(self, db: AsyncSession) -> Dict[str, int]:
+        """
+        Nettoie automatiquement les parties abandonnées
+        À appeler périodiquement (par exemple via une tâche cron)
+        """
+        logger.info("🧹 Nettoyage des parties abandonnées")
 
+        # Parties en attente depuis plus de 30 minutes sans joueurs
+        thirty_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=30)
+
+        # Requête pour trouver les parties à nettoyer
+        abandoned_query = select(Game).where(
+            and_(
+                Game.status.in_(["waiting", "starting"]),
+                Game.created_at < thirty_minutes_ago
+            )
+        ).options(selectinload(Game.participations))
+
+        result = await db.execute(abandoned_query)
+        games = result.scalars().all()
+
+        cancelled_count = 0
+        for game in games:
+            # Compter les joueurs actifs
+            active_players = len([
+                p for p in game.participations
+                if p.status not in ["left", "disconnected", "eliminated"]
+            ])
+
+            # Si aucun joueur actif, marquer comme cancelled
+            if active_players == 0:
+                game.status = "cancelled"
+                cancelled_count += 1
+                logger.info(f"🚮 Partie {game.room_code} automatiquement cancelled")
+
+        if cancelled_count > 0:
+            await db.commit()
+            logger.info(f"✅ {cancelled_count} parties abandonnées nettoyées")
+
+        return {
+            "total_checked": len(games),
+            "cancelled_count": cancelled_count
+        }
     # =====================================================
     # GAMEPLAY MULTIJOUEUR
     # =====================================================
@@ -505,203 +795,68 @@ class MultiplayerService:
             room_code: str,
             user_id: UUID
     ) -> Dict[str, Any]:
-        """Démarre une partie multijoueur"""
-
+        """
+        Démarre une partie multijoueur
+        NOUVELLE MÉTHODE pour démarrer les parties
+        """
         logger.info(f"🚀 Démarrage partie {room_code} par {user_id}")
 
-        # Récupérer la partie
-        game_query = select(Game).where(Game.room_code == room_code)
-        result = await db.execute(game_query)
-        base_game = result.scalar_one_or_none()
+        try:
+            # Récupérer la partie
+            game_query = select(Game).options(
+                selectinload(Game.participations),
+                selectinload(Game.creator)
+            ).where(Game.room_code == room_code)
 
-        if not base_game:
-            raise EntityNotFoundError(f"Partie {room_code} introuvable")
+            result = await db.execute(game_query)
+            game = result.scalar_one_or_none()
 
-        # Vérifier que l'utilisateur est le créateur
-        if base_game.creator_id != user_id:
-            raise AuthorizationError("Seul le créateur peut démarrer la partie")
+            if not game:
+                raise EntityNotFoundError(f"Partie {room_code} introuvable")
 
-        if base_game.status != GameStatus.WAITING:
-            raise GameError("Cette partie a déjà commencé ou est terminée")
+            # Vérifier que l'utilisateur est le créateur
+            if game.creator_id != user_id:
+                raise AuthorizationError("Seul le créateur peut démarrer la partie")
 
-        # Récupérer la partie multijoueur
-        mp_game_query = select(MultiplayerGame).where(
-            MultiplayerGame.base_game_id == base_game.id
-        )
-        mp_result = await db.execute(mp_game_query)
-        mp_game = mp_result.scalar_one_or_none()
+            # Vérifier que la partie peut être démarrée
+            if game.status != "waiting":
+                raise GameError(f"Impossible de démarrer une partie avec le statut '{game.status}'")
 
-        if not mp_game:
-            raise EntityNotFoundError("Partie multijoueur introuvable")
+            # Vérifier qu'il y a au moins un joueur
+            active_players = len([
+                p for p in game.participations
+                if p.status not in ["left", "disconnected", "eliminated"]
+            ])
 
-        # Démarrer la partie
-        now = datetime.now(timezone.utc)
-        base_game.status = GameStatus.IN_PROGRESS
-        base_game.started_at = now
-        mp_game.started_at = now
+            if active_players < 1:
+                raise GameError("Impossible de démarrer une partie sans joueurs")
 
-        # Activer tous les joueurs
-        await db.execute(
-            update(PlayerProgress).where(
-                PlayerProgress.multiplayer_game_id == mp_game.id
-            ).values(status="playing")
-        )
+            # Démarrer la partie
+            game.status = "active"
+            game.started_at = datetime.now(timezone.utc)
 
-        await db.commit()
+            # Marquer tous les joueurs actifs comme "playing"
+            for participation in game.participations:
+                if participation.status not in ["left", "disconnected", "eliminated"]:
+                    participation.status = "playing"
 
-        # Notifier via WebSocket
-        if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
-            await multiplayer_ws_manager.notify_room(room_code, {
-                "type": "game_started",
-                "started_at": now.isoformat()
-            })
+            await db.commit()
 
-        logger.info(f"✅ Partie {room_code} démarrée")
-        return {"status": "started", "started_at": now.isoformat()}
+            logger.info(f"✅ Partie {room_code} démarrée avec {active_players} joueurs")
 
-    async def submit_attempt(
-            self,
-            db: AsyncSession,
-            room_code: str,
-            user_id: UUID,
-            attempt_data: MultiplayerAttemptRequest
-    ) -> Dict[str, Any]:
-        """Soumet une tentative dans une partie multijoueur"""
+            return {
+                "room_code": room_code,
+                "status": "active",
+                "started_at": game.started_at.isoformat(),
+                "active_players": active_players
+            }
 
-        logger.info(f"🎯 Tentative soumise pour {room_code} par {user_id}")
-
-        # Récupérer la partie et vérifications
-        game_query = select(Game).where(Game.room_code == room_code)
-        result = await db.execute(game_query)
-        base_game = result.scalar_one_or_none()
-
-        if not base_game:
-            raise EntityNotFoundError(f"Partie {room_code} introuvable")
-
-        if base_game.status != GameStatus.IN_PROGRESS:
-            raise GameError("Cette partie n'est pas en cours")
-
-        # Récupérer la partie multijoueur et le mastermind actuel
-        mp_game_query = select(MultiplayerGame).options(
-            selectinload(MultiplayerGame.masterminds)
-        ).where(MultiplayerGame.base_game_id == base_game.id)
-
-        mp_result = await db.execute(mp_game_query)
-        mp_game = mp_result.scalar_one_or_none()
-
-        if not mp_game:
-            raise EntityNotFoundError("Partie multijoueur introuvable")
-
-        # Trouver le mastermind actuel
-        current_mastermind = None
-        for mastermind in mp_game.masterminds:
-            if mastermind.mastermind_number == mp_game.current_mastermind:
-                current_mastermind = mastermind
-                break
-
-        if not current_mastermind:
-            raise GameError("Mastermind actuel introuvable")
-
-        # Récupérer la progression du joueur
-        progress_query = select(PlayerProgress).where(
-            and_(
-                PlayerProgress.multiplayer_game_id == mp_game.id,
-                PlayerProgress.user_id == user_id
-            )
-        )
-        progress_result = await db.execute(progress_query)
-        player_progress = progress_result.scalar_one_or_none()
-
-        if not player_progress:
-            raise EntityNotFoundError("Progression du joueur introuvable")
-
-        if player_progress.status != "playing":
-            raise GameError("Vous ne pouvez pas jouer actuellement")
-
-        # Calculer le nombre de tentatives déjà effectuées
-        attempts_query = select(func.count(PlayerMastermindAttempt.id)).where(
-            and_(
-                PlayerMastermindAttempt.mastermind_id == current_mastermind.id,
-                PlayerMastermindAttempt.user_id == user_id
-            )
-        )
-        attempts_result = await db.execute(attempts_query)
-        attempts_count = attempts_result.scalar()
-
-        if attempts_count >= current_mastermind.max_attempts:
-            raise GameError("Nombre maximum de tentatives atteint pour ce mastermind")
-
-        # Évaluer la tentative
-        evaluation = self._evaluate_combination(
-            attempt_data.combination,
-            current_mastermind.solution
-        )
-
-        # Calculer le score
-        score = self._calculate_attempt_score(
-            evaluation["exact_matches"],
-            evaluation["position_matches"],
-            evaluation["is_winning"],
-            attempts_count + 1,
-            base_game.difficulty.value,
-            base_game.quantum_enabled
-        )
-
-        # Créer l'enregistrement de la tentative
-        attempt = PlayerMastermindAttempt(
-            mastermind_id=current_mastermind.id,
-            user_id=user_id,
-            attempt_number=attempts_count + 1,
-            combination=attempt_data.combination,
-            exact_matches=evaluation["exact_matches"],
-            position_matches=evaluation["position_matches"],
-            is_winning=evaluation["is_winning"],
-            score=score,
-            time_taken=attempt_data.time_taken
-        )
-
-        db.add(attempt)
-
-        # Mettre à jour la progression du joueur
-        player_progress.total_score += score
-
-        # Si c'est une solution gagnante pour ce mastermind
-        if evaluation["is_winning"]:
-            player_progress.completed_masterminds += 1
-
-            # Vérifier si le joueur a terminé tous les masterminds
-            if player_progress.completed_masterminds >= mp_game.total_masterminds:
-                player_progress.is_finished = True
-                player_progress.finish_time = datetime.now(timezone.utc)
-                player_progress.status = "finished"
-
-        await db.commit()
-
-        # Préparer la réponse
-        response_data = {
-            "attempt_number": attempts_count + 1,
-            "combination": attempt_data.combination,
-            "exact_matches": evaluation["exact_matches"],
-            "position_matches": evaluation["position_matches"],
-            "is_winning": evaluation["is_winning"],
-            "score": score,
-            "total_score": player_progress.total_score,
-            "completed_masterminds": player_progress.completed_masterminds,
-            "is_finished": player_progress.is_finished
-        }
-
-        # Notifier via WebSocket
-        if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
-            await multiplayer_ws_manager.notify_room(room_code, {
-                "type": "attempt_submitted",
-                "user_id": str(user_id),
-                "mastermind_number": mp_game.current_mastermind,
-                "is_winning": evaluation["is_winning"],
-                "score": score
-            })
-
-        logger.info(f"✅ Tentative enregistrée pour {user_id} dans {room_code}")
-        return response_data
+        except (EntityNotFoundError, AuthorizationError, GameError):
+            raise
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Erreur démarrage {room_code}: {e}")
+            raise GameError(f"Erreur lors du démarrage: {str(e)}")
 
     async def get_game_results(
             self,
