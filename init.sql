@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS game_masterminds (
     -- Métadonnées temporelles
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     -- Contraintes
     CONSTRAINT ck_game_masterminds_number CHECK (mastermind_number >= 1),

@@ -42,7 +42,7 @@ except ImportError as e:
 from app.models.game import Game, GameStatus, GameParticipation, Difficulty, GameType
 from app.models.multijoueur import (
     MultiplayerGame, PlayerProgress, GameMastermind,
-    PlayerMastermindAttempt, MultiplayerGameType
+    PlayerMastermindAttempt, MultiplayerGameType, PlayerStatus
 )
 from app.models.user import User
 from app.schemas.multiplayer import (
@@ -79,7 +79,7 @@ class MultiplayerService:
             # Créer la partie de base
             base_game = Game(
                 room_code=room_code,
-                game_type=GameType.MULTIPLAYER,
+                game_type=game_data.game_type,
                 game_mode="multiplayer",
                 difficulty=Difficulty(game_data.difficulty),
                 status=GameStatus.WAITING,
@@ -91,8 +91,6 @@ class MultiplayerService:
                 solution=game_data.solution or self._generate_random_solution(
                     game_data.combination_length, game_data.available_colors
                 ),
-                is_public=game_data.is_public,
-                password_hash=game_data.password if game_data.password else None,
                 quantum_enabled=game_data.quantum_enabled
             )
 
@@ -102,7 +100,7 @@ class MultiplayerService:
             # Créer la partie multijoueur
             multiplayer_game = MultiplayerGame(
                 base_game_id=base_game.id,
-                game_type=MultiplayerGameType(game_data.game_type),
+                game_type=MultiplayerGameType.MULTI_MASTERMIND,
                 total_masterminds=game_data.total_masterminds,
                 difficulty=Difficulty(game_data.difficulty),
                 items_enabled=game_data.items_enabled,
@@ -131,8 +129,10 @@ class MultiplayerService:
             participation = GameParticipation(
                 game_id=base_game.id,
                 player_id=creator_id,
-                status="joined",
-                is_creator=True
+                status="waiting",
+                role="player",  # si obligatoire
+                join_order=1  # ✅ Solution ici
+
             )
             db.add(participation)
 
@@ -140,7 +140,7 @@ class MultiplayerService:
             progress = PlayerProgress(
                 multiplayer_game_id=multiplayer_game.id,
                 user_id=creator_id,
-                status="waiting"
+                status=PlayerStatus.WAITING
             )
             db.add(progress)
 
@@ -192,9 +192,6 @@ class MultiplayerService:
         if base_game.status != GameStatus.WAITING:
             raise GameError("Cette partie a déjà commencé ou est terminée")
 
-        if base_game.password_hash and password != base_game.password_hash:
-            raise AuthorizationError("Mot de passe incorrect")
-
         # Vérifier si l'utilisateur n'est pas déjà dans la partie
         existing_participation = await db.execute(
             select(GameParticipation).where(
@@ -231,12 +228,17 @@ class MultiplayerService:
         if not mp_game:
             raise EntityNotFoundError("Partie multijoueur introuvable")
 
+        result = await db.execute(
+            select(func.count(GameParticipation.id)).where(GameParticipation.game_id == base_game.id)
+        )
+
         # Ajouter le participant
         participation = GameParticipation(
             game_id=base_game.id,
             player_id=user_id,
             status="joined",
-            is_spectator=as_spectator
+            role = "player",
+            join_order = result.scalar_one() + 1
         )
         db.add(participation)
 
@@ -244,7 +246,7 @@ class MultiplayerService:
         progress = PlayerProgress(
             multiplayer_game_id=mp_game.id,
             user_id=user_id,
-            status="waiting"
+            status=PlayerStatus.WAITING
         )
         db.add(progress)
 
@@ -422,11 +424,11 @@ class MultiplayerService:
         # Construction de la requête de base
         query = select(Game).options(
             selectinload(Game.creator),
-            selectinload(Game.participants)
+            selectinload(Game.participations)
         ).where(
             and_(
-                Game.is_public == True,
-                Game.game_type == GameType.MULTIPLAYER,
+                Game.is_private == False,
+                Game.game_type == GameType.CLASSIC,
                 Game.status == GameStatus.WAITING
             )
         )
@@ -468,7 +470,7 @@ class MultiplayerService:
             mp_result = await db.execute(mp_game_query)
             mp_game = mp_result.scalar_one_or_none()
 
-            players_count = len([p for p in game.participants if not p.is_spectator])
+            players_count = len([p for p in game.participations])
 
             room_data = {
                 "room_code": game.room_code,
@@ -477,18 +479,18 @@ class MultiplayerService:
                     "id": str(game.creator.id),
                     "username": game.creator.username
                 },
-                "status": game.status.value,
-                "difficulty": game.difficulty.value,
+                "status": game.status,
+                "difficulty": game.difficulty,
                 "quantum_enabled": game.quantum_enabled,
                 "players_count": players_count,
                 "max_players": game.max_players,
-                "has_password": bool(game.password_hash),
+                "has_password": "False",
                 "created_at": game.created_at.isoformat()
             }
 
             if mp_game:
                 room_data.update({
-                    "game_type": mp_game.game_type.value,
+                    "game_type": mp_game.game_type,
                     "total_masterminds": mp_game.total_masterminds,
                     "items_enabled": mp_game.items_enabled
                 })

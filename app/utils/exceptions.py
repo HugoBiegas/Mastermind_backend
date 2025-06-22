@@ -20,6 +20,7 @@ class BaseQuantumMastermindError(Exception):
         error_code: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None
     ):
+        self.status_code = None
         self.message = message
         self.error_code = error_code
         self.details = details or {}

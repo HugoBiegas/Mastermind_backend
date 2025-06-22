@@ -130,11 +130,13 @@ class MultiplayerGame(Base):
 
     # === CONTRAINTES ===
     __table_args__ = (
-        CheckConstraint("game_type IN ('multi_mastermind', 'battle_royale', 'tournament')"),
-        CheckConstraint("total_masterminds >= 1 AND total_masterminds <= 10"),
-        CheckConstraint("current_mastermind >= 1 AND current_mastermind <= total_masterminds"),
-        CheckConstraint("difficulty IN ('easy', 'medium', 'hard', 'expert', 'quantum')"),
-        CheckConstraint("items_per_mastermind >= 0"),
+        CheckConstraint("game_type IN ('multi_mastermind', 'battle_royale', 'tournament')", name="ck_game_type_valid"),
+        CheckConstraint("total_masterminds >= 1 AND total_masterminds <= 10", name="ck_total_masterminds_bounds"),
+        CheckConstraint("current_mastermind >= 1 AND current_mastermind <= total_masterminds",
+                        name="ck_current_mastermind_bounds"),
+        CheckConstraint("difficulty IN ('easy', 'medium', 'hard', 'expert', 'quantum')",
+                        name="ck_game_difficulty_valid"),
+        CheckConstraint("items_per_mastermind >= 0", name="ck_items_per_mastermind_non_negative"),
         UniqueConstraint("base_game_id", name="uq_multiplayer_games_base_game"),
     )
 
@@ -191,10 +193,10 @@ class GameMastermind(Base):
 
     # === CONTRAINTES ===
     __table_args__ = (
-        CheckConstraint("mastermind_number >= 1"),
-        CheckConstraint("combination_length >= 2 AND combination_length <= 8"),
-        CheckConstraint("available_colors >= 3 AND available_colors <= 15"),
-        CheckConstraint("max_attempts > 0"),
+        CheckConstraint("mastermind_number >= 1", name="ck_mastermind_number_positive"),
+        CheckConstraint("combination_length >= 2 AND combination_length <= 8", name="ck_combination_length_bounds"),
+        CheckConstraint("available_colors >= 3 AND available_colors <= 15", name="ck_available_colors_bounds"),
+        CheckConstraint("max_attempts > 0", name="ck_max_attempts_positive"),
         UniqueConstraint("multiplayer_game_id", "mastermind_number", name="uq_game_masterminds_game_number"),
         Index("idx_multiplayer_mastermind", "multiplayer_game_id", "mastermind_number"),
     )
@@ -261,12 +263,15 @@ class PlayerProgress(Base):
 
     # === CONTRAINTES ===
     __table_args__ = (
-        CheckConstraint("status IN ('waiting', 'ready', 'playing', 'paused', 'finished', 'disconnected', 'eliminated')"),
-        CheckConstraint("current_mastermind >= 1"),
-        CheckConstraint("completed_masterminds >= 0"),
-        CheckConstraint("total_score >= 0"),
-        CheckConstraint("total_time >= 0"),
-        CheckConstraint("finish_position IS NULL OR finish_position >= 1"),
+        CheckConstraint(
+            "status IN ('waiting', 'ready', 'playing', 'paused', 'finished', 'disconnected', 'eliminated')",
+            name="ck_progress_status_valid"
+        ),
+        CheckConstraint("current_mastermind >= 1", name="ck_progress_current_mastermind_positive"),
+        CheckConstraint("completed_masterminds >= 0", name="ck_progress_completed_masterminds_positive"),
+        CheckConstraint("total_score >= 0", name="ck_progress_total_score_positive"),
+        CheckConstraint("total_time >= 0", name="ck_progress_total_time_positive"),
+        CheckConstraint("finish_position IS NULL OR finish_position >= 1", name="ck_progress_finish_position_valid"),
         UniqueConstraint("multiplayer_game_id", "user_id", name="uq_player_progress_game_user"),
         Index("idx_player_progress_game", "multiplayer_game_id"),
         Index("idx_player_progress_user", "user_id"),
@@ -330,12 +335,15 @@ class PlayerMastermindAttempt(Base):
 
     # === CONTRAINTES ===
     __table_args__ = (
-        CheckConstraint("attempt_number > 0"),
-        CheckConstraint("exact_matches >= 0"),
-        CheckConstraint("position_matches >= 0"),
-        CheckConstraint("score >= 0"),
-        CheckConstraint("time_taken IS NULL OR time_taken > 0"),
-        CheckConstraint("hint_type IS NULL OR hint_type IN ('grover', 'superposition', 'entanglement', 'interference')"),
+        CheckConstraint("attempt_number > 0", name="ck_attempts_number_positive"),
+        CheckConstraint("exact_matches >= 0", name="ck_attempts_exact_matches_positive"),
+        CheckConstraint("position_matches >= 0", name="ck_attempts_position_matches_positive"),
+        CheckConstraint("score >= 0", name="ck_attempts_score_positive"),
+        CheckConstraint("time_taken IS NULL OR time_taken > 0", name="ck_attempts_time_taken_positive_or_null"),
+        CheckConstraint(
+            "hint_type IS NULL OR hint_type IN ('grover', 'superposition', 'entanglement', 'interference')",
+            name="ck_attempts_hint_type_valid"
+        ),
         UniqueConstraint("mastermind_id", "user_id", "attempt_number", name="uq_player_mastermind_attempts"),
         Index("idx_player_attempts_mastermind", "mastermind_id"),
         Index("idx_player_attempts_user", "user_id"),
@@ -388,14 +396,15 @@ class PlayerLeaderboard(Base):
 
     # === CONTRAINTES ===
     __table_args__ = (
-        CheckConstraint("final_position >= 1"),
-        CheckConstraint("final_score >= 0"),
-        CheckConstraint("total_time >= 0"),
-        CheckConstraint("masterminds_completed >= 0"),
-        CheckConstraint("total_attempts >= 0"),
-        CheckConstraint("perfect_solutions >= 0"),
-        CheckConstraint("quantum_hints_used >= 0"),
-        CheckConstraint("items_used >= 0"),
+        CheckConstraint("final_position >= 1", name="ck_leaderboard_final_position_positive"),
+        CheckConstraint("final_score >= 0", name="ck_leaderboard_final_score_positive"),
+        CheckConstraint("total_time >= 0", name="ck_leaderboard_total_time_positive"),
+        CheckConstraint("masterminds_completed >= 0", name="ck_leaderboard_masterminds_completed_positive"),
+        CheckConstraint("total_attempts >= 0", name="ck_leaderboard_total_attempts_positive"),
+        CheckConstraint("perfect_solutions >= 0", name="ck_leaderboard_perfect_solutions_positive"),
+        CheckConstraint("quantum_hints_used >= 0", name="ck_leaderboard_quantum_hints_used_positive"),
+        CheckConstraint("items_used >= 0", name="ck_leaderboard_items_used_positive"),
+
         UniqueConstraint("multiplayer_game_id", "user_id", name="uq_player_leaderboard_game_user"),
         Index("idx_leaderboard_game", "multiplayer_game_id"),
         Index("idx_leaderboard_position", "final_position"),
@@ -436,9 +445,18 @@ class GameItem(Base):
 
     # === CONTRAINTES ===
     __table_args__ = (
-        CheckConstraint("item_type IN ('extra_hint', 'time_bonus', 'skip_mastermind', 'double_score', 'freeze_time', 'add_mastermind', 'reduce_attempts', 'scramble_colors')"),
-        CheckConstraint("rarity IN ('common', 'rare', 'epic', 'legendary')"),
-        CheckConstraint("duration_seconds IS NULL OR duration_seconds > 0"),
+        CheckConstraint(
+            "item_type IN ('extra_hint', 'time_bonus', 'skip_mastermind', 'double_score', 'freeze_time', 'add_mastermind', 'reduce_attempts', 'scramble_colors')",
+            name="ck_game_items_item_type_valid"
+        ),
+        CheckConstraint(
+            "rarity IN ('common', 'rare', 'epic', 'legendary')",
+            name="ck_game_items_rarity_valid"
+        ),
+        CheckConstraint(
+            "duration_seconds IS NULL OR duration_seconds > 0",
+            name="ck_game_items_duration_positive_or_null"
+        ),
         Index("idx_game_items_type", "item_type"),
         Index("idx_game_items_rarity", "rarity"),
     )
@@ -501,13 +519,18 @@ class WebSocketSession(Base):
 
     # === CONTRAINTES ===
     __table_args__ = (
-        CheckConstraint("status IN ('connected', 'disconnected', 'error', 'timeout')"),
-        CheckConstraint("messages_sent >= 0 AND messages_received >= 0"),
+        CheckConstraint(
+            "status IN ('connected', 'disconnected', 'error', 'timeout')",
+            name="ck_websocket_status_valid"
+        ),
+        CheckConstraint(
+            "messages_sent >= 0 AND messages_received >= 0",
+            name="ck_websocket_messages_non_negative"
+        ),
         Index("idx_websocket_user", "user_id"),
         Index("idx_websocket_game", "game_id"),
         Index("idx_websocket_status", "status"),
     )
-
     def __repr__(self) -> str:
         return f"<WebSocketSession(id={self.session_id}, user_id={self.user_id}, status={self.status})>"
 

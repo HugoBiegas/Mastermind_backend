@@ -4,12 +4,9 @@ Compatible avec les attentes du code React.js décrites dans le document
 COMPLET: Toutes les routes attendues par le frontend sont implémentées
 """
 import json
-from typing import Any, Dict, List, Optional
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_
 
 from app.api.deps import get_database, get_current_active_user
 from app.models.user import User
@@ -181,8 +178,7 @@ async def get_multiplayer_room(
 async def get_public_multiplayer_rooms(
         page: int = Query(1, ge=1, description="Page"),
         limit: int = Query(20, ge=1, le=100, description="Limite par page"),
-        # CORRECTION: Accepter les paramètres directs du frontend
-        status: Optional[str] = Query(None, description="Status des parties"),
+        player_status: Optional[str] = Query(None, description="Status des parties"),
         difficulty: Optional[str] = Query(None, description="Difficulté"),
         game_type: Optional[str] = Query(None, description="Type de jeu"),
         quantum_enabled: Optional[bool] = Query(None, description="Quantique activé"),
@@ -200,8 +196,8 @@ async def get_public_multiplayer_rooms(
         # CORRECTION: Construire les filtres à partir des paramètres directs
         constructed_filters = {}
 
-        if status:
-            constructed_filters["status"] = status
+        if player_status:
+            constructed_filters["status"] = player_status
         if difficulty:
             constructed_filters["difficulty"] = difficulty
         if game_type:
@@ -235,7 +231,7 @@ async def get_public_multiplayer_rooms(
         logger.error(f"Erreur dans get_public_multiplayer_rooms: {str(e)}")
 
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=player_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération: {str(e)}"
         )
 
