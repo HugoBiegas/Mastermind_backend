@@ -1,20 +1,48 @@
 """
 Service Multijoueur complet pour cohérence avec le frontend React.js
 Toutes les méthodes attendues par le frontend sont implémentées avec intégration quantique
+CORRIGÉ: Imports sécurisés, gestion d'erreurs robuste, compatibilité DB
 """
 import json
 import secrets
+import logging
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from sqlalchemy import select, and_, desc, asc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+# Imports sécurisés avec gestion d'erreurs
+logger = logging.getLogger(__name__)
+
+# Import conditionnel pour quantum_service
+try:
+    from app.services.quantum import quantum_service
+    QUANTUM_AVAILABLE = True
+    logger.info("✅ Service quantique disponible")
+except ImportError as e:
+    quantum_service = None
+    QUANTUM_AVAILABLE = False
+    logger.warning(f"⚠️ Service quantique non disponible: {e}")
+
+# Import conditionnel pour websocket
+try:
+    from app.websocket.multiplayer import multiplayer_ws_manager
+    WEBSOCKET_AVAILABLE = True
+    logger.info("✅ WebSocket multijoueur disponible")
+except ImportError as e:
+    multiplayer_ws_manager = None
+    WEBSOCKET_AVAILABLE = False
+    logger.warning(f"⚠️ WebSocket multijoueur non disponible: {e}")
+
+# Imports standards du projet
 from app.core.security import jwt_manager
 from app.models.game import Game, GameStatus, GameParticipation, ParticipationStatus, generate_room_code, Difficulty
 from app.models.multijoueur import (
     MultiplayerGame, PlayerProgress, GameMastermind,
-    PlayerStatus
+    PlayerStatus, MultiplayerGameType, PlayerMastermindAttempt
 )
 from app.models.user import User
 from app.schemas.game import QuantumHintResponse
@@ -22,9 +50,10 @@ from app.schemas.multiplayer import (
     MultiplayerGameCreateRequest, MultiplayerAttemptRequest,
     ItemUseRequest, QuantumHintRequest
 )
-from app.services.quantum import quantum_service
-from app.utils.exceptions import *
-from app.websocket.multiplayer import multiplayer_ws_manager
+from app.utils.exceptions import (
+    EntityNotFoundError, GameError, ValidationError,
+    AuthorizationError, AuthenticationError, GameFullError
+)
 
 
 class MultiplayerService:
@@ -42,77 +71,93 @@ class MultiplayerService:
     ) -> Dict[str, Any]:
         """Crée une nouvelle partie multijoueur avec support quantique"""
 
-        # Récupérer la configuration de difficulté (même logique que le solo)
-        difficulty_config = self._get_difficulty_config(game_data.difficulty)
+        try:
+            logger.info(f"🎯 Création partie multijoueur par utilisateur {creator_id}")
 
-        # Paramètres finaux basés sur la difficulté
-        combination_length = difficulty_config["length"]
-        available_colors = difficulty_config["colors"]
-        max_attempts = difficulty_config["attempts"]
+            # Récupérer la configuration de difficulté (même logique que le solo)
+            difficulty_config = self._get_difficulty_config(game_data.difficulty)
 
-        # Générer un code de room unique
-        room_code = await self._generate_unique_room_code(db)
+            # Paramètres finaux basés sur la difficulté
+            combination_length = difficulty_config["length"]
+            available_colors = difficulty_config["colors"]
+            max_attempts = difficulty_config["attempts"]
 
-        # Générer la solution (quantique si activé)
-        if game_data.quantum_enabled:
-            solution = await quantum_service.generate_quantum_solution(
-                combination_length=combination_length,
-                available_colors=available_colors
+            # Générer un code de room unique
+            room_code = await self._generate_unique_room_code(db)
+            logger.info(f"🔑 Code room généré: {room_code}")
+
+            # Générer la solution (quantique si activé et disponible)
+            solution = await self._generate_solution(
+                game_data.quantum_enabled, combination_length, available_colors
             )
-        else:
-            solution = [secrets.randbelow(available_colors) + 1 for _ in range(combination_length)]
 
-        # Créer le jeu de base avec la configuration de difficulté
-        base_game = Game(
-            room_code=room_code,
-            game_type="multiplayer",
-            game_mode="multiplayer",
-            status=GameStatus.WAITING,
-            difficulty=game_data.difficulty.value,
-            combination_length=combination_length,
-            available_colors=available_colors,
-            max_attempts=max_attempts,
-            max_players=game_data.max_players,
-            is_private=game_data.is_private,
-            allow_spectators=game_data.allow_spectators,
-            enable_chat=game_data.enable_chat,
-            quantum_enabled=game_data.quantum_enabled,
-            creator_id=creator_id,
-            solution=solution,
-            settings={
-                "items_enabled": game_data.items_enabled,
-                "password_hash": game_data.password if game_data.password else None,
-                "total_masterminds": game_data.total_masterminds or 3,
-                "game_name": getattr(game_data, 'name', None) or f"Partie de {creator_id}"
-            }
-        )
+            # Convertir enum en string si nécessaire
+            difficulty_str = game_data.difficulty.value if hasattr(game_data.difficulty, 'value') else str(game_data.difficulty)
 
-        db.add(base_game)
-        await db.flush()  # Pour obtenir l'ID
+            # Créer le jeu de base avec la configuration de difficulté
+            base_game = Game(
+                room_code=room_code,
+                game_type="multiplayer",
+                game_mode="multiplayer",
+                status=GameStatus.WAITING,
+                difficulty=difficulty_str,
+                combination_length=combination_length,
+                available_colors=available_colors,
+                max_attempts=max_attempts,
+                max_players=game_data.max_players,
+                solution=solution,
+                is_private=game_data.is_private,
+                allow_spectators=game_data.allow_spectators,
+                enable_chat=game_data.enable_chat,
+                quantum_enabled=game_data.quantum_enabled,
+                creator_id=creator_id,
+                settings={
+                    "items_enabled": game_data.items_enabled,
+                    "password_hash": game_data.password if game_data.password else None,
+                    "total_masterminds": game_data.total_masterminds or 3,
+                    "game_name": getattr(game_data, 'name', None) or f"Partie de {creator_id}"
+                }
+            )
 
-        # Créer la partie multijoueur
-        multiplayer_game = MultiplayerGame(
-            base_game_id=base_game.id,
-            game_type=game_data.game_type,
-            total_masterminds=game_data.total_masterminds or 3,
-            difficulty=game_data.difficulty,
-            items_enabled=game_data.items_enabled,
-            current_mastermind=1
-        )
+            db.add(base_game)
+            await db.flush()  # Pour obtenir l'ID
+            logger.info(f"📝 Jeu de base créé: {base_game.id}")
 
-        db.add(multiplayer_game)
-        await db.flush()
+            # Créer la partie multijoueur
+            multiplayer_game = MultiplayerGame(
+                base_game_id=base_game.id,
+                game_type=game_data.game_type,
+                total_masterminds=game_data.total_masterminds or 3,
+                difficulty=difficulty_str,
+                items_enabled=game_data.items_enabled,
+                current_mastermind=1,
+                is_final_mastermind=False,
+                items_per_mastermind=1  # Valeur par défaut
+                # Note: started_at et finished_at seront NULL par défaut
+            )
 
-        # Créer les masterminds avec configuration de difficulté
-        await self._create_masterminds_for_game(db, multiplayer_game, base_game.quantum_enabled, game_data.difficulty)
+            db.add(multiplayer_game)
+            await db.flush()
+            logger.info(f"🎮 Partie multijoueur créée: {multiplayer_game.id}")
 
-        # Ajouter le créateur comme participant
-        await self._add_player_to_game(db, base_game.id, creator_id, True)
+            # Créer les masterminds avec configuration de difficulté
+            await self._create_masterminds_for_game(
+                db, multiplayer_game, base_game.quantum_enabled, game_data.difficulty
+            )
 
-        await db.commit()
+            # Ajouter le créateur comme participant
+            await self._add_player_to_game(db, base_game.id, creator_id, True)
 
-        # Retourner le format attendu par le frontend
-        return await self._format_game_response(db, base_game, multiplayer_game)
+            await db.commit()
+            logger.info(f"✅ Partie multijoueur créée avec succès: {room_code}")
+
+            # Retourner le format attendu par le frontend
+            return await self._format_game_response(db, base_game, multiplayer_game)
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Erreur création partie multijoueur: {str(e)}")
+            raise GameError(f"Erreur lors de la création de la partie multijoueur: {str(e)}")
 
     async def join_room_by_code(
             self,
@@ -124,8 +169,12 @@ class MultiplayerService:
     ) -> Dict[str, Any]:
         """Rejoint une partie par code de room"""
 
+        logger.info(f"🚪 Utilisateur {user_id} tente de rejoindre {room_code}")
+
         # Vérifier que la partie existe et est accessible
-        query = select(Game).where(Game.room_code == room_code)
+        query = select(Game).options(
+            selectinload(Game.participants)
+        ).where(Game.room_code == room_code)
         result = await db.execute(query)
         game = result.scalar_one_or_none()
 
@@ -141,26 +190,38 @@ class MultiplayerService:
             if stored_password != password:  # Simplification - en prod, hasher
                 raise AuthorizationError("Mot de passe incorrect")
 
+        # Vérifier si l'utilisateur n'est pas déjà dans la partie
+        existing_participation = next(
+            (p for p in game.participants if p.player_id == user_id), None
+        )
+        if existing_participation:
+            raise GameError("Vous participez déjà à cette partie")
+
         # Vérifier la capacité
-        current_participants = len(game.participants)
-        if not as_spectator and current_participants >= game.max_players:
-            raise GameFullError("Cette partie est complète")
+        active_participants = [p for p in game.participants if p.status not in [ParticipationStatus.LEFT]]
+        if not as_spectator and len(active_participants) >= game.max_players:
+            if game.allow_spectators:
+                as_spectator = True
+            else:
+                raise GameFullError("Cette partie est complète")
 
         # Ajouter le joueur
         await self._add_player_to_game(db, game.id, user_id, False, as_spectator)
         await db.commit()
 
-        # Notifier via WebSocket
-        user = await db.get(User, user_id)
-        await multiplayer_ws_manager.notify_player_joined(
-            room_code, str(user_id), user.username
-        )
+        # Notifier via WebSocket si disponible
+        if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
+            user = await db.get(User, user_id)
+            await multiplayer_ws_manager.notify_player_joined(
+                room_code, str(user_id), user.username
+            )
 
         # Récupérer la partie multijoueur
         mp_query = select(MultiplayerGame).where(MultiplayerGame.base_game_id == game.id)
         mp_result = await db.execute(mp_query)
         multiplayer_game = mp_result.scalar_one()
 
+        logger.info(f"✅ Utilisateur {user_id} a rejoint {room_code}")
         return await self._format_game_response(db, game, multiplayer_game)
 
     async def leave_room_by_code(
@@ -171,11 +232,13 @@ class MultiplayerService:
     ) -> None:
         """Quitte une partie par code de room"""
 
+        logger.info(f"🚪 Utilisateur {user_id} quitte {room_code}")
+
         # Trouver la participation
         query = select(GameParticipation).join(Game).where(
             and_(
                 Game.room_code == room_code,
-                GameParticipation.user_id == user_id,
+                GameParticipation.player_id == user_id,
                 GameParticipation.status.in_([ParticipationStatus.ACTIVE, ParticipationStatus.WAITING])
             )
         )
@@ -191,11 +254,14 @@ class MultiplayerService:
 
         await db.commit()
 
-        # Notifier via WebSocket
-        user = await db.get(User, user_id)
-        await multiplayer_ws_manager.notify_player_left(
-            room_code, str(user_id), user.username
-        )
+        # Notifier via WebSocket si disponible
+        if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
+            user = await db.get(User, user_id)
+            await multiplayer_ws_manager.notify_player_left(
+                room_code, str(user_id), user.username
+            )
+
+        logger.info(f"✅ Utilisateur {user_id} a quitté {room_code}")
 
     async def get_room_details(
             self,
@@ -233,7 +299,10 @@ class MultiplayerService:
     ) -> Dict[str, Any]:
         """Récupère les parties publiques pour le lobby"""
 
-        query = select(Game).where(
+        query = select(Game).options(
+            selectinload(Game.participants),
+            selectinload(Game.creator)
+        ).where(
             and_(
                 Game.is_private == False,
                 Game.status == GameStatus.WAITING,
@@ -276,7 +345,7 @@ class MultiplayerService:
                 "game_type": mp_game.game_type,
                 "difficulty": game.difficulty,
                 "status": game.status,
-                "current_players": len(game.participants),
+                "current_players": len([p for p in game.participants if p.status not in [ParticipationStatus.LEFT]]),
                 "max_players": game.max_players,
                 "quantum_enabled": game.quantum_enabled,
                 "items_enabled": mp_game.items_enabled,
@@ -307,8 +376,12 @@ class MultiplayerService:
     ) -> Dict[str, Any]:
         """Démarre une partie multijoueur"""
 
+        logger.info(f"🚀 Démarrage partie {room_code} par {user_id}")
+
         # Vérifier que l'utilisateur peut démarrer la partie
-        query = select(Game).where(Game.room_code == room_code)
+        query = select(Game).options(
+            selectinload(Game.participants)
+        ).where(Game.room_code == room_code)
         result = await db.execute(query)
         game = result.scalar_one_or_none()
 
@@ -322,18 +395,31 @@ class MultiplayerService:
             raise GameError("La partie ne peut pas être démarrée")
 
         # Vérifier qu'il y a assez de joueurs
-        active_participants = [p for p in game.participants if p.status == ParticipationStatus.ACTIVE]
+        active_participants = [p for p in game.participants if p.status in [ParticipationStatus.WAITING, ParticipationStatus.READY] and not p.is_spectator]
         if len(active_participants) < 2:
             raise GameError("Au moins 2 joueurs sont nécessaires pour démarrer")
 
         # Démarrer la partie
-        game.status = GameStatus.IN_PROGRESS
+        game.status = GameStatus.ACTIVE  # Utiliser ACTIVE au lieu de IN_PROGRESS
         game.started_at = datetime.now(timezone.utc)
+
+        # Mettre à jour le statut des participants
+        for participation in game.participants:
+            if not participation.is_spectator and participation.status == ParticipationStatus.WAITING:
+                participation.status = ParticipationStatus.ACTIVE
 
         # Activer le premier mastermind
         mp_query = select(MultiplayerGame).where(MultiplayerGame.base_game_id == game.id)
         mp_result = await db.execute(mp_query)
         mp_game = mp_result.scalar_one()
+
+        # Mettre à jour le statut des joueurs
+        progress_query = select(PlayerProgress).where(PlayerProgress.multiplayer_game_id == mp_game.id)
+        progress_result = await db.execute(progress_query)
+        all_progress = progress_result.scalars().all()
+
+        for progress in all_progress:
+            progress.status = PlayerStatus.PLAYING
 
         # Activer le premier mastermind
         first_mastermind_query = select(GameMastermind).where(
@@ -348,9 +434,11 @@ class MultiplayerService:
 
         await db.commit()
 
-        # Notifier via WebSocket
-        await multiplayer_ws_manager.notify_game_started(room_code, mp_game)
+        # Notifier via WebSocket si disponible
+        if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
+            await multiplayer_ws_manager.notify_game_started(room_code, mp_game)
 
+        logger.info(f"✅ Partie {room_code} démarrée avec succès")
         return await self._format_game_response(db, game, mp_game)
 
     async def submit_attempt(
@@ -362,6 +450,8 @@ class MultiplayerService:
     ) -> Dict[str, Any]:
         """Soumet une tentative dans une partie multijoueur"""
 
+        logger.info(f"🎯 Tentative de {user_id} dans {room_code}")
+
         # Récupérer la partie et vérifications
         game_query = select(Game).where(Game.room_code == room_code)
         game_result = await db.execute(game_query)
@@ -370,7 +460,7 @@ class MultiplayerService:
         if not game:
             raise EntityNotFoundError("Partie introuvable")
 
-        if game.status != GameStatus.IN_PROGRESS:
+        if game.status != GameStatus.ACTIVE:
             raise GameError("La partie n'est pas en cours")
 
         # Récupérer la partie multijoueur et le mastermind actuel
@@ -419,19 +509,16 @@ class MultiplayerService:
         position_matches = sum(min(combination.count(c), solution.count(c)) for c in set(combination)) - exact_matches
         is_winning = exact_matches == len(solution)
 
-        # Calcul quantique si activé
+        # Calcul quantique si activé et disponible
         quantum_data = None
-        if game.quantum_enabled:
+        if game.quantum_enabled and QUANTUM_AVAILABLE and quantum_service:
             try:
                 quantum_hints = await quantum_service.calculate_quantum_hints_with_probabilities(
                     solution, combination
                 )
                 quantum_data = quantum_hints
-            except Exception:
-                pass  # Fallback non-quantique en cas d'erreur
-
-        # Créer la tentative
-        from app.models.multijoueur import PlayerMastermindAttempt
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur calcul quantique: {e}")
 
         # Compter les tentatives actuelles
         current_attempts_query = select(func.count()).select_from(PlayerMastermindAttempt).where(
@@ -491,12 +578,14 @@ class MultiplayerService:
             "player_status": player_progress.status
         }
 
-        # Notifier via WebSocket
-        user = await db.get(User, user_id)
-        await multiplayer_ws_manager.notify_attempt_made(
-            room_code, str(user_id), user.username, response_data
-        )
+        # Notifier via WebSocket si disponible
+        if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
+            user = await db.get(User, user_id)
+            await multiplayer_ws_manager.notify_attempt_made(
+                room_code, str(user_id), user.username, response_data
+            )
 
+        logger.info(f"✅ Tentative soumise: {exact_matches} exacts, {position_matches} positions")
         return response_data
 
     async def get_game_state(
@@ -630,6 +719,8 @@ class MultiplayerService:
     ) -> Dict[str, Any]:
         """Utilise un objet dans une partie multijoueur"""
 
+        logger.info(f"🎮 Utilisation objet {item_data.item_type} par {user_id} dans {room_code}")
+
         # Cette méthode serait développée pour un système d'objets complet
         # Pour l'instant, retourner une réponse basique
         return {
@@ -652,6 +743,8 @@ class MultiplayerService:
     ) -> QuantumHintResponse:
         """Génère un indice quantique pour une partie multijoueur"""
 
+        logger.info(f"⚛️ Indice quantique {hint_request.hint_type} demandé par {user_id}")
+
         # Vérifier la partie
         game_query = select(Game).where(Game.room_code == room_code)
         game_result = await db.execute(game_query)
@@ -662,6 +755,9 @@ class MultiplayerService:
 
         if not game.quantum_enabled:
             raise GameError("Les indices quantiques ne sont pas activés pour cette partie")
+
+        if not QUANTUM_AVAILABLE or not quantum_service:
+            raise GameError("Service quantique non disponible")
 
         # Récupérer le mastermind actuel
         mp_query = select(MultiplayerGame).where(MultiplayerGame.base_game_id == game.id)
@@ -703,6 +799,7 @@ class MultiplayerService:
             else:
                 raise ValidationError(f"Type d'indice quantique non supporté: {hint_request.hint_type}")
 
+            logger.info(f"✅ Indice quantique généré avec succès")
             return QuantumHintResponse(
                 hint_type=hint_request.hint_type,
                 hint_data=hint_data,
@@ -712,6 +809,7 @@ class MultiplayerService:
             )
 
         except Exception as e:
+            logger.error(f"❌ Erreur génération indice quantique: {e}")
             return QuantumHintResponse(
                 hint_type=hint_request.hint_type,
                 hint_data={"error": str(e)},
@@ -733,7 +831,8 @@ class MultiplayerService:
                 # En production, vérifier en base de données
                 return User(id=UUID(user_id), username="Test")  # Placeholder
             return None
-        except Exception:
+        except Exception as e:
+            logger.warning(f"⚠️ Erreur authentification WebSocket: {e}")
             return None
 
     # =====================================================
@@ -743,7 +842,7 @@ class MultiplayerService:
     def _get_difficulty_config(self, difficulty) -> Dict[str, int]:
         """Récupère la configuration d'une difficulté (même logique que le solo)"""
         # Gestion des Enums et des strings
-        difficulty_value = difficulty.value if hasattr(difficulty, 'value') else difficulty
+        difficulty_value = difficulty.value if hasattr(difficulty, 'value') else str(difficulty)
 
         configs = {
             "easy": {"colors": 4, "length": 3, "attempts": 15},
@@ -756,12 +855,41 @@ class MultiplayerService:
 
     async def _generate_unique_room_code(self, db: AsyncSession) -> str:
         """Génère un code de room unique"""
-        while True:
+        attempts = 0
+        max_attempts = 100
+
+        while attempts < max_attempts:
             code = generate_room_code()
             query = select(Game).where(Game.room_code == code)
             result = await db.execute(query)
             if not result.scalar_one_or_none():
                 return code
+            attempts += 1
+
+        raise GameError("Impossible de générer un code de room unique")
+
+    async def _generate_solution(
+            self,
+            quantum_enabled: bool,
+            combination_length: int,
+            available_colors: int
+    ) -> List[int]:
+        """Génère une solution avec fallback classique"""
+        if quantum_enabled and QUANTUM_AVAILABLE and quantum_service:
+            try:
+                solution = await quantum_service.generate_quantum_solution(
+                    combination_length=combination_length,
+                    available_colors=available_colors
+                )
+                logger.info("✅ Solution quantique générée")
+                return solution
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur génération quantique, fallback classique: {e}")
+
+        # Fallback classique
+        solution = [secrets.randbelow(available_colors) + 1 for _ in range(combination_length)]
+        logger.info("✅ Solution classique générée")
+        return solution
 
     async def _create_masterminds_for_game(
             self,
@@ -772,6 +900,8 @@ class MultiplayerService:
     ) -> None:
         """Crée les masterminds pour une partie avec configuration de difficulté"""
 
+        logger.info(f"🎮 Création de {multiplayer_game.total_masterminds} masterminds")
+
         # Récupérer la configuration de difficulté
         difficulty_config = self._get_difficulty_config(difficulty)
         combination_length = difficulty_config["length"]
@@ -780,13 +910,9 @@ class MultiplayerService:
 
         for i in range(1, multiplayer_game.total_masterminds + 1):
             # Générer une solution (quantique si activé)
-            if quantum_enabled:
-                solution = await quantum_service.generate_quantum_solution(
-                    combination_length=combination_length,
-                    available_colors=available_colors
-                )
-            else:
-                solution = [secrets.randbelow(available_colors) + 1 for _ in range(combination_length)]
+            solution = await self._generate_solution(
+                quantum_enabled, combination_length, available_colors
+            )
 
             mastermind = GameMastermind(
                 multiplayer_game_id=multiplayer_game.id,
@@ -799,6 +925,8 @@ class MultiplayerService:
             )
             db.add(mastermind)
 
+        logger.info(f"✅ {multiplayer_game.total_masterminds} masterminds créés")
+
     async def _add_player_to_game(
             self,
             db: AsyncSession,
@@ -809,12 +937,22 @@ class MultiplayerService:
     ) -> None:
         """Ajoute un joueur à une partie"""
 
+        # Compter les participants existants pour l'ordre de join
+        existing_query = select(func.count()).select_from(GameParticipation).where(
+            GameParticipation.game_id == game_id
+        )
+        existing_result = await db.execute(existing_query)
+        join_order = existing_result.scalar() + 1
+
         # Créer la participation
         participation = GameParticipation(
             game_id=game_id,
-            user_id=user_id,
-            status=ParticipationStatus.WAITING if not is_spectator else ParticipationStatus.SPECTATOR,
+            player_id=user_id,  # CORRIGÉ: player_id au lieu de user_id
+            status=ParticipationStatus.SPECTATOR if is_spectator else ParticipationStatus.WAITING,
+            role="spectator" if is_spectator else "player",
             is_creator=is_creator,
+            is_spectator=is_spectator,
+            join_order=join_order,
             joined_at=datetime.now(timezone.utc)
         )
         db.add(participation)
@@ -836,6 +974,8 @@ class MultiplayerService:
                 total_time=0.0
             )
             db.add(player_progress)
+
+        logger.info(f"✅ Joueur {user_id} ajouté ({'spectateur' if is_spectator else 'joueur actif'})")
 
     async def _format_game_response(
             self,
@@ -859,6 +999,11 @@ class MultiplayerService:
         players_result = await db.execute(players_query)
         players = players_result.scalars().all()
 
+        # Récupérer le créateur
+        creator_query = select(User).where(User.id == game.creator_id)
+        creator_result = await db.execute(creator_query)
+        creator = creator_result.scalar_one_or_none()
+
         return {
             "id": str(game.id),
             "room_code": game.room_code,
@@ -866,7 +1011,7 @@ class MultiplayerService:
             "difficulty": game.difficulty,
             "status": game.status,
             "max_players": game.max_players,
-            "current_players": len([p for p in game.participants if p.status == ParticipationStatus.ACTIVE]),
+                            "current_players": len([p for p in game.participants if p.status not in [ParticipationStatus.LEFT] and not p.is_spectator]),
             "is_private": game.is_private,
             "items_enabled": multiplayer_game.items_enabled,
             "quantum_enabled": game.quantum_enabled,
@@ -897,7 +1042,7 @@ class MultiplayerService:
             ],
             "creator": {
                 "id": str(game.creator_id),
-                "username": game.creator.username if game.creator else "Inconnu"
+                "username": creator.username if creator else "Inconnu"
             },
             "created_at": game.created_at.isoformat(),
             "started_at": game.started_at.isoformat() if game.started_at else None,
@@ -914,16 +1059,30 @@ class MultiplayerService:
         quantum_enabled: bool = False
     ) -> int:
         """Calcule le score d'une tentative avec la configuration de difficulté"""
-        from app.utils.multiplayer_utils import multiplayer_utils
 
-        return multiplayer_utils.calculate_attempt_score(
-            exact_matches=exact_matches,
-            position_matches=position_matches,
-            is_winning=is_winning,
-            attempt_number=attempt_number,
-            difficulty=difficulty,
-            quantum_bonus=quantum_enabled
-        )
+        # Calcul de base
+        base_score = exact_matches * 100 + position_matches * 25
+
+        # Bonus pour victoire
+        if is_winning:
+            victory_bonus = max(500 - (attempt_number - 1) * 50, 100)
+            base_score += victory_bonus
+
+        # Multiplicateur de difficulté
+        difficulty_multiplier = {
+            "easy": 1.0,
+            "medium": 1.2,
+            "hard": 1.5,
+            "expert": 2.0,
+            "quantum": 2.5
+        }.get(difficulty, 1.0)
+
+        # Bonus quantique
+        quantum_bonus = 1.1 if quantum_enabled else 1.0
+
+        final_score = int(base_score * difficulty_multiplier * quantum_bonus)
+
+        return max(final_score, 0)
 
     def _get_hint_cost(self, hint_type: str) -> int:
         """Récupère le coût d'un indice"""
@@ -938,3 +1097,6 @@ class MultiplayerService:
 
 # Instance globale du service
 multiplayer_service = MultiplayerService()
+
+# Log de l'état du service
+logger.info(f"🎯 MultiplayerService initialisé - Quantique: {QUANTUM_AVAILABLE}, WebSocket: {WEBSOCKET_AVAILABLE}")
