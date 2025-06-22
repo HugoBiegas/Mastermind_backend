@@ -2,6 +2,7 @@
 Routes API pour le mode multijoueur - Version complète pour cohérence avec le frontend
 Compatible avec les attentes du code React.js décrites dans le document
 """
+import json
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -135,20 +136,61 @@ async def get_multiplayer_room(
 async def get_public_multiplayer_rooms(
         page: int = Query(1, ge=1, description="Page"),
         limit: int = Query(20, ge=1, le=100, description="Limite par page"),
-        filters: Optional[str] = Query(None, description="Filtres JSON"),
+        # CORRECTION: Accepter les paramètres directs du frontend
+        status: Optional[str] = Query(None, description="Status des parties"),
+        difficulty: Optional[str] = Query(None, description="Difficulté"),
+        game_type: Optional[str] = Query(None, description="Type de jeu"),
+        quantum_enabled: Optional[bool] = Query(None, description="Quantique activé"),
+        search_term: Optional[str] = Query(None, description="Terme de recherche"),
+        # Garder aussi l'ancien paramètre pour compatibilité
+        filters: Optional[str] = Query(None, description="Filtres JSON (legacy)"),
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route pour lister les parties publiques (attendue par le frontend)"""
+    """
+    Route pour lister les parties publiques (CORRIGÉE pour compatibilité frontend)
+    Accepte les paramètres de requête directs envoyés par le frontend
+    """
     try:
+        # CORRECTION: Construire les filtres à partir des paramètres directs
+        constructed_filters = {}
+
+        if status:
+            constructed_filters["status"] = status
+        if difficulty:
+            constructed_filters["difficulty"] = difficulty
+        if game_type:
+            constructed_filters["game_type"] = game_type
+        if quantum_enabled is not None:
+            constructed_filters["quantum_enabled"] = quantum_enabled
+        if search_term:
+            constructed_filters["search_term"] = search_term
+
+        # Si des filtres JSON legacy sont fournis, les fusionner
+        if filters:
+            try:
+                legacy_filters = json.loads(filters)
+                constructed_filters.update(legacy_filters)
+            except json.JSONDecodeError:
+                # Ignorer les filtres JSON malformés
+                pass
+
+        # Convertir en JSON pour le service
+        filters_json = json.dumps(constructed_filters) if constructed_filters else None
+
         result = await multiplayer_service.get_public_rooms(
-            db, page=page, limit=limit, filters=filters
+            db, page=page, limit=limit, filters=filters_json
         )
         return {
             "success": True,
             "data": result
         }
     except Exception as e:
+        # Log l'erreur pour debug
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Erreur dans get_public_multiplayer_rooms: {str(e)}")
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération: {str(e)}"
@@ -261,6 +303,7 @@ async def get_players_progress(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la récupération: {str(e)}"
         )
+
 
 
 @router.get(

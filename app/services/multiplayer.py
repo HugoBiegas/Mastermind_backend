@@ -4,7 +4,6 @@ Toutes les méthodes attendues par le frontend sont implémentées avec intégra
 CORRIGÉ: Imports sécurisés, gestion d'erreurs robuste, compatibilité DB
 """
 import json
-import secrets
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -13,6 +12,7 @@ from uuid import UUID
 from sqlalchemy import select, and_, desc, asc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.elements import or_
 
 # Imports sécurisés avec gestion d'erreurs
 logger = logging.getLogger(__name__)
@@ -39,10 +39,10 @@ except ImportError as e:
 
 # Imports standards du projet
 from app.core.security import jwt_manager
-from app.models.game import Game, GameStatus, GameParticipation, ParticipationStatus, generate_room_code, Difficulty
+from app.models.game import Game, GameStatus, GameParticipation, ParticipationStatus, Difficulty
 from app.models.multijoueur import (
     MultiplayerGame, PlayerProgress, GameMastermind,
-    PlayerStatus, MultiplayerGameType, PlayerMastermindAttempt
+    PlayerStatus, PlayerMastermindAttempt
 )
 from app.models.user import User
 from app.schemas.game import QuantumHintResponse
@@ -52,7 +52,7 @@ from app.schemas.multiplayer import (
 )
 from app.utils.exceptions import (
     EntityNotFoundError, GameError, ValidationError,
-    AuthorizationError, AuthenticationError, GameFullError
+    AuthorizationError, GameFullError
 )
 
 
@@ -69,41 +69,33 @@ class MultiplayerService:
             game_data: MultiplayerGameCreateRequest,
             creator_id: UUID
     ) -> Dict[str, Any]:
-        """Crée une nouvelle partie multijoueur avec support quantique"""
+        """Crée une partie multijoueur avec tous les masterminds"""
+
+        logger.info(f"🎯 Création partie multijoueur par utilisateur {creator_id}")
 
         try:
-            logger.info(f"🎯 Création partie multijoueur par utilisateur {creator_id}")
-
-            # Récupérer la configuration de difficulté (même logique que le solo)
-            difficulty_config = self._get_difficulty_config(game_data.difficulty)
-
-            # Paramètres finaux basés sur la difficulté
-            combination_length = difficulty_config["length"]
-            available_colors = difficulty_config["colors"]
-            max_attempts = difficulty_config["attempts"]
-
             # Générer un code de room unique
             room_code = await self._generate_unique_room_code(db)
             logger.info(f"🔑 Code room généré: {room_code}")
 
-            # Générer la solution (quantique si activé et disponible)
+            # Créer le jeu de base avec solution classique
             solution = await self._generate_solution(
-                game_data.quantum_enabled, combination_length, available_colors
+                game_data.quantum_enabled,
+                game_data.combination_length,
+                game_data.available_colors
             )
+            logger.info("✅ Solution classique générée")
 
-            # Convertir enum en string si nécessaire
-            difficulty_str = game_data.difficulty.value if hasattr(game_data.difficulty, 'value') else str(game_data.difficulty)
-
-            # Créer le jeu de base avec la configuration de difficulté
             base_game = Game(
                 room_code=room_code,
                 game_type="multiplayer",
                 game_mode="multiplayer",
                 status=GameStatus.WAITING,
-                difficulty=difficulty_str,
-                combination_length=combination_length,
-                available_colors=available_colors,
-                max_attempts=max_attempts,
+                difficulty=game_data.difficulty,
+                combination_length=game_data.combination_length,
+                available_colors=game_data.available_colors,
+                max_attempts=game_data.max_attempts,
+                time_limit=game_data.time_limit,
                 max_players=game_data.max_players,
                 solution=solution,
                 is_private=game_data.is_private,
@@ -112,35 +104,31 @@ class MultiplayerService:
                 quantum_enabled=game_data.quantum_enabled,
                 creator_id=creator_id,
                 settings={
-                    "items_enabled": game_data.items_enabled,
-                    "password_hash": game_data.password if game_data.password else None,
-                    "total_masterminds": game_data.total_masterminds or 3,
-                    "game_name": getattr(game_data, 'name', None) or f"Partie de {creator_id}"
+                    "game_name": game_data.name,
+                    "password_hash": game_data.password if game_data.is_private else None
                 }
             )
-
             db.add(base_game)
-            await db.flush()  # Pour obtenir l'ID
+            await db.flush()
             logger.info(f"📝 Jeu de base créé: {base_game.id}")
 
             # Créer la partie multijoueur
             multiplayer_game = MultiplayerGame(
                 base_game_id=base_game.id,
                 game_type=game_data.game_type,
-                total_masterminds=game_data.total_masterminds or 3,
-                difficulty=difficulty_str,
-                items_enabled=game_data.items_enabled,
+                total_masterminds=game_data.total_masterminds,
                 current_mastermind=1,
                 is_final_mastermind=False,
-                items_per_mastermind=1  # Valeur par défaut
-                # Note: started_at et finished_at seront NULL par défaut
+                difficulty=game_data.difficulty,
+                items_enabled=game_data.items_enabled,
+                items_per_mastermind=game_data.items_per_mastermind
             )
 
             db.add(multiplayer_game)
             await db.flush()
             logger.info(f"🎮 Partie multijoueur créée: {multiplayer_game.id}")
 
-            # Créer les masterminds avec configuration de difficulté
+            # CORRECTION: Créer les masterminds SANS updated_at
             await self._create_masterminds_for_game(
                 db, multiplayer_game, base_game.quantum_enabled, game_data.difficulty
             )
@@ -297,72 +285,120 @@ class MultiplayerService:
             limit: int = 20,
             filters: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Récupère les parties publiques pour le lobby"""
+        """
+        Récupère les parties publiques pour le lobby
+        CORRECTION: Gestion robuste des filtres et types de jeu
+        """
+        try:
+            # CORRECTION: Query plus robuste avec gestion des types de jeu multijoueur
+            query = select(Game).options(
+                selectinload(Game.participants),
+                selectinload(Game.creator)
+            ).where(
+                and_(
+                    Game.is_private == False,
+                    Game.status == GameStatus.WAITING,
+                    # CORRECTION: Accepter à la fois "multiplayer" et les jeux avec parties multijoueur
+                    or_(
+                        Game.game_mode == "multiplayer",
+                        Game.game_type == "multiplayer"
+                    )
+                )
+            ).order_by(desc(Game.created_at))
 
-        query = select(Game).options(
-            selectinload(Game.participants),
-            selectinload(Game.creator)
-        ).where(
-            and_(
-                Game.is_private == False,
-                Game.status == GameStatus.WAITING,
-                Game.game_type == "multiplayer"
-            )
-        ).order_by(desc(Game.created_at))
+            # Appliquer les filtres si fournis
+            if filters:
+                try:
+                    filter_data = json.loads(filters)
 
-        # Appliquer les filtres si fournis
-        if filters:
-            try:
-                filter_data = json.loads(filters)
-                if "difficulty" in filter_data:
-                    query = query.where(Game.difficulty == filter_data["difficulty"])
-                if "quantum_enabled" in filter_data:
-                    query = query.where(Game.quantum_enabled == filter_data["quantum_enabled"])
-            except:
-                pass  # Ignorer les filtres malformés
+                    # Filtrer par statut (attendu par le frontend)
+                    if "status" in filter_data and filter_data["status"]:
+                        status_value = filter_data["status"]
+                        if status_value == "waiting":
+                            query = query.where(Game.status == GameStatus.WAITING)
+                        elif status_value == "active":
+                            query = query.where(Game.status == GameStatus.ACTIVE)
 
-        # Pagination
-        offset = (page - 1) * limit
-        total_query = select(func.count()).select_from(query.subquery())
-        total_result = await db.execute(total_query)
-        total = total_result.scalar()
+                    # Filtrer par difficulté
+                    if "difficulty" in filter_data and filter_data["difficulty"]:
+                        query = query.where(Game.difficulty == filter_data["difficulty"])
 
-        paginated_query = query.offset(offset).limit(limit)
-        result = await db.execute(paginated_query)
-        games = result.scalars().all()
+                    # Filtrer par quantum
+                    if "quantum_enabled" in filter_data and filter_data["quantum_enabled"] is not None:
+                        query = query.where(Game.quantum_enabled == filter_data["quantum_enabled"])
 
-        # Formatter les résultats
-        formatted_games = []
-        for game in games:
-            mp_query = select(MultiplayerGame).where(MultiplayerGame.base_game_id == game.id)
-            mp_result = await db.execute(mp_query)
-            mp_game = mp_result.scalar_one()
+                    # Recherche par terme
+                    if "search_term" in filter_data and filter_data["search_term"]:
+                        search_term = f"%{filter_data['search_term']}%"
+                        query = query.where(
+                            or_(
+                                Game.room_code.ilike(search_term),
+                                Game.settings['game_name'].astext.ilike(search_term)
+                            )
+                        )
 
-            formatted_games.append({
-                "id": str(game.id),
-                "room_code": game.room_code,
-                "name": game.settings.get("game_name", f"Partie {game.room_code}"),
-                "game_type": mp_game.game_type,
-                "difficulty": game.difficulty,
-                "status": game.status,
-                "current_players": len([p for p in game.participants if p.status not in [ParticipationStatus.LEFT]]),
-                "max_players": game.max_players,
-                "quantum_enabled": game.quantum_enabled,
-                "items_enabled": mp_game.items_enabled,
-                "creator": {
-                    "id": str(game.creator_id),
-                    "username": game.creator.username if game.creator else "Inconnu"
-                },
-                "created_at": game.created_at.isoformat()
-            })
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Filtres JSON malformés ignorés: {e}")
+                except Exception as e:
+                    logger.warning(f"Erreur lors de l'application des filtres: {e}")
 
-        return {
-            "games": formatted_games,
-            "total": total,
-            "page": page,
-            "per_page": limit,
-            "pages": (total + limit - 1) // limit
-        }
+            # Pagination
+            offset = (page - 1) * limit
+
+            # Compter le total
+            total_query = select(func.count()).select_from(query.subquery())
+            total_result = await db.execute(total_query)
+            total = total_result.scalar() or 0
+
+            # Récupérer les résultats paginés
+            paginated_query = query.offset(offset).limit(limit)
+            result = await db.execute(paginated_query)
+            games = result.scalars().all()
+
+            # Formatter les résultats
+            formatted_games = []
+            for game in games:
+                try:
+                    # CORRECTION: Gestion robuste de la récupération de la partie multijoueur
+                    mp_query = select(MultiplayerGame).where(MultiplayerGame.base_game_id == game.id)
+                    mp_result = await db.execute(mp_query)
+                    mp_game = mp_result.scalar_one_or_none()
+
+                    if mp_game:  # S'assurer que la partie multijoueur existe
+                        formatted_games.append({
+                            "id": str(game.id),
+                            "room_code": game.room_code,
+                            "name": game.settings.get("game_name",
+                                                      f"Partie {game.room_code}") if game.settings else f"Partie {game.room_code}",
+                            "game_type": mp_game.game_type,
+                            "difficulty": game.difficulty,
+                            "status": game.status,
+                            "current_players": len(
+                                [p for p in game.participants if p.status not in [ParticipationStatus.LEFT]]),
+                            "max_players": game.max_players,
+                            "quantum_enabled": game.quantum_enabled,
+                            "items_enabled": mp_game.items_enabled,
+                            "creator": {
+                                "id": str(game.creator_id),
+                                "username": game.creator.username if game.creator else "Inconnu"
+                            },
+                            "created_at": game.created_at.isoformat()
+                        })
+                except Exception as e:
+                    logger.warning(f"Erreur lors du formatage de la partie {game.id}: {e}")
+                    continue
+
+            return {
+                "rooms": formatted_games,
+                "total": total,
+                "page": page,
+                "limit": limit,
+                "pages": (total + limit - 1) // limit if total > 0 else 0
+            }
+
+        except Exception as e:
+            logger.error(f"Erreur dans get_public_rooms: {str(e)}")
+            raise GameError(f"Erreur lors de la récupération des parties publiques: {str(e)}")
 
     # =====================================================
     # GAMEPLAY
@@ -839,56 +875,44 @@ class MultiplayerService:
     # MÉTHODES UTILITAIRES PRIVÉES
     # =====================================================
 
-    def _get_difficulty_config(self, difficulty) -> Dict[str, int]:
-        """Récupère la configuration d'une difficulté (même logique que le solo)"""
-        # Gestion des Enums et des strings
-        difficulty_value = difficulty.value if hasattr(difficulty, 'value') else str(difficulty)
-
+    def _get_difficulty_config(self, difficulty: Difficulty) -> Dict[str, int]:
+        """Retourne la configuration pour une difficulté donnée"""
         configs = {
-            "easy": {"colors": 4, "length": 3, "attempts": 15},
-            "medium": {"colors": 6, "length": 4, "attempts": 12},
-            "hard": {"colors": 8, "length": 5, "attempts": 10},
-            "expert": {"colors": 10, "length": 6, "attempts": 8},
-            "quantum": {"colors": 12, "length": 7, "attempts": 6}
+            Difficulty.EASY: {"length": 3, "colors": 4, "attempts": 15},
+            Difficulty.MEDIUM: {"length": 4, "colors": 6, "attempts": 12},
+            Difficulty.HARD: {"length": 5, "colors": 8, "attempts": 10},
+            Difficulty.EXPERT: {"length": 6, "colors": 10, "attempts": 8},
+            Difficulty.QUANTUM: {"length": 4, "colors": 6, "attempts": 10}
         }
-        return configs.get(difficulty_value, configs["medium"])
+        return configs.get(difficulty, configs[Difficulty.MEDIUM])
 
     async def _generate_unique_room_code(self, db: AsyncSession) -> str:
         """Génère un code de room unique"""
-        attempts = 0
-        max_attempts = 100
+        import random
+        import string
 
-        while attempts < max_attempts:
-            code = generate_room_code()
-            query = select(Game).where(Game.room_code == code)
-            result = await db.execute(query)
-            if not result.scalar_one_or_none():
+        while True:
+            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            existing = await db.execute(select(Game).where(Game.room_code == code))
+            if not existing.scalar():
                 return code
-            attempts += 1
-
-        raise GameError("Impossible de générer un code de room unique")
 
     async def _generate_solution(
             self,
             quantum_enabled: bool,
-            combination_length: int,
-            available_colors: int
+            length: int,
+            colors: int
     ) -> List[int]:
-        """Génère une solution avec fallback classique"""
-        if quantum_enabled and QUANTUM_AVAILABLE and quantum_service:
-            try:
-                solution = await quantum_service.generate_quantum_solution(
-                    combination_length=combination_length,
-                    available_colors=available_colors
-                )
-                logger.info("✅ Solution quantique générée")
-                return solution
-            except Exception as e:
-                logger.warning(f"⚠️ Erreur génération quantique, fallback classique: {e}")
-
-        # Fallback classique
-        solution = [secrets.randbelow(available_colors) + 1 for _ in range(combination_length)]
-        logger.info("✅ Solution classique générée")
+        """Génère une solution (quantique si activé)"""
+        if quantum_enabled:
+            # Utiliser le service quantique si disponible
+            solution = quantum_service.generate_quantum_solution(length, colors)
+            logger.info("✅ Solution quantique générée")
+        else:
+            # Solution classique
+            import random
+            solution = [random.randint(1, colors) for _ in range(length)]
+            logger.info("✅ Solution classique générée")
         return solution
 
     async def _create_masterminds_for_game(
@@ -898,7 +922,10 @@ class MultiplayerService:
             quantum_enabled: bool,
             difficulty: Difficulty
     ) -> None:
-        """Crée les masterminds pour une partie avec configuration de difficulté"""
+        """
+        Crée les masterminds pour une partie avec configuration de difficulté
+        CORRECTION: Utilise le modèle GameMastermind SANS updated_at
+        """
 
         logger.info(f"🎮 Création de {multiplayer_game.total_masterminds} masterminds")
 
@@ -914,6 +941,7 @@ class MultiplayerService:
                 quantum_enabled, combination_length, available_colors
             )
 
+            # CORRECTION CRITIQUE: Créer GameMastermind SANS updated_at
             mastermind = GameMastermind(
                 multiplayer_game_id=multiplayer_game.id,
                 mastermind_number=i,
@@ -921,7 +949,11 @@ class MultiplayerService:
                 combination_length=combination_length,
                 available_colors=available_colors,
                 max_attempts=max_attempts,
-                is_active=(i == 1)  # Seul le premier est actif
+                is_active=(i == 1),  # Seul le premier est actif
+                is_completed=False,
+                # created_at sera automatiquement défini
+                # completed_at sera NULL par défaut
+                # PAS D'updated_at !
             )
             db.add(mastermind)
 
@@ -947,7 +979,7 @@ class MultiplayerService:
         # Créer la participation
         participation = GameParticipation(
             game_id=game_id,
-            player_id=user_id,  # CORRIGÉ: player_id au lieu de user_id
+            player_id=user_id,  # CORRECTION: Utiliser player_id comme dans init.sql
             status=ParticipationStatus.SPECTATOR if is_spectator else ParticipationStatus.WAITING,
             role="spectator" if is_spectator else "player",
             is_creator=is_creator,
@@ -959,11 +991,13 @@ class MultiplayerService:
 
         if not is_spectator:
             # Récupérer la partie multijoueur
-            mp_query = select(MultiplayerGame).where(MultiplayerGame.base_game_id == game_id)
+            mp_query = select(MultiplayerGame).where(
+                MultiplayerGame.base_game_id == game_id
+            )
             mp_result = await db.execute(mp_query)
             mp_game = mp_result.scalar_one()
 
-            # Créer la progression du joueur
+            # Créer le progress du joueur
             player_progress = PlayerProgress(
                 multiplayer_game_id=mp_game.id,
                 user_id=user_id,
@@ -971,82 +1005,74 @@ class MultiplayerService:
                 current_mastermind=1,
                 completed_masterminds=0,
                 total_score=0,
-                total_time=0.0
+                total_time=0.0,
+                is_finished=False,
+                collected_items=[],
+                used_items=[]
             )
             db.add(player_progress)
-
-        logger.info(f"✅ Joueur {user_id} ajouté ({'spectateur' if is_spectator else 'joueur actif'})")
 
     async def _format_game_response(
             self,
             db: AsyncSession,
             game: Game,
-            multiplayer_game: MultiplayerGame
+            mp_game: MultiplayerGame
     ) -> Dict[str, Any]:
-        """Formate la réponse de partie pour le frontend"""
-
+        """Formate la réponse pour une partie multijoueur"""
         # Récupérer les masterminds
         masterminds_query = select(GameMastermind).where(
-            GameMastermind.multiplayer_game_id == multiplayer_game.id
+            GameMastermind.multiplayer_game_id == mp_game.id
         ).order_by(GameMastermind.mastermind_number)
         masterminds_result = await db.execute(masterminds_query)
         masterminds = masterminds_result.scalars().all()
 
-        # Récupérer les joueurs
-        players_query = select(PlayerProgress).options(
-            selectinload(PlayerProgress.user)
-        ).where(PlayerProgress.multiplayer_game_id == multiplayer_game.id)
-        players_result = await db.execute(players_query)
-        players = players_result.scalars().all()
-
-        # Récupérer le créateur
-        creator_query = select(User).where(User.id == game.creator_id)
-        creator_result = await db.execute(creator_query)
-        creator = creator_result.scalar_one_or_none()
+        # Récupérer les participants
+        participants_query = select(GameParticipation).options(
+            selectinload(GameParticipation.player)
+        ).where(GameParticipation.game_id == game.id)
+        participants_result = await db.execute(participants_query)
+        participants = participants_result.scalars().all()
 
         return {
             "id": str(game.id),
             "room_code": game.room_code,
-            "game_type": multiplayer_game.game_type,
-            "difficulty": game.difficulty,
+            "name": game.settings.get("game_name", f"Partie {game.room_code}") if game.settings else f"Partie {game.room_code}",
             "status": game.status,
+            "game_type": mp_game.game_type,
+            "difficulty": game.difficulty,
             "max_players": game.max_players,
-                            "current_players": len([p for p in game.participants if p.status not in [ParticipationStatus.LEFT] and not p.is_spectator]),
+            "current_players": len([p for p in participants if not p.is_spectator]),
             "is_private": game.is_private,
-            "items_enabled": multiplayer_game.items_enabled,
             "quantum_enabled": game.quantum_enabled,
-            "allow_spectators": game.allow_spectators,
-            "enable_chat": game.enable_chat,
-            "current_mastermind": multiplayer_game.current_mastermind,
-            "total_masterminds": multiplayer_game.total_masterminds,
+            "items_enabled": mp_game.items_enabled,
+            "total_masterminds": mp_game.total_masterminds,
+            "current_mastermind": mp_game.current_mastermind,
             "masterminds": [
                 {
                     "number": m.mastermind_number,
+                    "is_current": m.is_active,
+                    "is_completed": m.is_completed,
                     "combination_length": m.combination_length,
                     "available_colors": m.available_colors,
-                    "max_attempts": m.max_attempts,
-                    "is_current": m.is_active,
-                    "is_completed": m.is_completed
+                    "max_attempts": m.max_attempts
                 } for m in masterminds
             ],
             "players": [
                 {
-                    "user_id": str(p.user_id),
-                    "username": p.user.username,
+                    "id": str(p.player_id),
+                    "username": p.player.username,
+                    "is_creator": p.is_creator,
+                    "is_spectator": p.is_spectator,
                     "status": p.status,
-                    "score": p.total_score,
-                    "current_mastermind": p.current_mastermind,
-                    "completed_masterminds": p.completed_masterminds,
-                    "is_finished": p.is_finished
-                } for p in players
+                    "joined_at": p.joined_at.isoformat()
+                } for p in participants
             ],
             "creator": {
                 "id": str(game.creator_id),
-                "username": creator.username if creator else "Inconnu"
+                "username": game.creator.username if game.creator else "Inconnu"
             },
             "created_at": game.created_at.isoformat(),
-            "started_at": game.started_at.isoformat() if game.started_at else None,
-            "finished_at": game.finished_at.isoformat() if game.finished_at else None
+            "started_at": mp_game.started_at.isoformat() if mp_game.started_at else None
         }
 
     def _calculate_attempt_score(
