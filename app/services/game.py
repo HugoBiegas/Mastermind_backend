@@ -23,7 +23,7 @@ from app.schemas.game import (
 from app.services.quantum import quantum_service
 from app.utils.exceptions import (
     EntityNotFoundError, GameError, GameNotActiveError,
-    GameFullError, ValidationError, AuthorizationError
+    GameFullError, ValidationError, AuthorizationError, logger
 )
 
 
@@ -1025,3 +1025,6 @@ class GameService:
         """Génère une solution aléatoire"""
         import random
         return [random.randint(1, colors) for _ in range(length)]
+
+game_service = GameService()
+logger.info("🎯 GameService initialisé et prêt")

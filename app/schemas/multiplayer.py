@@ -5,7 +5,7 @@ COMPLET: Synchronisation parfaite avec les types TypeScript du frontend
 """
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 
 # =====================================================
@@ -13,34 +13,59 @@ from pydantic import BaseModel, Field, ConfigDict
 # =====================================================
 
 class MultiplayerGameCreateRequest(BaseModel):
-    """Requête de création d'une partie multijoueur"""
+    """Requête de création d'une partie multijoueur - NETTOYÉE sans parties privées"""
     model_config = ConfigDict(from_attributes=True)
 
-    # Configuration de base
+    # Configuration de base (correspondant aux champs qui existent dans Game)
+    name: str = Field(default="Ma Partie", description="Nom de la partie")
     game_type: str = Field(default="multi_mastermind", description="Type de partie")
     difficulty: str = Field(default="medium", description="Difficulté")
     max_players: int = Field(default=4, ge=2, le=8, description="Nombre max de joueurs")
 
-    # Configuration du mastermind
+    # Configuration du mastermind (propriétés qui existent dans Game)
     combination_length: int = Field(default=4, ge=3, le=8, description="Longueur de la combinaison")
     available_colors: int = Field(default=6, ge=3, le=15, description="Couleurs disponibles")
     max_attempts: int = Field(default=10, ge=5, le=20, description="Tentatives maximum")
 
-    # Configuration multijoueur
+    # Configuration multijoueur (stockée dans settings)
     total_masterminds: int = Field(default=3, ge=1, le=10, description="Nombre de masterminds")
 
-    # Options avancées
+    # Options avancées (quantum_enabled existe dans Game)
     quantum_enabled: bool = Field(default=False, description="Activer les fonctionnalités quantiques")
     items_enabled: bool = Field(default=True, description="Activer les objets")
     items_per_mastermind: int = Field(default=1, ge=0, le=3, description="Objets par mastermind")
 
-    # Visibilité
-    is_public: bool = Field(default=True, description="Partie publique")
-    password: Optional[str] = Field(None, description="Mot de passe (optionnel)")
-
-    # Solution personnalisée (optionnelle)
+    # Solution personnalisée (optionnelle, stockée dans settings)
     solution: Optional[List[int]] = Field(None, description="Solution personnalisée")
 
+    # CHAMPS SUPPRIMÉS (parties privées supprimées) :
+    # - is_public
+    # - password
+    # - allow_spectators
+    # - enable_chat
+    # - is_private
+
+    # CHAMPS IGNORÉS (acceptés du frontend mais ignorés) :
+    is_public: Optional[bool] = Field(default=True, description="IGNORÉ - Toujours public")
+    is_private: Optional[bool] = Field(default=False, description="IGNORÉ - Parties privées supprimées")
+    password: Optional[str] = Field(default=None, description="IGNORÉ - Parties privées supprimées")
+    allow_spectators: Optional[bool] = Field(default=True, description="IGNORÉ - Toujours autorisé")
+    enable_chat: Optional[bool] = Field(default=True, description="IGNORÉ - Toujours activé")
+
+    @field_validator('solution')
+    @classmethod
+    def validate_solution(cls, v, info):
+        if v is not None:
+            combination_length = info.data.get('combination_length', 4)
+            available_colors = info.data.get('available_colors', 6)
+
+            if len(v) != combination_length:
+                raise ValueError(f'La solution doit avoir {combination_length} couleurs')
+
+            if not all(1 <= color <= available_colors for color in v):
+                raise ValueError(f'Les couleurs doivent être entre 1 et {available_colors}')
+
+        return v
 
 class JoinGameRequest(BaseModel):
     """Requête pour rejoindre une partie"""

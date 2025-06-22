@@ -589,16 +589,42 @@ def get_http_status_code(exception: BaseQuantumMastermindError) -> int:
     return 500
 
 
-def get_exception_details(exception: BaseQuantumMastermindError) -> Dict[str, Any]:
-    """Retourne les détails structurés d'une exception"""
+def get_exception_details(exception: Exception) -> Dict[str, Any]:
+    """
+    Retourne les détails structurés d'une exception
+    CORRECTION: Gestion de tous types d'exceptions
+    """
 
-    return {
-        "error_type": exception.__class__.__name__,
-        "message": exception.message,
-        "error_code": exception.error_code,
-        "details": exception.details,
-        "http_status": get_http_status_code(exception)
-    }
+    # Cas 1: Exception métier héritant de BaseQuantumMastermindError
+    if isinstance(exception, BaseQuantumMastermindError):
+        return {
+            "error_type": exception.__class__.__name__,
+            "message": exception.message,
+            "error_code": exception.error_code,
+            "details": exception.details,
+            "http_status": get_http_status_code(exception)
+        }
+
+    # Cas 2: Exception Python standard
+    elif hasattr(exception, 'args') and exception.args:
+        message = str(exception.args[0]) if exception.args else str(exception)
+        return {
+            "error_type": exception.__class__.__name__,
+            "message": message,
+            "error_code": exception.__class__.__name__.upper(),
+            "details": {},
+            "http_status": 500
+        }
+
+    # Cas 3: Exception générique
+    else:
+        return {
+            "error_type": exception.__class__.__name__,
+            "message": str(exception),
+            "error_code": "UNKNOWN_ERROR",
+            "details": {},
+            "http_status": 500
+        }
 
 
 def create_error_response(exception: BaseQuantumMastermindError) -> Dict[str, Any]:

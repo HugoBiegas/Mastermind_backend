@@ -34,15 +34,24 @@ router = APIRouter(prefix="/multiplayer", tags=["Multijoueur"])
     "/rooms/create",
     response_model=Dict[str, Any],
     summary="Créer une partie multijoueur",
-    description="Crée une nouvelle partie multijoueur (route attendue par le frontend)"
+    description="Crée une nouvelle partie multijoueur avec auto-leave des parties actives"
 )
 async def create_multiplayer_room(
         game_data: MultiplayerGameCreateRequest,
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route créée pour correspondre aux attentes du frontend"""
+    """Route créée pour correspondre aux attentes du frontend avec auto-leave"""
     try:
+        # CORRECTION: Import correct de game_service
+        try:
+            from app.services.game import game_service
+            await game_service.leave_all_active_games(db, current_user.id)
+            logger.info(f"✅ Parties actives quittées pour l'utilisateur {current_user.id}")
+        except Exception as leave_error:
+            logger.warning(f"⚠️ Pas de parties actives à quitter: {leave_error}")
+            # Ne pas bloquer la création pour cette erreur
+
         result = await multiplayer_service.create_multiplayer_game(
             db, game_data, current_user.id
         )
@@ -63,7 +72,7 @@ async def create_multiplayer_room(
     "/rooms/{room_code}/join",
     response_model=Dict[str, Any],
     summary="Rejoindre une partie par code",
-    description="Rejoint une partie multijoueur avec un code de room"
+    description="Rejoint une partie multijoueur avec auto-leave des parties actives"
 )
 async def join_multiplayer_room(
         room_code: str,
@@ -71,8 +80,17 @@ async def join_multiplayer_room(
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route pour rejoindre une partie par code (attendue par le frontend)"""
+    """Route pour rejoindre une partie par code avec auto-leave"""
     try:
+        # CORRECTION: Import correct de game_service
+        try:
+            from app.services.game import game_service
+            await game_service.leave_all_active_games(db, current_user.id)
+            logger.info(f"✅ Parties actives quittées pour l'utilisateur {current_user.id}")
+        except Exception as leave_error:
+            logger.warning(f"⚠️ Pas de parties actives à quitter: {leave_error}")
+            # Ne pas bloquer le join pour cette erreur
+
         result = await multiplayer_service.join_room_by_code(
             db, room_code, current_user.id,
             join_data.password,
@@ -105,32 +123,34 @@ async def join_multiplayer_room(
             detail=f"Erreur lors de la connexion: {str(e)}"
         )
 
-
-@router.post(
-    "/rooms/{room_code}/leave",
-    response_model=Dict[str, str],
-    summary="Quitter une partie",
-    description="Quitte une partie multijoueur"
+@router.get(
+    "/rooms/{room_code}",
+    response_model=Dict[str, Any],
+    summary="Détails d'une partie",
+    description="Récupère les détails d'une partie par code de room"
 )
-async def leave_multiplayer_room(
+async def get_multiplayer_room(
         room_code: str,
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
-) -> Dict[str, str]:
-    """Route pour quitter une partie (attendue par le frontend)"""
+) -> Dict[str, Any]:
+    """Route pour récupérer les détails d'une room avec correction participants"""
     try:
-        await multiplayer_service.leave_room_by_code(db, room_code, current_user.id)
-        return {"message": "Partie quittée avec succès"}
+        result = await multiplayer_service.get_room_details(db, room_code, current_user.id)
+        return {
+            "success": True,
+            "data": result
+        }
     except EntityNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Erreur quitter room: {e}")
+        logger.error(f"Erreur récupération room: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la sortie: {str(e)}"
+            detail=f"Erreur lors de la récupération: {str(e)}"
         )
 
 

@@ -39,7 +39,7 @@ except ImportError as e:
     logger.warning(f"⚠️ WebSocket multijoueur non disponible: {e}")
 
 # Imports standards du projet
-from app.models.game import Game, GameStatus, GameParticipation, Difficulty, GameType
+from app.models.game import Game, GameStatus, GameParticipation, Difficulty, GameType, ParticipationStatus
 from app.models.multijoueur import (
     MultiplayerGame, PlayerProgress, GameMastermind,
     PlayerMastermindAttempt, MultiplayerGameType, PlayerStatus
@@ -67,7 +67,7 @@ class MultiplayerService:
             game_data: MultiplayerGameCreateRequest,
             creator_id: UUID
     ) -> Dict[str, Any]:
-        """Crée une partie multijoueur avec tous les masterminds"""
+        """Crée une partie multijoueur SANS champs privés (password, is_private, etc.)"""
 
         logger.info(f"🎯 Création partie multijoueur par utilisateur {creator_id}")
 
@@ -76,97 +76,71 @@ class MultiplayerService:
             room_code = await self._generate_unique_room_code(db)
             logger.info(f"🔑 Code room généré: {room_code}")
 
-            # Créer la partie de base
-            base_game = Game(
+            # CORRECTION: Créer la partie SEULEMENT avec les champs qui existent dans Game
+            new_game = Game(
                 room_code=room_code,
                 game_type=game_data.game_type,
-                game_mode="multiplayer",
-                difficulty=Difficulty(game_data.difficulty),
-                status=GameStatus.WAITING,
+                difficulty=game_data.difficulty,
+                status=GameStatus.WAITING.value,
                 creator_id=creator_id,
                 max_players=game_data.max_players,
                 combination_length=game_data.combination_length,
                 available_colors=game_data.available_colors,
                 max_attempts=game_data.max_attempts,
-                solution=game_data.solution or self._generate_random_solution(
-                    game_data.combination_length, game_data.available_colors
-                ),
-                quantum_enabled=game_data.quantum_enabled
+                quantum_enabled=game_data.quantum_enabled,
+                settings={
+                    "total_masterminds": game_data.total_masterminds,
+                    "items_enabled": game_data.items_enabled,
+                    "items_per_mastermind": game_data.items_per_mastermind,
+                    "solution": game_data.solution
+                }
+                # SUPPRIMÉ: password, is_private, allow_spectators, enable_chat
             )
 
-            db.add(base_game)
-            await db.flush()
-
-            # Créer la partie multijoueur
-            multiplayer_game = MultiplayerGame(
-                base_game_id=base_game.id,
-                game_type=MultiplayerGameType.MULTI_MASTERMIND,
-                total_masterminds=game_data.total_masterminds,
-                difficulty=Difficulty(game_data.difficulty),
-                items_enabled=game_data.items_enabled,
-                items_per_mastermind=game_data.items_per_mastermind
-            )
-
-            db.add(multiplayer_game)
-            await db.flush()
-
-            # Créer tous les masterminds pour la partie
-            for i in range(1, game_data.total_masterminds + 1):
-                mastermind = GameMastermind(
-                    multiplayer_game_id=multiplayer_game.id,
-                    mastermind_number=i,
-                    combination_length=game_data.combination_length,
-                    available_colors=game_data.available_colors,
-                    max_attempts=game_data.max_attempts,
-                    solution=self._generate_random_solution(
-                        game_data.combination_length, game_data.available_colors
-                    ),
-                    is_active=(i == 1)  # Le premier mastermind est actif
-                )
-                db.add(mastermind)
+            db.add(new_game)
+            await db.flush()  # Pour récupérer l'ID
 
             # Ajouter le créateur comme participant
-            participation = GameParticipation(
-                game_id=base_game.id,
+            creator_participation = GameParticipation(
+                game_id=new_game.id,
                 player_id=creator_id,
-                status="waiting",
-                role="player",  # si obligatoire
-                join_order=1  # ✅ Solution ici
-
+                status=ParticipationStatus.ACTIVE.value,
+                role="host",
+                join_order=1,
+                joined_at=datetime.now(timezone.utc)
             )
-            db.add(participation)
 
-            # Créer la progression du créateur
-            progress = PlayerProgress(
-                multiplayer_game_id=multiplayer_game.id,
-                user_id=creator_id,
-                status=PlayerStatus.WAITING
-            )
-            db.add(progress)
-
+            db.add(creator_participation)
             await db.commit()
 
-            # Préparer la réponse
-            response_data = {
-                "room_code": room_code,
-                "game_id": str(base_game.id),
-                "multiplayer_game_id": str(multiplayer_game.id),
-                "creator_id": str(creator_id),
-                "status": "created",
-                "players_count": 1,
-                "max_players": game_data.max_players,
-                "total_masterminds": game_data.total_masterminds,
-                "is_public": game_data.is_public,
-                "quantum_enabled": game_data.quantum_enabled
-            }
-
             logger.info(f"✅ Partie multijoueur créée: {room_code}")
-            return response_data
+
+            # Retourner les données de la room créée
+            return {
+                "id": str(new_game.id),
+                "room_code": room_code,
+                "name": f"Partie {room_code}",
+                "game_type": new_game.game_type,
+                "difficulty": new_game.difficulty,
+                "status": new_game.status,
+                "max_players": new_game.max_players,
+                "current_players": 1,  # Le créateur vient d'être ajouté
+                "is_private": False,  # Toujours false maintenant
+                "password_protected": False,  # Toujours false maintenant
+                "allow_spectators": True,  # Valeur par défaut
+                "enable_chat": True,  # Valeur par défaut
+                "quantum_enabled": new_game.quantum_enabled,
+                "created_at": new_game.created_at.isoformat(),
+                "creator": {
+                    "id": str(creator_id),
+                    "username": "Créateur"  # Sera mis à jour lors de la récupération
+                }
+            }
 
         except Exception as e:
             await db.rollback()
             logger.error(f"❌ Erreur création partie multijoueur: {e}")
-            raise GameError(f"Erreur lors de la création de la partie: {str(e)}")
+            raise GameError(f"Erreur lors de la création: {str(e)}")
 
     async def join_room_by_code(
             self,
@@ -334,69 +308,79 @@ class MultiplayerService:
             room_code: str,
             user_id: UUID
     ) -> Dict[str, Any]:
-        """Récupère les détails d'une partie"""
+        """Récupère les détails d'une room multijoueur SANS champs privés"""
 
-        # Récupérer la partie avec les relations
-        game_query = select(Game).options(
-            selectinload(Game.participants),
-            selectinload(Game.creator)
-        ).where(Game.room_code == room_code)
+        try:
+            # Requête avec eager loading des relations
+            query = (
+                select(Game)
+                .options(
+                    selectinload(Game.participations).selectinload(GameParticipation.player),
+                    selectinload(Game.creator)
+                )
+                .where(Game.room_code == room_code)
+            )
 
-        result = await db.execute(game_query)
-        base_game = result.scalar_one_or_none()
+            result = await db.execute(query)
+            game = result.scalar_one_or_none()
 
-        if not base_game:
-            raise EntityNotFoundError(f"Partie avec le code {room_code} introuvable")
+            if not game:
+                raise EntityNotFoundError(f"Room {room_code} non trouvée")
 
-        # Récupérer la partie multijoueur
-        mp_game_query = select(MultiplayerGame).options(
-            selectinload(MultiplayerGame.player_progresses),
-            selectinload(MultiplayerGame.masterminds)
-        ).where(MultiplayerGame.base_game_id == base_game.id)
-
-        mp_result = await db.execute(mp_game_query)
-        mp_game = mp_result.scalar_one_or_none()
-
-        if not mp_game:
-            raise EntityNotFoundError("Partie multijoueur introuvable")
-
-        # Construire la réponse
-        players = []
-        for progress in mp_game.player_progresses:
-            # Récupérer les infos utilisateur
-            user_query = select(User).where(User.id == progress.user_id)
-            user_result = await db.execute(user_query)
-            user = user_result.scalar_one_or_none()
-
-            if user:
-                players.append({
-                    "user_id": str(progress.user_id),
-                    "username": user.username,
-                    "status": progress.status.value,
-                    "current_mastermind": progress.current_mastermind,
-                    "completed_masterminds": progress.completed_masterminds,
-                    "total_score": progress.total_score,
-                    "is_finished": progress.is_finished
+            # Construire la liste des participants
+            participants_data = []
+            for participation in game.participations:
+                participants_data.append({
+                    "user_id": str(participation.player_id),
+                    "username": participation.player.username,
+                    "status": participation.status,
+                    "score": participation.score or 0,
+                    "attempts_count": participation.attempts_made or 0,
+                    "joined_at": participation.joined_at.isoformat(),
+                    "is_ready": participation.status != "waiting",
+                    "is_winner": participation.status == "finished" and participation.score > 0
                 })
 
-        response_data = {
-            "room_code": room_code,
-            "game_id": str(base_game.id),
-            "multiplayer_game_id": str(mp_game.id),
-            "status": base_game.status.value,
-            "game_type": mp_game.game_type.value,
-            "total_masterminds": mp_game.total_masterminds,
-            "current_mastermind": mp_game.current_mastermind,
-            "difficulty": base_game.difficulty.value,
-            "quantum_enabled": base_game.quantum_enabled,
-            "items_enabled": mp_game.items_enabled,
-            "max_players": base_game.max_players,
-            "players": players,
-            "created_at": base_game.created_at.isoformat(),
-            "started_at": mp_game.started_at.isoformat() if mp_game.started_at else None
-        }
+            # Calculer current_players correctement
+            current_players = len([p for p in game.participations
+                                   if p.status not in ["disconnected", "eliminated"]])
 
-        return response_data
+            # CORRECTION: Construire room_data SANS les champs qui n'existent plus
+            room_data = {
+                "id": str(game.id),
+                "room_code": game.room_code,
+                "name": getattr(game, 'name', f"Partie {game.room_code}"),
+                "game_type": game.game_type,
+                "difficulty": game.difficulty,
+                "status": game.status,
+                "max_players": game.max_players,
+                "current_players": current_players,
+
+                # CORRECTION: Valeurs par défaut pour les champs supprimés
+                "is_private": False,  # Toujours false maintenant
+                "password_protected": False,  # Toujours false maintenant
+                "allow_spectators": True,  # Valeur par défaut
+                "enable_chat": True,  # Valeur par défaut
+
+                # Champs qui existent encore
+                "quantum_enabled": getattr(game, 'quantum_enabled', False),
+                "created_at": game.created_at.isoformat(),
+                "started_at": game.started_at.isoformat() if game.started_at else None,
+                "creator": {
+                    "id": str(game.creator.id),
+                    "username": game.creator.username
+                },
+                "participants": participants_data
+            }
+
+            logger.info(f"✅ Détails room {room_code} récupérés: {current_players} joueurs")
+            return room_data
+
+        except EntityNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Erreur récupération room {room_code}: {e}")
+            raise GameError(f"Erreur lors de la récupération des détails: {str(e)}")
 
     # =====================================================
     # LOBBY ET MATCHMAKING
@@ -859,15 +843,21 @@ class MultiplayerService:
 
     async def _generate_unique_room_code(self, db: AsyncSession) -> str:
         """Génère un code de room unique"""
-        while True:
+        max_attempts = 10
+
+        for _ in range(max_attempts):
+            # Générer un code de 6 caractères alphanumériques
             code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
             # Vérifier l'unicité
-            existing = await db.execute(
+            result = await db.execute(
                 select(Game).where(Game.room_code == code)
             )
-            if not existing.scalar_one_or_none():
+
+            if not result.scalar_one_or_none():
                 return code
+
+        raise GameError("Impossible de générer un code de room unique")
 
     def _generate_random_solution(self, length: int, colors: int) -> List[int]:
         """Génère une solution aléatoire"""

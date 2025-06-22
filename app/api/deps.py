@@ -597,21 +597,37 @@ async def log_request_metrics(
 def create_http_exception_from_error(error: Exception) -> HTTPException:
     """
     Crée une HTTPException à partir d'une exception métier
-
-    Args:
-        error: Exception à convertir
-
-    Returns:
-        HTTPException appropriée
+    CORRECTION: Gestion robuste des différents types d'exceptions
     """
-    status_code = get_http_status_code(error)
-    details = get_exception_details(error)
+    from app.utils.exceptions import BaseQuantumMastermindError
 
-    return HTTPException(
-        status_code=status_code,
-        detail=details['message'],
-        headers={"X-Error-Code": details['error']} if details['error'] else None
-    )
+    # Cas 1: Exception métier héritant de BaseQuantumMastermindError
+    if isinstance(error, BaseQuantumMastermindError):
+        status_code = get_http_status_code(error)
+        details = get_exception_details(error)
+
+        return HTTPException(
+            status_code=status_code,
+            detail=details['message'],
+            headers={"X-Error-Code": details.get('error_code')} if details.get('error_code') else None
+        )
+
+    # Cas 2: Exception Python standard (KeyError, ValueError, etc.)
+    elif isinstance(error, (KeyError, ValueError, TypeError)):
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Erreur de validation: {str(error)}",
+            headers={"X-Error-Code": "VALIDATION_ERROR"}
+        )
+
+    # Cas 3: Exception générique
+    else:
+        return HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur inattendue: {str(error)}",
+            headers={"X-Error-Code": "INTERNAL_ERROR"}
+        )
+
 
 # === MIDDLEWARE HELPERS ===
 
