@@ -92,7 +92,7 @@ class MultiplayerGame(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     # Relations
-    base_game: Mapped["Game"] = relationship("Game", back_populates="multiplayer_game")
+    base_game: Mapped["Game"] = relationship("Game", lazy="select")
     player_progresses: Mapped[List["PlayerProgress"]] = relationship("PlayerProgress",
                                                                      back_populates="multiplayer_game")
     masterminds: Mapped[List["GameMastermind"]] = relationship("GameMastermind", back_populates="multiplayer_game")

@@ -1,6 +1,6 @@
 """
-Routes API pour le mode multijoueur - Version corrigée pour cohérence avec le frontend
-Compatible avec les attentes du code React.js
+Routes API pour le mode multijoueur - Version complète pour cohérence avec le frontend
+Compatible avec les attentes du code React.js décrites dans le document
 """
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -112,7 +112,7 @@ async def get_multiplayer_room(
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route pour récupérer les détails d'une partie"""
+    """Route pour récupérer les détails d'une room (attendue par le frontend)"""
     try:
         result = await multiplayer_service.get_room_details(db, room_code, current_user.id)
         return {
@@ -129,45 +129,20 @@ async def get_multiplayer_room(
 @router.get(
     "/lobby",
     response_model=Dict[str, Any],
-    summary="Lister les parties publiques avec filtres",
-    description="Récupère les parties publiques pour le lobby (route attendue par le frontend)"
+    summary="Lister les parties publiques",
+    description="Récupère la liste des parties publiques pour le lobby"
 )
-async def get_lobby_games(
-        page: int = Query(1, ge=1),
-        limit: int = Query(20, ge=1, le=50),
-        game_type: Optional[str] = Query(None),
-        difficulty: Optional[str] = Query(None),
-        max_players: Optional[int] = Query(None),
-        has_password: Optional[bool] = Query(None),
-        allow_spectators: Optional[bool] = Query(None),
-        quantum_enabled: Optional[bool] = Query(None),
-        status: Optional[str] = Query(None),
-        search_term: Optional[str] = Query(None),
-        has_slots: Optional[bool] = Query(None),
-        sort_by: Optional[str] = Query("created_at"),
-        sort_order: Optional[str] = Query("desc"),
+async def get_public_multiplayer_rooms(
+        page: int = Query(1, ge=1, description="Page"),
+        limit: int = Query(20, ge=1, le=100, description="Limite par page"),
+        filters: Optional[str] = Query(None, description="Filtres JSON"),
+        current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route pour récupérer les parties publiques avec filtres"""
+    """Route pour lister les parties publiques (attendue par le frontend)"""
     try:
-        filters = {
-            "game_type": game_type,
-            "difficulty": difficulty,
-            "max_players": max_players,
-            "has_password": has_password,
-            "allow_spectators": allow_spectators,
-            "quantum_enabled": quantum_enabled,
-            "status": status,
-            "search_term": search_term,
-            "has_slots": has_slots,
-            "sort_by": sort_by,
-            "sort_order": sort_order
-        }
-        # Filtrer les valeurs nulles
-        filters = {k: v for k, v in filters.items() if v is not None}
-
-        result = await multiplayer_service.get_public_games_with_filters(
-            db, page, limit, filters
+        result = await multiplayer_service.get_public_rooms(
+            db, page=page, limit=limit, filters=filters
         )
         return {
             "success": True,
@@ -176,24 +151,28 @@ async def get_lobby_games(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la récupération des parties: {str(e)}"
+            detail=f"Erreur lors de la récupération: {str(e)}"
         )
 
+
+# =====================================================
+# GAMEPLAY MULTIJOUEUR
+# =====================================================
 
 @router.post(
     "/rooms/{room_code}/start",
     response_model=Dict[str, Any],
-    summary="Démarrer une partie",
-    description="Démarre une partie multijoueur (créateur uniquement)"
+    summary="Démarrer la partie",
+    description="Démarre une partie multijoueur"
 )
-async def start_multiplayer_room(
+async def start_multiplayer_game(
         room_code: str,
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route pour démarrer une partie"""
+    """Route pour démarrer la partie (attendue par le frontend)"""
     try:
-        result = await multiplayer_service.start_room(db, room_code, current_user.id)
+        result = await multiplayer_service.start_game(db, room_code, current_user.id)
         return {
             "success": True,
             "data": result,
@@ -209,18 +188,18 @@ async def start_multiplayer_room(
 @router.post(
     "/rooms/{room_code}/attempt",
     response_model=Dict[str, Any],
-    summary="Faire une tentative",
-    description="Soumet une tentative pour le mastermind actuel"
+    summary="Soumettre une tentative",
+    description="Soumet une tentative dans une partie multijoueur"
 )
-async def make_multiplayer_attempt(
+async def submit_multiplayer_attempt(
         room_code: str,
         attempt_data: MultiplayerAttemptRequest,
         current_user: User = Depends(get_current_active_user),
         db: AsyncSession = Depends(get_database)
 ) -> Dict[str, Any]:
-    """Route pour faire une tentative dans une partie"""
+    """Route pour soumettre une tentative (attendue par le frontend)"""
     try:
-        result = await multiplayer_service.make_attempt_by_room_code(
+        result = await multiplayer_service.submit_attempt(
             db, room_code, current_user.id, attempt_data
         )
         return {
@@ -233,6 +212,85 @@ async def make_multiplayer_attempt(
             detail=f"Erreur lors de la tentative: {str(e)}"
         )
 
+
+@router.get(
+    "/rooms/{room_code}/state",
+    response_model=Dict[str, Any],
+    summary="État du jeu en temps réel",
+    description="Récupère l'état actuel du jeu"
+)
+async def get_game_state(
+        room_code: str,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """Route pour l'état du jeu en temps réel (attendue par le frontend)"""
+    try:
+        result = await multiplayer_service.get_game_state(db, room_code, current_user.id)
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la récupération: {str(e)}"
+        )
+
+
+@router.get(
+    "/rooms/{room_code}/players",
+    response_model=Dict[str, Any],
+    summary="Progression des joueurs",
+    description="Récupère la progression de tous les joueurs"
+)
+async def get_players_progress(
+        room_code: str,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """Route pour la progression des joueurs (attendue par le frontend)"""
+    try:
+        result = await multiplayer_service.get_players_progress(db, room_code, current_user.id)
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la récupération: {str(e)}"
+        )
+
+
+@router.get(
+    "/rooms/{room_code}/results",
+    response_model=Dict[str, Any],
+    summary="Résultats finaux",
+    description="Récupère les résultats finaux de la partie"
+)
+async def get_game_results(
+        room_code: str,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """Route pour les résultats finaux (attendue par le frontend)"""
+    try:
+        result = await multiplayer_service.get_game_results(db, room_code, current_user.id)
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la récupération: {str(e)}"
+        )
+
+
+# =====================================================
+# SYSTÈME D'OBJETS AVANCÉ
+# =====================================================
 
 @router.post(
     "/rooms/{room_code}/use-item",
@@ -259,6 +317,38 @@ async def use_multiplayer_item(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de l'utilisation de l'objet: {str(e)}"
+        )
+
+
+# =====================================================
+# INDICES QUANTIQUES MULTIJOUEUR
+# =====================================================
+
+@router.post(
+    "/rooms/{room_code}/quantum-hint",
+    response_model=Dict[str, Any],
+    summary="Demander un indice quantique",
+    description="Demande un indice quantique dans une partie multijoueur"
+)
+async def get_quantum_hint(
+        room_code: str,
+        hint_request: QuantumHintRequest,
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_database)
+) -> Dict[str, Any]:
+    """Route pour les indices quantiques multijoueur (NOUVEAU)"""
+    try:
+        result = await multiplayer_service.get_quantum_hint(
+            db, room_code, current_user.id, hint_request
+        )
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la génération d'indice: {str(e)}"
         )
 
 
@@ -294,65 +384,37 @@ async def websocket_endpoint(
                 # Écouter les messages
                 message = await websocket.receive_text()
                 await multiplayer_ws_manager.handle_message(
-                    room_code, user.id, message, db
+                    room_code, str(user.id), message
                 )
 
         except WebSocketDisconnect:
-            # Gérer la déconnexion
+            # Déconnexion normale
             await multiplayer_ws_manager.remove_connection_from_room(
                 room_code, user.id
             )
 
     except Exception as e:
-        await websocket.close(code=1011, reason=f"Server error: {str(e)}")
+        print(f"Erreur WebSocket: {e}")
+        try:
+            await websocket.close(code=1011, reason="Internal error")
+        except:
+            pass
 
 
 # =====================================================
-# ROUTES STATISTIQUES ET LEADERBOARD
+# ROUTES DE COMPATIBILITÉ
 # =====================================================
 
 @router.get(
-    "/stats/global",
-    response_model=Dict[str, Any],
-    summary="Statistiques globales",
-    description="Récupère les statistiques globales du multijoueur"
+    "/health",
+    response_model=Dict[str, str],
+    summary="Santé du service multijoueur",
+    description="Vérifie la santé du service multijoueur"
 )
-async def get_global_stats(
-        db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """Route pour récupérer les statistiques globales"""
-    try:
-        result = await multiplayer_service.get_global_statistics(db)
-        return {
-            "success": True,
-            "data": result
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la récupération des statistiques: {str(e)}"
-        )
-
-
-@router.get(
-    "/leaderboard",
-    response_model=Dict[str, Any],
-    summary="Classement des joueurs",
-    description="Récupère le classement des meilleurs joueurs"
-)
-async def get_leaderboard(
-        limit: int = Query(50, ge=1, le=100),
-        db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """Route pour récupérer le leaderboard"""
-    try:
-        result = await multiplayer_service.get_leaderboard(db, limit)
-        return {
-            "success": True,
-            "data": result
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la récupération du classement: {str(e)}"
-        )
+async def multiplayer_health():
+    """Route de santé pour le multijoueur"""
+    return {
+        "status": "healthy",
+        "service": "multiplayer",
+        "websocket": "active" if multiplayer_ws_manager else "inactive"
+    }

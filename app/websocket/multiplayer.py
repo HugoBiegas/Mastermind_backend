@@ -1,6 +1,6 @@
 """
-Gestionnaire WebSocket pour le multijoueur - Version corrigée pour cohérence avec le frontend
-Compatible avec les événements attendus par le code React.js
+Gestionnaire WebSocket pour le multijoueur - Version complète pour cohérence avec le frontend
+Compatible avec les événements attendus par le code React.js décrit dans le document
 """
 import asyncio
 import json
@@ -35,6 +35,15 @@ class MultiplayerWebSocketManager:
         # Lock pour les opérations concurrentes
         self._lock = asyncio.Lock()
 
+        # Configuration WebSocket conforme au frontend
+        self.config = {
+            "HEARTBEAT_INTERVAL": 30000,
+            "MAX_RECONNECT_ATTEMPTS": 5,
+            "RECONNECT_DELAY": 1000,
+            "MESSAGE_TIMEOUT": 10000,
+            "PING_INTERVAL": 25000
+        }
+
     # =====================================================
     # GESTION DES CONNEXIONS
     # =====================================================
@@ -57,7 +66,8 @@ class MultiplayerWebSocketManager:
                 "user_id": str(user_id),
                 "username": username,
                 "connected_at": time.time(),
-                "last_heartbeat": time.time()
+                "last_heartbeat": time.time(),
+                "last_ping": time.time()
             }
 
             # Créer la room si elle n'existe pas
@@ -65,66 +75,50 @@ class MultiplayerWebSocketManager:
                 await self.create_multiplayer_room(room_code, {})
 
             # Notifier les autres de la connexion
-            await self.broadcast_to_room(room_code, {
-                "type": "USER_CONNECTED",
-                "data": {
-                    "user_id": str(user_id),
-                    "username": username,
-                    "players_count": len(self.room_connections[room_code])
-                }
-            }, exclude_user=str(user_id))
+            await self.notify_player_joined(room_code, str(user_id), username)
 
-            # Envoyer un message de bienvenue au nouvel utilisateur
+            # Envoyer un message de connexion confirmée
             await self.send_to_user(room_code, str(user_id), {
-                "type": "CONNECTION_ESTABLISHED",
+                "type": "CONNECT",
                 "data": {
                     "room_code": room_code,
-                    "connected_players": [
-                        {
-                            "user_id": conn["user_id"],
-                            "username": conn["username"]
-                        }
-                        for conn in self.room_connections[room_code].values()
-                    ]
-                }
+                    "user_id": str(user_id),
+                    "username": username,
+                    "connected_at": time.time()
+                },
+                "timestamp": time.time()
             })
-
 
     async def remove_connection_from_room(
             self,
             room_code: str,
-            user_id: UUID
+            user_id: UUID,
+            reason: Optional[str] = None
     ) -> None:
         """Retire une connexion d'une room"""
         async with self._lock:
-            if room_code not in self.room_connections:
-                return
+            user_id_str = str(user_id)
 
-            connection_id = str(user_id)
-            if connection_id in self.room_connections[room_code]:
-                connection_data = self.room_connections[room_code][connection_id]
-                username = connection_data["username"]
+            if room_code in self.room_connections and user_id_str in self.room_connections[room_code]:
+                connection_data = self.room_connections[room_code][user_id_str]
+                username = connection_data.get("username", "Inconnu")
 
-                del self.room_connections[room_code][connection_id]
+                # Fermer la connexion WebSocket
+                try:
+                    websocket = connection_data["websocket"]
+                    await websocket.close()
+                except:
+                    pass
 
-                # Notifier les autres de la déconnexion
-                await self.broadcast_to_room(room_code, {
-                    "type": "USER_DISCONNECTED",
-                    "data": {
-                        "user_id": str(user_id),
-                        "username": username,
-                        "players_count": len(self.room_connections[room_code])
-                    }
-                })
+                # Retirer de la liste des connexions
+                del self.room_connections[room_code][user_id_str]
+
+                # Notifier les autres du départ
+                await self.notify_player_left(room_code, user_id_str, username, reason)
 
                 # Nettoyer la room si vide
                 if not self.room_connections[room_code]:
                     await self.cleanup_room(room_code)
-
-
-    # =====================================================
-    # GESTION DES ROOMS MULTIJOUEUR
-    # =====================================================
 
     async def create_multiplayer_room(
             self,
@@ -149,7 +143,6 @@ class MultiplayerWebSocketManager:
 
             if room_code not in self.active_effects:
                 self.active_effects[room_code] = {}
-
 
     # =====================================================
     # ÉVÉNEMENTS MULTIJOUEUR (COHÉRENTS AVEC LE FRONTEND)
@@ -178,7 +171,7 @@ class MultiplayerWebSocketManager:
                     "items": [],
                     "active_effects": [],
                     "is_host": False,
-                    "join_order": 0
+                    "join_order": len(self.room_connections.get(room_code, {}))
                 }
             },
             "timestamp": time.time(),
@@ -186,7 +179,6 @@ class MultiplayerWebSocketManager:
         }
 
         await self.broadcast_to_room(room_code, message)
-
 
     async def notify_player_left(
             self,
@@ -199,6 +191,7 @@ class MultiplayerWebSocketManager:
         message = {
             "type": "PLAYER_LEFT",
             "data": {
+                "user_id": user_id,
                 "username": username,
                 "players_count": len(self.room_connections.get(room_code, {})),
                 "reason": reason
@@ -209,20 +202,20 @@ class MultiplayerWebSocketManager:
 
         await self.broadcast_to_room(room_code, message)
 
-
     async def notify_game_started(
             self,
             room_code: str,
-            game_id: str,
-            updated_game_state: Optional[Dict[str, Any]] = None
+            game_data: Any
     ) -> None:
-        """Notifie que la partie a commencé"""
+        """Notifie que la partie a démarré"""
         message = {
             "type": "GAME_STARTED",
             "data": {
-                "game_id": game_id,
-                "current_mastermind": 1,
-                "updated_game_state": updated_game_state
+                "game_id": room_code,
+                "current_mastermind": getattr(game_data, 'current_mastermind', 1),
+                "total_masterminds": getattr(game_data, 'total_masterminds', 3),
+                "status": "in_progress",
+                "started_at": time.time()
             },
             "timestamp": time.time(),
             "game_id": room_code
@@ -230,23 +223,51 @@ class MultiplayerWebSocketManager:
 
         await self.broadcast_to_room(room_code, message)
 
+        # Mettre à jour le statut de la room
+        if room_code in self.multiplayer_rooms:
+            self.multiplayer_rooms[room_code]["game_status"] = "in_progress"
+
+    async def notify_game_finished(
+            self,
+            room_code: str,
+            winner: Optional[str] = None,
+            final_standings: Optional[List[Dict[str, Any]]] = None
+    ) -> None:
+        """Notifie que la partie est terminée"""
+        message = {
+            "type": "GAME_FINISHED",
+            "data": {
+                "game_id": room_code,
+                "winner": winner,
+                "final_standings": final_standings or [],
+                "finished_at": time.time()
+            },
+            "timestamp": time.time(),
+            "game_id": room_code
+        }
+
+        await self.broadcast_to_room(room_code, message)
+
+        # Mettre à jour le statut de la room
+        if room_code in self.multiplayer_rooms:
+            self.multiplayer_rooms[room_code]["game_status"] = "finished"
 
     async def notify_attempt_made(
             self,
             room_code: str,
             user_id: str,
             username: str,
-            mastermind_number: int,
-            result: Dict[str, Any]
+            attempt_result: Dict[str, Any]
     ) -> None:
         """Notifie qu'une tentative a été effectuée"""
         message = {
-            "type": "ATTEMPT_MADE",
+            "type": "PLAYER_MASTERMIND_COMPLETE" if attempt_result.get("is_winning") else "GAME_PROGRESS_UPDATE",
             "data": {
                 "player_id": user_id,
                 "username": username,
-                "mastermind_number": mastermind_number,
-                "result": result
+                "mastermind_number": attempt_result.get("mastermind_number"),
+                "attempt_result": attempt_result,
+                "is_winning": attempt_result.get("is_winning", False)
             },
             "timestamp": time.time(),
             "game_id": room_code
@@ -254,32 +275,30 @@ class MultiplayerWebSocketManager:
 
         await self.broadcast_to_room(room_code, message)
 
-
-    async def notify_mastermind_completed(
+    async def notify_player_status_changed(
             self,
             room_code: str,
             user_id: str,
             username: str,
-            mastermind_number: int,
-            score: int,
-            items_obtained: List[Dict[str, Any]] = None
+            old_status: str,
+            new_status: str,
+            additional_data: Optional[Dict[str, Any]] = None
     ) -> None:
-        """Notifie qu'un mastermind a été complété"""
+        """Notifie qu'un statut de joueur a changé"""
         message = {
-            "type": "PLAYER_MASTERMIND_COMPLETE",
+            "type": "PLAYER_STATUS_CHANGED",
             "data": {
                 "player_id": user_id,
                 "username": username,
-                "mastermind_number": mastermind_number,
-                "score": score,
-                "items_obtained": items_obtained or []
+                "old_status": old_status,
+                "new_status": new_status,
+                "additional_data": additional_data or {}
             },
             "timestamp": time.time(),
             "game_id": room_code
         }
 
         await self.broadcast_to_room(room_code, message)
-
 
     async def notify_item_used(
             self,
@@ -288,7 +307,7 @@ class MultiplayerWebSocketManager:
             username: str,
             item_type: ItemType,
             target_players: Optional[List[str]] = None,
-            effects: List[Dict[str, Any]] = None
+            effects: Optional[List[Dict[str, Any]]] = None
     ) -> None:
         """Notifie qu'un objet a été utilisé"""
         message = {
@@ -297,7 +316,7 @@ class MultiplayerWebSocketManager:
                 "player_id": user_id,
                 "username": username,
                 "item_type": item_type.value,
-                "target_players": target_players,
+                "target_players": target_players or [],
                 "effects": effects or []
             },
             "timestamp": time.time(),
@@ -306,49 +325,39 @@ class MultiplayerWebSocketManager:
 
         await self.broadcast_to_room(room_code, message)
 
-
     async def notify_effect_applied(
             self,
             room_code: str,
-            effect_type: str,
-            source_player: str,
-            target_players: List[str],
-            duration: int,
-            intensity: float = 1.0
+            effect_data: Dict[str, Any]
     ) -> None:
         """Notifie qu'un effet a été appliqué"""
         message = {
             "type": "EFFECT_APPLIED",
-            "data": {
-                "effect_type": effect_type,
-                "source_player": source_player,
-                "target_players": target_players,
-                "duration": duration,
-                "intensity": intensity
-            },
+            "data": effect_data,
             "timestamp": time.time(),
             "game_id": room_code
         }
 
         await self.broadcast_to_room(room_code, message)
 
-
-    async def notify_game_finished(
+    async def send_chat_message(
             self,
             room_code: str,
-            game_id: str,
-            winner: Optional[str] = None,
-            final_standings: List[Dict[str, Any]] = None,
-            game_stats: Dict[str, Any] = None
+            user_id: str,
+            username: str,
+            content: str,
+            message_type: str = "text"
     ) -> None:
-        """Notifie que la partie est terminée"""
+        """Envoie un message de chat"""
         message = {
-            "type": "GAME_FINISHED",
+            "type": "CHAT_MESSAGE",
             "data": {
-                "game_id": game_id,
-                "winner": winner,
-                "final_standings": final_standings or [],
-                "game_stats": game_stats or {}
+                "message_id": f"{user_id}_{int(time.time())}",
+                "player_id": user_id,
+                "username": username,
+                "content": content,
+                "message_type": message_type,
+                "sent_at": time.time()
             },
             "timestamp": time.time(),
             "game_id": room_code
@@ -356,208 +365,123 @@ class MultiplayerWebSocketManager:
 
         await self.broadcast_to_room(room_code, message)
 
-
-    async def notify_game_state_update(
+    async def send_error(
             self,
             room_code: str,
-            updated_game_state: Dict[str, Any]
+            user_id: str,
+            error_message: str,
+            error_code: Optional[str] = None
     ) -> None:
-        """Notifie d'une mise à jour de l'état de jeu"""
+        """Envoie un message d'erreur à un utilisateur spécifique"""
         message = {
-            "type": "GAME_STATE_UPDATE",
+            "type": "ERROR",
             "data": {
-                "updated_game_state": updated_game_state
+                "message": error_message,
+                "code": error_code,
+                "user_id": user_id
             },
             "timestamp": time.time(),
             "game_id": room_code
         }
 
-        await self.broadcast_to_room(room_code, message)
-
+        await self.send_to_user(room_code, user_id, message)
 
     # =====================================================
-    # GESTION DES MESSAGES ENTRANTS
+    # GESTION DES MESSAGES
     # =====================================================
 
     async def handle_message(
             self,
             room_code: str,
-            user_id: UUID,
-            raw_message: str,
-            db: AsyncSession
+            user_id: str,
+            message: str
     ) -> None:
-        """Traite un message WebSocket entrant"""
+        """Traite un message reçu d'un client"""
         try:
-            message_data = json.loads(raw_message)
-            message_type = message_data.get("type")
-            data = message_data.get("data", {})
+            data = json.loads(message)
+            message_type = data.get("type")
 
-            # Dispatcher vers le bon handler
             if message_type == "HEARTBEAT":
-                await self._handle_heartbeat(room_code, str(user_id))
-
+                await self.handle_heartbeat(room_code, user_id)
             elif message_type == "CHAT_MESSAGE":
-                await self._handle_chat_message(room_code, str(user_id), data)
-
-            elif message_type == "GET_GAME_STATE":
-                await self._handle_get_game_state(room_code, str(user_id), db)
-
-            elif message_type == "PLAYER_STATUS_UPDATE":
-                await self._handle_player_status_update(room_code, str(user_id), data)
-
+                await self.handle_chat_message(room_code, user_id, data)
+            elif message_type == "PING":
+                await self.handle_ping(room_code, user_id)
             else:
-                # Message non reconnu
-                await self.send_to_user(room_code, str(user_id), {
-                    "type": "ERROR",
-                    "data": {
-                        "message": f"Type de message non reconnu: {message_type}"
-                    }
-                })
+                # Messages personnalisés de l'application
+                await self.handle_custom_message(room_code, user_id, data)
 
         except json.JSONDecodeError:
-            await self.send_to_user(room_code, str(user_id), {
-                "type": "ERROR",
-                "data": {
-                    "message": "Format de message invalide"
-                }
-            })
+            await self.send_error(room_code, user_id, "Message malformé")
         except Exception as e:
-            await self.send_to_user(room_code, str(user_id), {
-                "type": "ERROR",
-                "data": {
-                    "message": f"Erreur lors du traitement: {str(e)}"
-                }
-            })
+            await self.send_error(room_code, user_id, f"Erreur de traitement: {str(e)}")
 
-
-    # =====================================================
-    # HANDLERS DE MESSAGES SPÉCIFIQUES
-    # =====================================================
-
-    async def _handle_heartbeat(self, room_code: str, user_id: str) -> None:
+    async def handle_heartbeat(self, room_code: str, user_id: str) -> None:
         """Traite un heartbeat"""
-        if (room_code in self.room_connections and
-            user_id in self.room_connections[room_code]):
+        if room_code in self.room_connections and user_id in self.room_connections[room_code]:
             self.room_connections[room_code][user_id]["last_heartbeat"] = time.time()
 
-            # Répondre au heartbeat
+            # Répondre avec un heartbeat
             await self.send_to_user(room_code, user_id, {
                 "type": "HEARTBEAT",
-                "data": {
-                    "timestamp": time.time()
-                }
+                "data": {"timestamp": time.time()},
+                "timestamp": time.time()
             })
 
+    async def handle_ping(self, room_code: str, user_id: str) -> None:
+        """Traite un ping"""
+        if room_code in self.room_connections and user_id in self.room_connections[room_code]:
+            self.room_connections[room_code][user_id]["last_ping"] = time.time()
 
-    async def _handle_chat_message(
+            # Répondre avec un pong
+            await self.send_to_user(room_code, user_id, {
+                "type": "PONG",
+                "data": {"timestamp": time.time()},
+                "timestamp": time.time()
+            })
+
+    async def handle_chat_message(
             self,
             room_code: str,
             user_id: str,
             data: Dict[str, Any]
     ) -> None:
         """Traite un message de chat"""
-        if room_code not in self.room_connections or user_id not in self.room_connections[room_code]:
-            return
+        content = data.get("data", {}).get("content", "")
+        if content.strip():
+            username = self.room_connections[room_code][user_id]["username"]
+            await self.send_chat_message(room_code, user_id, username, content)
 
-        username = self.room_connections[room_code][user_id]["username"]
-        message_content = data.get("message", "")
-
-        # Diffuser le message à tous les participants
-        await self.broadcast_to_room(room_code, {
-            "type": "CHAT_BROADCAST",
-            "data": {
-                "user_id": user_id,
-                "username": username,
-                "message": message_content,
-                "timestamp": time.time()
-            }
-        })
-
-
-    async def _handle_get_game_state(
-            self,
-            room_code: str,
-            user_id: str,
-            db: AsyncSession
-    ) -> None:
-        """Envoie l'état actuel de la partie"""
-        try:
-            # Récupérer l'état de la partie depuis la base de données
-            # Cette logique devrait être implémentée avec le service multiplayer
-
-            await self.send_to_user(room_code, user_id, {
-                "type": "GAME_STATE_UPDATE",
-                "data": {
-                    "updated_game_state": {
-                        "room_code": room_code,
-                        "status": "active",
-                        "current_mastermind": 1,
-                        "players": []
-                    }
-                }
-            })
-
-        except Exception as e:
-            await self.send_to_user(room_code, user_id, {
-                "type": "ERROR",
-                "data": {
-                    "message": f"Erreur lors de la récupération de l'état: {str(e)}"
-                }
-            })
-
-
-    async def _handle_player_status_update(
+    async def handle_custom_message(
             self,
             room_code: str,
             user_id: str,
             data: Dict[str, Any]
     ) -> None:
-        """Traite une mise à jour de statut de joueur"""
-        new_status = data.get("status")
-        if not new_status:
-            return
-
-        username = self.room_connections[room_code][user_id]["username"]
-
-        # Diffuser la mise à jour de statut
-        await self.broadcast_to_room(room_code, {
-            "type": "PLAYER_STATUS_CHANGED",
-            "data": {
-                "player_id": user_id,
-                "username": username,
-                "new_status": new_status
-            }
-        }, exclude_user=user_id)
-
+        """Traite les messages personnalisés de l'application"""
+        # Cette méthode peut être étendue pour gérer des messages spécifiques
+        # comme les demandes de statut, les actions de jeu, etc.
+        pass
 
     # =====================================================
-    # MÉTHODES DE COMMUNICATION
+    # DIFFUSION DE MESSAGES
     # =====================================================
 
     async def broadcast_to_room(
             self,
             room_code: str,
             message: Dict[str, Any],
-            exclude_user: Optional[str] = None
+            exclude_users: Optional[List[str]] = None
     ) -> None:
-        """Diffuse un message à tous les participants d'une room"""
+        """Diffuse un message à tous les utilisateurs d'une room"""
         if room_code not in self.room_connections:
             return
 
-        message_json = json.dumps(message)
+        exclude_users = exclude_users or []
 
-        # Envoyer à tous les connectés de la room
         for user_id, connection_data in self.room_connections[room_code].items():
-            if exclude_user and user_id == exclude_user:
-                continue
-
-            try:
-                websocket = connection_data["websocket"]
-                await websocket.send_text(message_json)
-            except Exception as e:
-                # Connexion fermée, la nettoyer plus tard
-                print(f"Erreur envoi WebSocket pour {user_id}: {e}")
-
+            if user_id not in exclude_users:
+                await self.send_to_user(room_code, user_id, message)
 
     async def send_to_user(
             self,
@@ -566,8 +490,10 @@ class MultiplayerWebSocketManager:
             message: Dict[str, Any]
     ) -> None:
         """Envoie un message à un utilisateur spécifique"""
-        if (room_code not in self.room_connections or
-            user_id not in self.room_connections[room_code]):
+        if room_code not in self.room_connections:
+            return
+
+        if user_id not in self.room_connections[room_code]:
             return
 
         try:
@@ -575,7 +501,62 @@ class MultiplayerWebSocketManager:
             await websocket.send_text(json.dumps(message))
         except Exception as e:
             print(f"Erreur envoi WebSocket pour {user_id}: {e}")
+            # Retirer la connexion défaillante
+            await self.remove_connection_from_room(room_code, UUID(user_id), "Connection error")
 
+    async def send_to_users(
+            self,
+            room_code: str,
+            user_ids: List[str],
+            message: Dict[str, Any]
+    ) -> None:
+        """Envoie un message à une liste d'utilisateurs spécifiques"""
+        for user_id in user_ids:
+            await self.send_to_user(room_code, user_id, message)
+
+    # =====================================================
+    # GESTION DES EFFETS ACTIFS
+    # =====================================================
+
+    async def add_active_effect(
+            self,
+            room_code: str,
+            effect_id: str,
+            effect_data: Dict[str, Any]
+    ) -> None:
+        """Ajoute un effet actif à une room"""
+        if room_code not in self.active_effects:
+            self.active_effects[room_code] = {}
+
+        self.active_effects[room_code][effect_id] = {
+            **effect_data,
+            "created_at": time.time(),
+            "is_active": True
+        }
+
+        await self.notify_effect_applied(room_code, {
+            "effect_id": effect_id,
+            "effect_data": effect_data,
+            "action": "added"
+        })
+
+    async def remove_active_effect(
+            self,
+            room_code: str,
+            effect_id: str
+    ) -> None:
+        """Retire un effet actif d'une room"""
+        if room_code in self.active_effects and effect_id in self.active_effects[room_code]:
+            del self.active_effects[room_code][effect_id]
+
+            await self.notify_effect_applied(room_code, {
+                "effect_id": effect_id,
+                "action": "removed"
+            })
+
+    async def get_active_effects(self, room_code: str) -> Dict[str, Any]:
+        """Récupère les effets actifs d'une room"""
+        return self.active_effects.get(room_code, {})
 
     # =====================================================
     # NETTOYAGE ET MAINTENANCE
@@ -593,7 +574,6 @@ class MultiplayerWebSocketManager:
             if room_code in self.active_effects:
                 del self.active_effects[room_code]
 
-
     async def cleanup_inactive_connections(self) -> None:
         """Nettoie les connexions inactives (heartbeat timeout)"""
         current_time = time.time()
@@ -601,7 +581,7 @@ class MultiplayerWebSocketManager:
 
         rooms_to_cleanup = []
 
-        for room_code, connections in self.room_connections.items():
+        for room_code, connections in list(self.room_connections.items()):
             users_to_remove = []
 
             for user_id, connection_data in connections.items():
@@ -611,7 +591,7 @@ class MultiplayerWebSocketManager:
 
             # Nettoyer les connexions expirées
             for user_id in users_to_remove:
-                await self.remove_connection_from_room(room_code, UUID(user_id))
+                await self.remove_connection_from_room(room_code, UUID(user_id), "Timeout")
 
             # Marquer les rooms vides pour nettoyage
             if not connections:
@@ -620,6 +600,56 @@ class MultiplayerWebSocketManager:
         # Nettoyer les rooms vides
         for room_code in rooms_to_cleanup:
             await self.cleanup_room(room_code)
+
+    async def get_room_stats(self, room_code: str) -> Dict[str, Any]:
+        """Récupère les statistiques d'une room"""
+        room_data = self.multiplayer_rooms.get(room_code, {})
+        connections = self.room_connections.get(room_code, {})
+        effects = self.active_effects.get(room_code, {})
+
+        return {
+            "room_code": room_code,
+            "connected_players": len(connections),
+            "room_status": room_data.get("game_status", "unknown"),
+            "active_effects_count": len(effects),
+            "created_at": room_data.get("created_at"),
+            "players": [
+                {
+                    "user_id": user_id,
+                    "username": conn_data["username"],
+                    "connected_at": conn_data["connected_at"],
+                    "last_heartbeat": conn_data["last_heartbeat"]
+                }
+                for user_id, conn_data in connections.items()
+            ]
+        }
+
+    # =====================================================
+    # MÉTHODES D'INFORMATION
+    # =====================================================
+
+    def get_connected_users_count(self, room_code: str) -> int:
+        """Récupère le nombre d'utilisateurs connectés dans une room"""
+        return len(self.room_connections.get(room_code, {}))
+
+    def is_user_connected(self, room_code: str, user_id: str) -> bool:
+        """Vérifie si un utilisateur est connecté à une room"""
+        return (room_code in self.room_connections and
+                user_id in self.room_connections[room_code])
+
+    async def get_all_rooms_stats(self) -> Dict[str, Any]:
+        """Récupère les statistiques de toutes les rooms"""
+        stats = {
+            "total_rooms": len(self.multiplayer_rooms),
+            "total_connections": sum(len(conns) for conns in self.room_connections.values()),
+            "rooms": []
+        }
+
+        for room_code in self.multiplayer_rooms.keys():
+            room_stats = await self.get_room_stats(room_code)
+            stats["rooms"].append(room_stats)
+
+        return stats
 
 
 # Instance globale du gestionnaire multijoueur
@@ -632,3 +662,15 @@ def initialize_multiplayer_websocket(base_manager: Optional[WebSocketManager] = 
     if base_manager:
         multiplayer_ws_manager.base_manager = base_manager
     return multiplayer_ws_manager
+
+
+# Tâche de nettoyage automatique (à exécuter périodiquement)
+async def cleanup_task():
+    """Tâche de nettoyage à exécuter périodiquement"""
+    while True:
+        try:
+            await multiplayer_ws_manager.cleanup_inactive_connections()
+            await asyncio.sleep(60)  # Nettoyer chaque minute
+        except Exception as e:
+            print(f"Erreur lors du nettoyage WebSocket: {e}")
+            await asyncio.sleep(60)
