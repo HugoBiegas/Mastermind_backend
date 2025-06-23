@@ -838,7 +838,7 @@ class MultiplayerService:
             # Marquer tous les joueurs actifs comme "playing"
             for participation in game.participations:
                 if participation.status not in ["left", "disconnected", "eliminated"]:
-                    participation.status = "playing"
+                    participation.status = "active"
 
             await db.commit()
 

@@ -53,12 +53,14 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Gestionnaire de cycle de vie de l'application
+    Gestionnaire de cycle de vie de l'application - CORRIGÉ
     NOUVEAU: Test du backend quantique au démarrage
     CORRECTION: Ajout de l'initialisation de la base de données
-    NOUVEAU: Initialisation WebSocket multiplayer
+    CORRECTION: Gestion correcte du cycle de vie des WebSockets
     """
-    # Démarrage
+    # =====================================================
+    # PHASE DE DÉMARRAGE
+    # =====================================================
     logger.info("🚀 Démarrage de Quantum Mastermind API")
     logger.info(f"Environment: {settings.ENVIRONMENT}")
     logger.info(f"Debug mode: {settings.DEBUG}")
@@ -73,16 +75,13 @@ async def lifespan(app: FastAPI):
         raise
 
     # NOUVEAU: Initialisation des WebSockets multijoueur (si disponible)
-    cleanup_task_handle = None
+    websocket_initialized = False
     if WEBSOCKET_MULTIPLAYER_AVAILABLE:
         logger.info("🔌 Initialisation des WebSockets multijoueur...")
         try:
             await initialize_multiplayer_websocket()
+            websocket_initialized = True
             logger.info("✅ WebSockets multijoueur initialisés")
-
-            # Démarrer la tâche de nettoyage en arrière-plan
-            cleanup_task_handle = asyncio.create_task(cleanup_task())
-            logger.info("🧹 Tâche de nettoyage WebSocket démarrée")
         except Exception as e:
             logger.error(f"❌ Erreur lors de l'initialisation WebSocket: {e}")
     else:
@@ -93,41 +92,47 @@ async def lifespan(app: FastAPI):
         quantum_status = await quantum_service.test_quantum_backend()
         if quantum_status["status"] == "healthy":
             logger.info("✅ Backend quantique opérationnel")
-            logger.info(f"   - Backend: {quantum_status.get('backend', 'Unknown')}")
-            logger.info(f"   - Version Qiskit: {quantum_status.get('qiskit_version', 'Unknown')}")
-            logger.info(f"   - Algorithmes disponibles: {', '.join(quantum_status.get('available_algorithms', []))}")
+            logger.info(f"   - Backend: {quantum_status.get('backend', 'N/A')}")
+            logger.info(f"   - Version Qiskit: {quantum_status.get('qiskit_version', 'N/A')}")
+            logger.info("   - Algorithmes disponibles:")
+            for algo in quantum_status.get("available_algorithms", []):
+                logger.info(f"     • {algo}")
         else:
-            logger.warning("⚠️  Backend quantique non disponible")
-            logger.warning(f"   - Erreur: {quantum_status.get('error', 'Unknown')}")
-            logger.warning("   - Les fonctionnalités quantiques utiliseront des fallbacks classiques")
+            logger.warning(f"⚠️  Backend quantique en mode dégradé: {quantum_status.get('message', 'N/A')}")
     except Exception as e:
-        logger.error(f"❌ Erreur lors de l'initialisation quantique: {e}")
+        logger.error(f"❌ Erreur lors du test quantique: {e}")
 
     logger.info("🎯 Application prête à traiter les requêtes")
 
+    # =====================================================
+    # YIELD - L'APPLICATION FONCTIONNE ICI
+    # =====================================================
     yield
 
-    # Arrêt
-    logger.info("🛑 Arrêt de Quantum Mastermind API")
-    logger.info("🔌 Fermeture des connexions...")
+    # =====================================================
+    # PHASE D'ARRÊT
+    # =====================================================
+    logger.info("🔌 Arrêt de l'application...")
 
-    # NOUVEAU: Arrêt de la tâche de nettoyage WebSocket
-    if cleanup_task_handle:
-        cleanup_task_handle.cancel()
+    # CORRECTION: Fermeture des WebSockets seulement à l'arrêt
+    if websocket_initialized and WEBSOCKET_MULTIPLAYER_AVAILABLE:
+        logger.info("🔌 Fermeture des WebSockets multijoueur...")
         try:
-            await cleanup_task_handle
-        except asyncio.CancelledError:
-            logger.info("🧹 Tâche de nettoyage WebSocket arrêtée")
+            await cleanup_task()
+            logger.info("✅ WebSockets fermés proprement")
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de la fermeture WebSocket: {e}")
 
-    # CORRECTION: Fermeture propre de la base de données
+    # Fermeture de la base de données
+    logger.info("🗃️  Fermeture de la base de données...")
     try:
         await close_db()
         logger.info("✅ Base de données fermée proprement")
     except Exception as e:
-        logger.error(f"❌ Erreur lors de la fermeture de la base de données: {e}")
+        logger.error(f"❌ Erreur lors de la fermeture de la DB: {e}")
 
     logger.info("⚛️  Arrêt du backend quantique...")
-    logger.info("👋 Arrêt terminé")
+    logger.info("✅ Application fermée proprement")
 
 
 # === CONFIGURATION DE L'APPLICATION ===

@@ -65,7 +65,7 @@ class Settings(BaseSettings):
             password=values.get("DB_PASSWORD"),
             host=values.get("DB_HOST"),
             port=values.get("DB_PORT"),
-            path=f"/{values.get('DB_NAME') or ''}",
+            path=f"/{values.get('DB_NAME') or ''}"
         ))
 
     # === REDIS ===
@@ -103,6 +103,23 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [host.strip() for host in v.split(",")]
         return v
+
+    # === WEBHOOKS - NOUVELLEMENT ACTIVÉS ===
+    ENABLE_WEBHOOKS: bool = os.getenv("ENABLE_WEBHOOKS", "true").lower() == "true"  # AJOUTÉ: Activation des webhooks
+    WEBHOOK_BASE_URL: Optional[str] = os.getenv("WEBHOOK_BASE_URL")
+    WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", secrets.token_urlsafe(32))
+    WEBHOOK_TIMEOUT: int = int(os.getenv("WEBHOOK_TIMEOUT", "30"))
+    WEBHOOK_RETRY_ATTEMPTS: int = int(os.getenv("WEBHOOK_RETRY_ATTEMPTS", "3"))
+    WEBHOOK_EVENTS_ENABLED: List[str] = [
+        "game.created",
+        "game.started",
+        "game.finished",
+        "player.joined",
+        "player.left",
+        "attempt.made",
+        "hint.generated"
+    ]
+
 
     # === CONFIGURATION QUANTIQUE ÉTENDUE ===
 
@@ -421,31 +438,20 @@ class GameConfig:
 
 
 class WebSocketConfig:
-    """Configuration WebSocket"""
+    """Configuration WebSocket - ÉTENDUE avec gestion des webhooks"""
 
-    # Limites de connexion
-    MAX_CONNECTIONS = 1000
+    # Connexions
     MAX_CONNECTIONS_PER_USER = 3
-    MAX_ROOMS_PER_USER = 5
-    MAX_USERS_PER_ROOM = 8
-
-    # Timeouts
     CONNECTION_TIMEOUT = 60
     HEARTBEAT_INTERVAL = 30
-    PING_INTERVAL = 30
-    PING_TIMEOUT = 10
-    CLEANUP_INTERVAL = 300
+    RECONNECT_ATTEMPTS = 5
 
-    # Tailles de messages
-    MAX_MESSAGE_SIZE = 1024 * 64  # 64KB
-    MAX_QUEUE_SIZE = 100
-    MESSAGE_QUEUE_SIZE = 100
-
-    # Types d'événements
-    ALLOWED_EVENT_TYPES = [
+    # Messages autorisés
+    ALLOWED_MESSAGE_TYPES = [
         "authenticate", "join_room", "leave_room",
         "make_attempt", "get_hint", "chat_message",
-        "heartbeat", "game_state_request"
+        "heartbeat", "game_state_request",
+        "webhook_notification"  # AJOUTÉ: Support des notifications webhook
     ]
 
     # Types de messages
@@ -455,8 +461,9 @@ class WebSocketConfig:
         "player_left",
         "attempt_made",
         "game_finished",
-        "quantum_hint_generated",  # NOUVEAU
-        "quantum_calculation_done"  # NOUVEAU
+        "quantum_hint_generated",
+        "quantum_calculation_done",
+        "webhook_event"  # AJOUTÉ: Événements webhook
     ]
 
 
@@ -575,6 +582,28 @@ def get_quantum_config() -> Dict[str, Any]:
     }
 
 
+def get_webhook_config() -> Dict[str, Any]:
+    """
+    Retourne la configuration des webhooks - NOUVELLE FONCTION
+
+    Returns:
+        Configuration webhook avec tous les paramètres
+    """
+    return {
+        "enabled": settings.ENABLE_WEBHOOKS,
+        "base_url": settings.WEBHOOK_BASE_URL,
+        "secret": settings.WEBHOOK_SECRET,
+        "timeout": settings.WEBHOOK_TIMEOUT,
+        "retry_attempts": settings.WEBHOOK_RETRY_ATTEMPTS,
+        "events_enabled": settings.WEBHOOK_EVENTS_ENABLED,
+        "signature_validation": True,
+        "rate_limit": {
+            "max_requests_per_minute": 60,
+            "burst_limit": 10
+        }
+    }
+
+
 def validate_configuration() -> List[str]:
     """
     Valide la configuration actuelle et retourne les erreurs
@@ -620,12 +649,20 @@ def validate_configuration() -> List[str]:
         if settings.JWT_SECRET_KEY == "jwt-secret-key-change-in-production":
             errors.append("JWT_SECRET_KEY doit être changée en production")
 
+    # AJOUTÉ: Validation des webhooks
+    if settings.ENABLE_WEBHOOKS:
+        if not settings.WEBHOOK_SECRET or len(settings.WEBHOOK_SECRET) < 16:
+            errors.append("WEBHOOK_SECRET doit faire au moins 16 caractères")
+
+        if settings.WEBHOOK_TIMEOUT < 5 or settings.WEBHOOK_TIMEOUT > 300:
+            errors.append("WEBHOOK_TIMEOUT doit être entre 5 et 300 secondes")
+
     return errors
 
 
 def get_feature_flags() -> Dict[str, bool]:
     """
-    Retourne les flags de fonctionnalités quantiques
+    Retourne les flags de fonctionnalités quantiques - ÉTENDU avec webhooks
 
     Returns:
         Dictionnaire des fonctionnalités activées/désactivées
@@ -641,7 +678,10 @@ def get_feature_flags() -> Dict[str, bool]:
         "metrics_collection": settings.QUANTUM_METRICS_ENABLED,
         "detailed_logging": settings.QUANTUM_DETAILED_LOGGING,
         "rate_limiting": True,
-        "security_validation": True
+        "security_validation": True,
+        "webhooks_enabled": settings.ENABLE_WEBHOOKS,  # AJOUTÉ: Flag webhooks
+        "websocket_notifications": True,
+        "real_time_updates": True
     }
 
 
@@ -661,7 +701,7 @@ def is_test() -> bool:
 
 
 def startup_config_check():
-    """Vérifie la configuration au démarrage de l'application"""
+    """Vérifie la configuration au démarrage de l'application - ÉTENDU avec webhooks"""
     errors = validate_configuration()
 
     if errors:
@@ -675,6 +715,13 @@ def startup_config_check():
             print("⚠️  Application démarrée avec des avertissements de configuration")
     else:
         print("✅ Configuration validée avec succès")
+
+    # Log des fonctionnalités activées
+    features = get_feature_flags()
+    print("🔧 Fonctionnalités activées:")
+    for feature, enabled in features.items():
+        status = "✅" if enabled else "❌"
+        print(f"  {status} {feature}")
 
 
 # === EXPORT DE LA CONFIGURATION ===
@@ -690,6 +737,7 @@ __all__ = [
     "get_settings",
     "get_config_for_environment",
     "get_quantum_config",
+    "get_webhook_config",  # AJOUTÉ: Export webhook config
     "validate_configuration",
     "get_feature_flags",
     "is_development",

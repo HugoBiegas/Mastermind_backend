@@ -34,7 +34,7 @@ class PlayerStatus(str, enum.Enum):
     """Statuts des joueurs dans une partie multijoueur"""
     WAITING = "waiting"
     READY = "ready"
-    PLAYING = "playing"
+    PLAYING = "active"
     PAUSED = "paused"
     FINISHED = "finished"
     DISCONNECTED = "disconnected"
