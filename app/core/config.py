@@ -388,7 +388,7 @@ class GameConfig:
     DEFAULT_TIME_LIMIT = None
 
     # Multijoueur
-    MAX_PLAYERS_PER_GAME = 8
+    MAX_PLAYERS_PER_GAME = 12
     DEFAULT_ROOM_CODE_LENGTH = 8
 
     # Scoring

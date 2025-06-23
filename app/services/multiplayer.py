@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from sqlalchemy import select, and_, desc, func, or_, delete, update
+from sqlalchemy import select, and_, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,11 +39,10 @@ except ImportError as e:
     logger.warning(f"⚠️ WebSocket multijoueur non disponible: {e}")
 
 # Imports standards du projet
-from app.models.game import Game, GameStatus, GameParticipation, Difficulty, GameType, ParticipationStatus, \
+from app.models.game import Game, GameStatus, GameParticipation, GameType, ParticipationStatus, \
     generate_room_code, GameAttempt
 from app.models.multijoueur import (
-    MultiplayerGame, PlayerProgress, GameMastermind,
-    PlayerMastermindAttempt, MultiplayerGameType, PlayerStatus
+    MultiplayerGame
 )
 from app.models.user import User
 from app.schemas.multiplayer import (
@@ -657,88 +656,121 @@ class MultiplayerService:
     ) -> Dict[str, Any]:
         """
         Calcule le résultat d'une tentative avec support quantique
-        Réutilise la logique existante de votre GameService
+        Réutilise la logique existante de votre GameService - CORRIGÉ
         """
         is_quantum_game = game and (game.game_type == GameType.QUANTUM.value or game.quantum_enabled)
 
         if is_quantum_game and QUANTUM_AVAILABLE:
             # === MODE QUANTIQUE ===
             try:
+                logger.info(f"🔮 Calcul quantique multijoueur pour: {combination}")
+
                 quantum_result = await quantum_service.calculate_quantum_hints_with_probabilities(
                     solution, combination
                 )
 
-                correct_positions = quantum_result["exact_matches"]
-                correct_colors = quantum_result["wrong_position"]
+                # CORRECTION: Mapping correct selon la structure retournée par quantum_service
+                correct_positions = quantum_result.get("exact_matches", 0)
+                correct_colors = quantum_result.get("wrong_position", 0)
+
+                # Vérifier si c'est gagnant
                 is_winning = correct_positions == len(solution)
 
-                # Calcul du score avec bonus quantique (utilise votre fonction existante)
-                from app.models.game import calculate_game_score
-                score = calculate_game_score(
-                    len(combination) + 1,
-                    len(solution) * 2,
-                    0  # temps sera ajouté plus tard
-                )
+                # Calcul du score avec bonus quantique (même logique que solo)
+                base_score = correct_positions * 100 + correct_colors * 25
 
                 if is_winning:
-                    score += 500  # Bonus de victoire
+                    base_score += 500  # Bonus de victoire
 
+                # Bonus quantique si vraiment calculé quantiquement
                 if quantum_result.get("quantum_calculated", False):
-                    score += 100  # Bonus quantique
+                    base_score = int(base_score * 1.2)  # 20% de bonus quantique
+                    logger.info(f"✅ Bonus quantique appliqué en multijoueur")
+
+                logger.info(
+                    f"🎯 Résultat quantique multijoueur: positions={correct_positions}, couleurs={correct_colors}, score={base_score}")
 
                 return {
                     "correct_positions": correct_positions,
                     "correct_colors": correct_colors,
                     "is_winning": is_winning,
-                    "score": score,
-                    "quantum_calculated": True,
-                    "quantum_probabilities": quantum_result
+                    "score": base_score,
+                    "quantum_calculated": quantum_result.get("quantum_calculated", False),
+                    "quantum_probabilities": quantum_result,
+                    "quantum_data": quantum_result  # Alias pour compatibilité
                 }
 
             except Exception as e:
-                logger.warning(f"Erreur calcul quantique, fallback classique: {e}")
+                logger.error(f"❌ Erreur calcul quantique multijoueur, fallback classique: {e}")
                 # Fallback vers le calcul classique
+                return self._calculate_classical_result(combination, solution)
 
-        # === MODE CLASSIQUE ===
-        correct_positions = 0
+        else:
+            # === MODE CLASSIQUE ===
+            logger.info(f"🎯 Calcul classique multijoueur pour: {combination}")
+            return self._calculate_classical_result(combination, solution)
+
+    def _calculate_classical_result(
+            self,
+            combination: List[int],
+            solution: List[int]
+    ) -> Dict[str, Any]:
+        """
+        Calcul classique pour multijoueur - Même logique que le solo
+        """
+        # Validation des longueurs
+        if len(combination) != len(solution):
+            logger.error(f"❌ Longueurs incompatibles: {len(combination)} vs {len(solution)}")
+            return {
+                "correct_positions": 0,
+                "correct_colors": 0,
+                "is_winning": False,
+                "score": 0,
+                "quantum_calculated": False,
+                "quantum_probabilities": None,
+                "quantum_data": None
+            }
+
+        # Calcul des correspondances exactes (bonne couleur, bonne position)
+        correct_positions = sum(1 for i, (c, s) in enumerate(zip(combination, solution)) if c == s)
+
+        # Calcul des correspondances de couleur (bonne couleur, mauvaise position)
+        solution_counts = {}
+        combination_counts = {}
+
+        # Compter les couleurs en excluant les correspondances exactes
+        for i, (c, s) in enumerate(zip(combination, solution)):
+            if c != s:  # Exclure les correspondances exactes
+                solution_counts[s] = solution_counts.get(s, 0) + 1
+                combination_counts[c] = combination_counts.get(c, 0) + 1
+
+        # Calculer les correspondances de couleur
         correct_colors = 0
+        for color in combination_counts:
+            if color in solution_counts:
+                correct_colors += min(combination_counts[color], solution_counts[color])
 
-        # Calcul des positions exactes
-        solution_copy = solution.copy()
-        combination_copy = combination.copy()
-
-        for i, color in enumerate(combination_copy):
-            if i < len(solution_copy) and color == solution_copy[i]:
-                correct_positions += 1
-                solution_copy[i] = -1  # Marquer comme utilisé
-                combination_copy[i] = -1
-
-        # Calcul des couleurs mal placées
-        for i, color in enumerate(combination_copy):
-            if color != -1 and color in solution_copy:
-                correct_colors += 1
-                idx = solution_copy.index(color)
-                solution_copy[idx] = -1
-
+        # Vérifier si c'est gagnant
         is_winning = correct_positions == len(solution)
 
-        # Score de base
-        base_score = 100
-        attempt_penalty = (len(combination)) * 10
-        score = max(base_score - attempt_penalty, 10)
+        # Calcul du score classique
+        base_score = correct_positions * 100 + correct_colors * 25
 
         if is_winning:
-            score += 500
+            base_score += 500  # Bonus de victoire
+
+        logger.info(
+            f"🎯 Résultat classique multijoueur: positions={correct_positions}, couleurs={correct_colors}, score={base_score}")
 
         return {
             "correct_positions": correct_positions,
             "correct_colors": correct_colors,
             "is_winning": is_winning,
-            "score": score,
+            "score": base_score,
             "quantum_calculated": False,
-            "quantum_probabilities": None
+            "quantum_probabilities": None,
+            "quantum_data": None
         }
-
     async def _check_all_players_finished(self, db: AsyncSession, game) -> bool:
         """
         Vérifie si tous les joueurs ont terminé leur partie
