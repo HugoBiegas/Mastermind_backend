@@ -222,36 +222,6 @@ async def get_multiplayer_room(
         )
 
 
-@router.get(
-    "/rooms/{room_code}",
-    response_model=Dict[str, Any],
-    summary="Détails d'une partie",
-    description="Récupère les détails d'une partie par code de room"
-)
-async def get_multiplayer_room(
-        room_code: str,
-        current_user: User = Depends(get_current_active_user),
-        db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """Route pour récupérer les détails d'une room (attendue par le frontend)"""
-    try:
-        result = await multiplayer_service.get_room_details(db, room_code, current_user.id)
-        return {
-            "success": True,
-            "data": result
-        }
-    except EntityNotFoundError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-    except Exception as e:
-        logger.error(f"Erreur récupération room: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la récupération: {str(e)}"
-        )
-
 
 # =====================================================
 # LOBBY ET MATCHMAKING

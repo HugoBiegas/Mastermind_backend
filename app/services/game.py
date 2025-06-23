@@ -88,8 +88,8 @@ class GameService:
             if max_attempts is not None and (max_attempts < 1 or max_attempts > 50):
                 raise ValidationError("Le nombre de tentatives doit être entre 1 et 50")
 
-            if game_data.max_players < 1 or game_data.max_players > 8:
-                raise ValidationError("Le nombre de joueurs doit être entre 1 et 8")
+            if game_data.max_players < 1 or game_data.max_players > 12:
+                raise ValidationError("Le nombre de joueurs doit être entre 1 et 12")
 
             # Génération du code de room unique
             room_code = await self._generate_unique_room_code(db)

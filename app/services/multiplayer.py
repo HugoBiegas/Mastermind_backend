@@ -40,7 +40,7 @@ except ImportError as e:
 
 # Imports standards du projet
 from app.models.game import Game, GameStatus, GameParticipation, Difficulty, GameType, ParticipationStatus, \
-    generate_room_code
+    generate_room_code, GameAttempt
 from app.models.multijoueur import (
     MultiplayerGame, PlayerProgress, GameMastermind,
     PlayerMastermindAttempt, MultiplayerGameType, PlayerStatus
@@ -51,7 +51,7 @@ from app.schemas.multiplayer import (
     ItemUseRequest, QuantumHintRequest, QuantumHintResponse
 )
 from app.utils.exceptions import (
-    EntityNotFoundError, GameError, AuthorizationError, GameFullError
+    EntityNotFoundError, GameError, AuthorizationError, GameFullError, ValidationError
 )
 
 
@@ -407,6 +407,348 @@ class MultiplayerService:
             logger.error(f"❌ Erreur quitter room {room_code}: {e}")
             # CORRECTION: Ne pas raise l'erreur, juste logger
             # L'utilisateur a quitté côté frontend de toute façon
+
+    async def submit_attempt(
+            self,
+            db: AsyncSession,
+            room_code: str,
+            user_id: UUID,
+            attempt_data: MultiplayerAttemptRequest
+    ) -> Dict[str, Any]:
+        """
+        Soumet une tentative dans une partie multijoueur
+        Basé sur la fonction make_attempt existante, adaptée pour le multiplayer
+        """
+        logger.info(f"🎯 Soumission tentative pour room {room_code} par utilisateur {user_id}")
+
+        try:
+            # === 1. RÉCUPÉRATION ET VÉRIFICATIONS DE BASE ===
+
+            # Récupérer la partie par room_code
+            game_query = select(Game).options(
+                selectinload(Game.participations).selectinload(GameParticipation.player),
+                selectinload(Game.attempts)
+            ).where(Game.room_code == room_code)
+            game_result = await db.execute(game_query)
+            game = game_result.scalar_one_or_none()
+
+            if not game:
+                raise EntityNotFoundError("Partie non trouvée")
+
+            if game.status != GameStatus.ACTIVE.value:
+                raise GameError("La partie n'est pas active")
+
+            # === 2. VÉRIFICATION DE LA PARTICIPATION ===
+
+            # Trouver la participation de l'utilisateur (utilise player_id comme dans votre code)
+            participation = None
+            for p in game.participations:
+                if p.player_id == user_id:  # player_id selon votre modèle
+                    participation = p
+                    break
+
+            if not participation or participation.status != ParticipationStatus.ACTIVE.value:
+                raise AuthorizationError("Vous ne participez pas activement à cette partie")
+
+            # === 3. VÉRIFICATION DU NOMBRE DE TENTATIVES ===
+
+            # Compter les tentatives actuelles de ce joueur (utilise player_id)
+            current_attempts_query = select(func.count(GameAttempt.id)).where(
+                and_(
+                    GameAttempt.game_id == game.id,
+                    GameAttempt.player_id == user_id  # player_id selon votre modèle
+                )
+            )
+            current_attempts_result = await db.execute(current_attempts_query)
+            current_attempts = current_attempts_result.scalar() or 0
+
+            if game.max_attempts and current_attempts >= game.max_attempts:
+                raise GameError("Nombre maximum de tentatives atteint")
+
+            # === 4. VALIDATION DE LA COMBINAISON ===
+
+            combination = attempt_data.combination
+            if not combination or len(combination) != game.combination_length:
+                raise ValidationError(f"La combinaison doit contenir {game.combination_length} couleurs")
+
+            # Conversion pour compatibilité avec votre validation existante (1-indexed)
+            if not all(1 <= color <= game.available_colors for color in combination):
+                raise ValidationError(f"Les couleurs doivent être entre 1 et {game.available_colors}")
+
+            # === 5. CALCUL DU RÉSULTAT (utilise votre méthode existante) ===
+
+            # Utiliser votre méthode de calcul existante avec support quantique
+            result = await self._calculate_attempt_result(
+                combination,
+                game.solution,
+                game
+            )
+
+            # === 6. CRÉATION DE LA TENTATIVE EN BASE ===
+
+            attempt_number = current_attempts + 1
+
+            # Créer l'enregistrement de tentative (structure identique à votre GameAttempt)
+            new_attempt = GameAttempt(
+                game_id=game.id,
+                player_id=user_id,  # player_id selon votre modèle
+                attempt_number=attempt_number,
+                combination=combination,
+                correct_positions=result["correct_positions"],  # Mapping selon votre code
+                correct_colors=result["correct_colors"],  # Mapping selon votre code
+                is_correct=result["is_winning"],
+                used_quantum_hint=result.get("quantum_calculated", False),
+                hint_type=None,
+                quantum_data=result.get("quantum_probabilities"),
+                attempt_score=result["score"],
+                time_taken=attempt_data.time_taken
+            )
+
+            db.add(new_attempt)
+
+            # === 7. MISE À JOUR DE LA PARTICIPATION ===
+
+            # Mettre à jour les stats de participation (comme dans votre code)
+            participation.attempts_made = attempt_number
+            participation.score += result["score"]
+
+            # === 8. GESTION DE LA FIN DE PARTIE ===
+
+            game_finished = False
+            player_eliminated = False
+
+            if result["is_winning"]:
+                # Le joueur a gagné
+                participation.status = ParticipationStatus.FINISHED.value
+                participation.is_winner = True
+                participation.finished_at = datetime.now(timezone.utc)
+                game_finished = True
+
+                # Vérifier si c'est le premier gagnant (logique multijoueur)
+                existing_winners = [p for p in game.participations if p.is_winner]
+                if len(existing_winners) <= 1:  # Ce joueur est le premier ou seul gagnant
+                    game.status = GameStatus.FINISHED.value
+                    game.finished_at = datetime.now(timezone.utc)
+            else:
+                # Vérifier si le joueur a épuisé ses tentatives
+                if game.max_attempts and participation.attempts_made >= game.max_attempts:
+                    participation.status = ParticipationStatus.ELIMINATED.value
+                    participation.is_eliminated = True
+                    participation.finished_at = datetime.now(timezone.utc)
+                    player_eliminated = True
+
+                    # Vérifier si tous les joueurs sont finis (utilise votre méthode existante)
+                    if await self._check_all_players_finished(db, game):
+                        game.status = GameStatus.FINISHED.value
+                        game.finished_at = datetime.now(timezone.utc)
+                        game_finished = True
+
+            # === 9. COMMIT EN BASE ===
+
+            await db.commit()
+            await db.refresh(new_attempt)
+
+            # === 10. CALCUL DES INFORMATIONS DE RETOUR ===
+
+            # Tentatives restantes
+            remaining_attempts = None
+            if game.max_attempts:
+                remaining_attempts = max(0, game.max_attempts - participation.attempts_made)
+
+            # Solution révélée selon votre logique existante
+            revealed_solution = None
+            should_reveal_solution = (
+                    result["is_winning"] or  # Joueur a gagné
+                    player_eliminated or  # Joueur éliminé
+                    game_finished  # Partie terminée
+            )
+
+            if should_reveal_solution:
+                revealed_solution = game.solution
+
+            # === 11. NOTIFICATIONS WEBSOCKET ===
+
+            # Envoyer des notifications WebSocket si disponible (comme dans votre code)
+            if WEBSOCKET_AVAILABLE and multiplayer_ws_manager:
+                try:
+                    await multiplayer_ws_manager.broadcast_to_room(
+                        room_code,
+                        {
+                            "type": "attempt_submitted",
+                            "data": {
+                                "user_id": str(user_id),
+                                "username": participation.player.username if participation.player else "Joueur",
+                                "attempt_number": attempt_number,
+                                "exact_matches": result["correct_positions"],
+                                "position_matches": result["correct_colors"],
+                                "is_solution": result["is_winning"],
+                                "score": result["score"],
+                                "game_finished": game_finished or player_eliminated,
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            }
+                        }
+                    )
+
+                    # Si la partie est terminée, envoyer l'état final
+                    if game_finished:
+                        await multiplayer_ws_manager.broadcast_to_room(
+                            room_code,
+                            {
+                                "type": "game_finished",
+                                "data": {
+                                    "room_code": room_code,
+                                    "winner_id": str(user_id) if result["is_winning"] else None,
+                                    "final_state": game.status,
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
+                                }
+                            }
+                        )
+                except Exception as ws_error:
+                    logger.warning(f"⚠️ Erreur WebSocket: {ws_error}")
+
+            # === 12. CONSTRUCTION DE LA RÉPONSE ===
+
+            # Construire la réponse selon le format attendu par votre frontend
+            response = {
+                "id": str(new_attempt.id),
+                "attempt_number": attempt_number,
+                "combination": combination,
+                "exact_matches": result["correct_positions"],  # Format API standard
+                "position_matches": result["correct_colors"],  # Format API standard
+                "is_solution": result["is_winning"],
+                "is_winning": result["is_winning"],  # Alias pour compatibilité
+                "score": result["score"],
+                "time_taken": attempt_data.time_taken,
+                "game_finished": game_finished or player_eliminated,
+                "game_status": game.status,
+                "remaining_attempts": remaining_attempts,
+
+                # Données quantiques si disponibles
+                "quantum_calculated": result.get("quantum_calculated", False),
+                "quantum_probabilities": result.get("quantum_probabilities"),
+                "quantum_hint_used": result.get("quantum_calculated", False),
+
+                # Solution révélée si approprié
+                "solution": revealed_solution,
+
+                # Métadonnées
+                "player_eliminated": player_eliminated,
+                "created_at": new_attempt.created_at.isoformat() if hasattr(new_attempt, 'created_at') else None
+            }
+
+            logger.info(
+                f"✅ Tentative {attempt_number} soumise pour {user_id} dans {room_code} - Score: {result['score']}")
+            return response
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Erreur soumission tentative: {e}")
+            if isinstance(e, (EntityNotFoundError, AuthorizationError, GameError, ValidationError)):
+                raise
+            raise GameError(f"Erreur lors de la soumission: {str(e)}")
+
+    # === MÉTHODE HELPER À AJOUTER AUSSI ===
+
+    async def _calculate_attempt_result(
+            self,
+            combination: List[int],
+            solution: List[int],
+            game: Game = None
+    ) -> Dict[str, Any]:
+        """
+        Calcule le résultat d'une tentative avec support quantique
+        Réutilise la logique existante de votre GameService
+        """
+        is_quantum_game = game and (game.game_type == GameType.QUANTUM.value or game.quantum_enabled)
+
+        if is_quantum_game and QUANTUM_AVAILABLE:
+            # === MODE QUANTIQUE ===
+            try:
+                quantum_result = await quantum_service.calculate_quantum_hints_with_probabilities(
+                    solution, combination
+                )
+
+                correct_positions = quantum_result["exact_matches"]
+                correct_colors = quantum_result["wrong_position"]
+                is_winning = correct_positions == len(solution)
+
+                # Calcul du score avec bonus quantique (utilise votre fonction existante)
+                from app.models.game import calculate_game_score
+                score = calculate_game_score(
+                    len(combination) + 1,
+                    len(solution) * 2,
+                    0  # temps sera ajouté plus tard
+                )
+
+                if is_winning:
+                    score += 500  # Bonus de victoire
+
+                if quantum_result.get("quantum_calculated", False):
+                    score += 100  # Bonus quantique
+
+                return {
+                    "correct_positions": correct_positions,
+                    "correct_colors": correct_colors,
+                    "is_winning": is_winning,
+                    "score": score,
+                    "quantum_calculated": True,
+                    "quantum_probabilities": quantum_result
+                }
+
+            except Exception as e:
+                logger.warning(f"Erreur calcul quantique, fallback classique: {e}")
+                # Fallback vers le calcul classique
+
+        # === MODE CLASSIQUE ===
+        correct_positions = 0
+        correct_colors = 0
+
+        # Calcul des positions exactes
+        solution_copy = solution.copy()
+        combination_copy = combination.copy()
+
+        for i, color in enumerate(combination_copy):
+            if i < len(solution_copy) and color == solution_copy[i]:
+                correct_positions += 1
+                solution_copy[i] = -1  # Marquer comme utilisé
+                combination_copy[i] = -1
+
+        # Calcul des couleurs mal placées
+        for i, color in enumerate(combination_copy):
+            if color != -1 and color in solution_copy:
+                correct_colors += 1
+                idx = solution_copy.index(color)
+                solution_copy[idx] = -1
+
+        is_winning = correct_positions == len(solution)
+
+        # Score de base
+        base_score = 100
+        attempt_penalty = (len(combination)) * 10
+        score = max(base_score - attempt_penalty, 10)
+
+        if is_winning:
+            score += 500
+
+        return {
+            "correct_positions": correct_positions,
+            "correct_colors": correct_colors,
+            "is_winning": is_winning,
+            "score": score,
+            "quantum_calculated": False,
+            "quantum_probabilities": None
+        }
+
+    async def _check_all_players_finished(self, db: AsyncSession, game) -> bool:
+        """
+        Vérifie si tous les joueurs ont terminé leur partie
+        Réutilise votre logique existante
+        """
+        active_players = [
+            p for p in game.participations
+            if p.status in [ParticipationStatus.ACTIVE.value, ParticipationStatus.READY.value]
+        ]
+        return len(active_players) == 0
 
     async def cleanup_phantom_participations(
             self,
