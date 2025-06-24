@@ -26,6 +26,20 @@ class BaseQuantumMastermindError(Exception):
         self.details = details or {}
         super().__init__(self.message)
 
+class GameStateError(BaseQuantumMastermindError):
+    """Erreur liée à l'état du jeu"""
+
+    def __init__(self, game_id: UUID, current_state: str, expected_state: str):
+        super().__init__(
+            f"État du jeu {game_id} invalide: {current_state}, attendu: {expected_state}",
+            error_code="GAME_STATE_ERROR",
+            details={
+                "game_id": str(game_id),
+                "current_state": current_state,
+                "expected_state": expected_state
+            }
+        )
+
 class GameNotActiveError(BaseQuantumMastermindError):
     """Erreur lorsque le jeu n'est pas actif"""
 
@@ -745,6 +759,7 @@ __all__ = [
     "InvalidGameStateError",
     "InvalidMoveError",
     "MaxAttemptsReachedError",
+    "GameStateError",
 
     # Exceptions multijoueur
     "MultiplayerError",
@@ -762,6 +777,7 @@ __all__ = [
     "WebSocketError",
     "WebSocketConnectionError",
     "WebSocketMessageError",
+
 
     # Exceptions quantiques
     "QuantumError",

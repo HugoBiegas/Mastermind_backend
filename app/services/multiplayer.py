@@ -50,7 +50,7 @@ from app.schemas.multiplayer import (
     ItemUseRequest, QuantumHintRequest, QuantumHintResponse
 )
 from app.utils.exceptions import (
-    EntityNotFoundError, GameError, AuthorizationError, GameFullError, ValidationError
+    EntityNotFoundError, GameError, AuthorizationError, GameFullError, ValidationError, GameStateError
 )
 
 
@@ -60,180 +60,89 @@ class MultiplayerService:
     # =====================================================
     # CRÉATION ET GESTION DES PARTIES
     # =====================================================
-
-    async def create_multiplayer_game(
+    async def create_game(
             self,
             db: AsyncSession,
-            game_data: MultiplayerGameCreateRequest,
-            creator_id: UUID
+            user_id: UUID,
+            game_data: MultiplayerGameCreateRequest
     ) -> Dict[str, Any]:
         """
-        Crée une nouvelle partie multijoueur
-        CORRECTION FINALE: Sauvegarde COMPLÈTE de tous les paramètres
+        Crée une partie multijoueur - VERSION CORRIGÉE avec support quantique complet
         """
-        logger.info(f"🎯 Création partie multijoueur par utilisateur {creator_id}")
-        logger.info(
-            f"🔧 Paramètres reçus: type={game_data.game_type}, items={game_data.items_enabled}, masterminds={game_data.total_masterminds}")
-
         try:
-            # Générer un code de room unique
-            room_code = await self._generate_unique_room_code(db)
-            logger.info(f"🔑 Code room généré: {room_code}")
+            # Générer le room code
+            room_code = generate_room_code()
 
-            # Générer une solution par défaut
-            default_solution = self._generate_default_solution(
-                game_data.combination_length,
-                game_data.available_colors
-            )
+            # NOUVEAU: Générer la solution initiale (quantique si activé)
+            if game_data.quantum_enabled:
+                try:
+                    initial_solution = await quantum_service.generate_quantum_solution(
+                        combination_length=game_data.combination_length,
+                        available_colors=game_data.available_colors
+                    )
+                    logger.info(f"🔮 Solution quantique générée: {len(initial_solution)} éléments")
+                except Exception as quantum_error:
+                    logger.warning(f"⚠️ Erreur génération quantique, fallback classique: {quantum_error}")
+                    initial_solution = [
+                        random.randint(1, game_data.available_colors)
+                        for _ in range(game_data.combination_length)
+                    ]
+            else:
+                initial_solution = game_data.solution or [
+                    random.randint(1, game_data.available_colors)
+                    for _ in range(game_data.combination_length)
+                ]
 
-            # CORRECTION: Settings TRÈS complets pour tout sauvegarder
-            complete_settings = {
-                # Paramètres multijoueur
-                "total_masterminds": game_data.total_masterminds,
-                "items_enabled": game_data.items_enabled,
-                "items_per_mastermind": game_data.items_per_mastermind,
-
-                # Type de jeu pour l'affichage
-                "game_type_display": game_data.game_type,
-                "game_type_original": game_data.game_type,
-
-                # Configuration standard
-                "allow_duplicates": True,
-                "allow_blanks": False,
-                "quantum_enabled": game_data.quantum_enabled,
-                "hint_cost": 10,
-                "auto_reveal_pegs": True,
-                "show_statistics": True,
-
-                # Solution et multiplayer
-                "solution": default_solution,
-                "is_multiplayer": True,
-                "individual_solutions": True,
-
-                # CORRECTION: Sauvegarder TOUS les paramètres de création
-                "difficulty": game_data.difficulty,
-                "max_players": game_data.max_players,
-                "combination_length": game_data.combination_length,
-                "available_colors": game_data.available_colors,
-                "max_attempts": game_data.max_attempts,
-                "is_public": game_data.is_public,
-                "allow_spectators": game_data.allow_spectators,
-                "enable_chat": game_data.enable_chat,
-
-                # Métadonnées
-                "created_by": str(creator_id),
-                "creation_timestamp": datetime.now(timezone.utc).isoformat()
-            }
-
-            # CORRECTION: Créer la partie avec game_type original
-            new_game = Game(
+            # Créer le game
+            game = Game(
                 room_code=room_code,
-                game_type=game_data.game_type,  # CORRECTION: Garder le type original
+                creator_id=user_id,
+                game_type="multi_mastermind",
                 difficulty=game_data.difficulty,
-                status=GameStatus.WAITING.value,
-                creator_id=creator_id,
                 max_players=game_data.max_players,
                 combination_length=game_data.combination_length,
                 available_colors=game_data.available_colors,
                 max_attempts=game_data.max_attempts,
                 quantum_enabled=game_data.quantum_enabled,
-                solution=default_solution,
-
-                # Paramètres de visibilité
-                is_private=not game_data.is_public,
-                allow_spectators=game_data.allow_spectators,
-                enable_chat=game_data.enable_chat,
-
-                # CORRECTION: Settings complets
-                settings=complete_settings
+                is_private=False,  # Toujours public comme spécifié
+                allow_spectators=True,
+                enable_chat=True,
+                status=GameStatus.WAITING,
+                settings={
+                    "total_masterminds": game_data.total_masterminds,
+                    "items_enabled": game_data.items_enabled,
+                    "items_per_mastermind": game_data.items_per_mastermind,
+                    "initial_solution": initial_solution,  # Solution de base
+                    "player_solutions": {}  # Solutions par joueur (générées au démarrage)
+                }
             )
 
-            db.add(new_game)
+            db.add(game)
             await db.flush()
 
-            # Créateur participant
-            creator_participation = GameParticipation(
-                game_id=new_game.id,
-                player_id=creator_id,
-                status="waiting",
-                role="player",
-                join_order=1,
-                is_ready=False,
-                joined_at=datetime.now(timezone.utc)
+            # Ajouter le créateur comme participant
+            participation = GameParticipation(
+                game_id=game.id,
+                player_id=user_id,
+                status="active"
             )
-
-            db.add(creator_participation)
+            db.add(participation)
             await db.commit()
 
-            logger.info(
-                f"✅ Partie {room_code} créée: type={game_data.game_type}, items={game_data.items_enabled}, masterminds={game_data.total_masterminds}")
+            logger.info(f"✅ Partie {room_code} créée (quantique: {game_data.quantum_enabled})")
 
-            # CORRECTION: Retourner avec TOUS les paramètres sauvegardés
             return {
-                "id": str(new_game.id),
+                "success": True,
                 "room_code": room_code,
-                "name": f"Partie {room_code}",
-
-                # CORRECTION: Type correct pour l'affichage
-                "game_type": game_data.game_type,
-                "game_type_raw": game_data.game_type,
-
-                "difficulty": new_game.difficulty,
-                "status": new_game.status,
-                "max_players": new_game.max_players,
-                "current_players": 1,
-
-                # Paramètres de visibilité
-                "is_private": new_game.is_private,
-                "password_protected": bool(getattr(game_data, 'password', None)),
-                "allow_spectators": new_game.allow_spectators,
-                "enable_chat": new_game.enable_chat,
-
-                # Configuration de jeu
-                "quantum_enabled": new_game.quantum_enabled,
-                "combination_length": new_game.combination_length,
-                "available_colors": new_game.available_colors,
-                "max_attempts": new_game.max_attempts,
-
-                # CORRECTION: Paramètres multijoueur corrects
-                "total_masterminds": game_data.total_masterminds,
-                "items_enabled": game_data.items_enabled,
-                "items_per_mastermind": game_data.items_per_mastermind,
-
-                "created_at": new_game.created_at.isoformat(),
-                "creator": {
-                    "id": str(creator_id),
-                    "username": "Créateur"
-                },
-
-                # CORRECTION: Settings pour debug
-                "settings": complete_settings
+                "game_id": str(game.id),
+                "quantum_enabled": game_data.quantum_enabled,
+                "initial_solution_length": len(initial_solution)
             }
 
         except Exception as e:
+            logger.error(f"❌ Erreur création partie: {e}")
             await db.rollback()
-            logger.error(f"❌ Erreur création partie multijoueur: {e}")
             raise GameError(f"Erreur lors de la création: {str(e)}")
-
-    def _generate_default_solution(self, length: int, colors: int) -> List[int]:
-        """Génère une solution par défaut pour les parties multijoueur"""
-        import random
-        return [random.randint(1, colors) for _ in range(length)]
-
-    async def _generate_unique_room_code(self, db: AsyncSession) -> str:
-        """Génère un code de room unique"""
-
-        for _ in range(10):  # Essayer 10 fois
-            code = generate_room_code()
-            existing_query = select(Game).where(Game.room_code == code)
-            result = await db.execute(existing_query)
-            existing = result.scalar_one_or_none()
-            if not existing:
-                return code
-
-        # Si on n'arrive pas à générer un code unique, utiliser un UUID
-        from uuid import uuid4
-        return str(uuid4())[:8].upper()
 
     async def join_room_by_code(
             self,
@@ -447,6 +356,447 @@ class MultiplayerService:
             logger.info(f"🔧 Retour objet fake pour {room_code}")
             return FakeRoom()
 
+    async def make_attempt(
+            self,
+            db: AsyncSession,
+            room_code: str,
+            user_id: UUID,
+            combination: List[int],
+            mastermind_number: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Soumet une tentative pour un mastermind - VERSION CORRIGÉE COMPLÈTE
+        Intégration quantique + diffusion WebSocket + régénération
+        """
+        try:
+            # Récupérer la partie et vérifier l'état
+            game_query = select(Game).where(Game.room_code == room_code)
+            game_result = await db.execute(game_query)
+            game = game_result.scalar_one_or_none()
+
+            if not game:
+                raise EntityNotFoundError(f"Room {room_code} non trouvée")
+
+            if game.status != GameStatus.ACTIVE:
+                raise GameStateError(f"La partie n'est pas active (statut: {game.status})")
+
+            # Récupérer la participation du joueur
+            participation_query = select(GameParticipation).where(
+                and_(
+                    GameParticipation.game_id == game.id,
+                    GameParticipation.player_id == user_id
+                )
+            )
+            participation_result = await db.execute(participation_query)
+            participation = participation_result.scalar_one_or_none()
+
+            if not participation:
+                raise GameError("Vous ne participez pas à cette partie")
+
+            # Récupérer les informations utilisateur pour l'affichage
+            user_query = select(User).where(User.id == user_id)
+            user_result = await db.execute(user_query)
+            user_obj = user_result.scalar_one_or_none()
+            username = user_obj.username if user_obj else f"Joueur {user_id}"
+
+            # Récupérer la solution pour ce mastermind
+            settings = game.settings or {}
+            player_solutions = settings.get("player_solutions", {})
+            player_key = str(user_id)
+
+            # CORRECTION: Générer une solution si elle n'existe pas
+            if player_key not in player_solutions:
+                if game.quantum_enabled:
+                    try:
+                        new_solution = await quantum_service.generate_quantum_solution(
+                            combination_length=game.combination_length,
+                            available_colors=game.available_colors
+                        )
+                        logger.info(f"🔮 Solution quantique générée pour {username}")
+                    except Exception as quantum_error:
+                        logger.warning(f"⚠️ Erreur quantique, fallback classique: {quantum_error}")
+                        new_solution = [
+                            random.randint(1, game.available_colors)
+                            for _ in range(game.combination_length)
+                        ]
+                else:
+                    new_solution = [
+                        random.randint(1, game.available_colors)
+                        for _ in range(game.combination_length)
+                    ]
+
+                player_solutions[player_key] = {
+                    "mastermind_number": 1,
+                    "solution": new_solution,
+                    "attempts": 0
+                }
+                settings["player_solutions"] = player_solutions
+                game.settings = settings
+                await db.commit()
+                logger.info(f"🎯 Nouvelle solution générée pour {username}: {len(new_solution)} éléments")
+
+            player_data = player_solutions[player_key]
+            current_solution = player_data["solution"]
+            current_mastermind = player_data.get("mastermind_number", 1)
+
+            # Vérifier que le joueur travaille sur le bon mastermind
+            if mastermind_number != current_mastermind:
+                raise GameError(f"Mastermind incorrect. Vous travaillez sur le mastermind {current_mastermind}")
+
+            # Compter les tentatives existantes pour ce mastermind
+            attempt_count_query = select(func.count(GameAttempt.id)).where(
+                and_(
+                    GameAttempt.game_id == game.id,
+                    GameAttempt.player_id == user_id,
+                    GameAttempt.mastermind_number == mastermind_number
+                )
+            )
+            attempt_count_result = await db.execute(attempt_count_query)
+            attempt_number = attempt_count_result.scalar() + 1
+
+            if attempt_number > game.max_attempts:
+                raise GameError(f"Nombre maximum de tentatives dépassé pour ce mastermind ({game.max_attempts})")
+
+            # Valider la combinaison
+            if len(combination) != game.combination_length:
+                raise ValidationError(f"Combinaison doit contenir {game.combination_length} éléments")
+
+            if any(c < 1 or c > game.available_colors for c in combination):
+                raise ValidationError(f"Couleurs doivent être entre 1 et {game.available_colors}")
+
+            # NOUVEAU: Calculer le résultat avec support quantique
+            if game.quantum_enabled:
+                try:
+                    quantum_result = await quantum_service.calculate_quantum_hints_with_probabilities(
+                        solution=current_solution,
+                        attempt=combination
+                    )
+                    exact_matches = quantum_result["exact_matches"]
+                    position_matches = quantum_result["wrong_position"]
+                    is_winning = exact_matches == game.combination_length
+
+                    # Score quantique basé sur les probabilités
+                    base_score = 100 if is_winning else max(0, 50 - (attempt_number * 5))
+                    quantum_bonus = sum(1 for pos in quantum_result.get("position_probabilities", [])
+                                        if pos.get("confidence") == "high") * 5
+                    score = base_score + quantum_bonus
+
+                    result = {
+                        "correct_positions": exact_matches,
+                        "correct_colors": position_matches,
+                        "is_winning": is_winning,
+                        "score": score,
+                        "quantum_data": quantum_result
+                    }
+
+                    logger.info(f"🔮 Résultat quantique calculé pour {username}: {exact_matches}🟢 {position_matches}🟡")
+
+                except Exception as quantum_error:
+                    logger.warning(f"⚠️ Erreur calcul quantique, fallback classique: {quantum_error}")
+                    result = self._evaluate_combination(combination, current_solution)
+            else:
+                result = self._evaluate_combination(combination, current_solution)
+
+            # Créer l'enregistrement de tentative
+            attempt = GameAttempt(
+                game_id=game.id,
+                player_id=user_id,
+                combination=combination,
+                attempt_number=attempt_number,
+                mastermind_number=mastermind_number,
+            )
+
+            db.add(attempt)
+
+            # Mettre à jour le nombre de tentatives dans les settings
+            player_data["attempts"] = attempt_number
+            settings["player_solutions"] = player_solutions
+            game.settings = settings
+
+            # Variables pour la logique de fin
+            game_finished = False
+            player_eliminated = False
+
+            # Si c'est la solution correcte
+            if result["is_winning"]:
+                logger.info(f"🎉 {username} a résolu le mastermind {mastermind_number}!")
+
+                # Progression vers le mastermind suivant
+                total_masterminds = settings.get("total_masterminds", 3)
+
+                if current_mastermind >= total_masterminds:
+                    # Joueur a terminé tous les masterminds !
+                    participation.status = "finished"
+                    participation.score = (participation.score or 0) + result["score"]
+
+                    # Vérifier si c'est le premier à finir (gagnant)
+                    winner_query = select(GameParticipation).where(
+                        and_(
+                            GameParticipation.game_id == game.id,
+                            GameParticipation.status == "finished"
+                        )
+                    )
+                    winner_result = await db.execute(winner_query)
+                    existing_winners = winner_result.scalars().all()
+
+                    if len(existing_winners) == 0:  # Premier à finir
+                        game.status = GameStatus.FINISHED
+                        game.winner_id = user_id
+                        game_finished = True
+                        logger.info(f"🏆 {username} remporte la partie!")
+
+                else:
+                    # Générer le mastermind suivant (quantique si activé)
+                    next_mastermind = current_mastermind + 1
+
+                    if game.quantum_enabled:
+                        try:
+                            new_solution = await quantum_service.generate_quantum_solution(
+                                combination_length=game.combination_length,
+                                available_colors=game.available_colors
+                            )
+                            logger.info(f"🔮 Solution quantique suivante générée pour {username}")
+                        except Exception as quantum_error:
+                            logger.warning(f"⚠️ Erreur quantique suivante, fallback: {quantum_error}")
+                            new_solution = [
+                                random.randint(1, game.available_colors)
+                                for _ in range(game.combination_length)
+                            ]
+                    else:
+                        new_solution = [
+                            random.randint(1, game.available_colors)
+                            for _ in range(game.combination_length)
+                        ]
+
+                    player_data["mastermind_number"] = next_mastermind
+                    player_data["solution"] = new_solution
+                    player_data["attempts"] = 0
+
+                    settings["player_solutions"] = player_solutions
+                    game.settings = settings
+
+                    logger.info(f"➡️ {username} passe au mastermind {next_mastermind}")
+
+            else:
+                # Tentative échouée
+                if attempt_number >= game.max_attempts:
+                    # Maximum de tentatives atteint pour ce mastermind
+                    logger.info(f"❌ {username} a échoué le mastermind {mastermind_number} (max tentatives)")
+
+                    # NOUVELLE LOGIQUE: Régénération automatique (quantique si activé)
+                    total_masterminds = settings.get("total_masterminds", 3)
+
+                    if current_mastermind < total_masterminds:
+                        # Régénérer ce mastermind (nouvelle chance)
+                        if game.quantum_enabled:
+                            try:
+                                new_solution = await quantum_service.generate_quantum_solution(
+                                    combination_length=game.combination_length,
+                                    available_colors=game.available_colors
+                                )
+                                logger.info(f"🔮 Solution quantique régénérée pour {username}")
+                            except Exception as quantum_error:
+                                logger.warning(f"⚠️ Erreur quantique régénération: {quantum_error}")
+                                new_solution = [
+                                    random.randint(1, game.available_colors)
+                                    for _ in range(game.combination_length)
+                                ]
+                        else:
+                            new_solution = [
+                                random.randint(1, game.available_colors)
+                                for _ in range(game.combination_length)
+                            ]
+
+                        player_data["solution"] = new_solution
+                        player_data["attempts"] = 0
+                        # Le numéro de mastermind reste le même (nouvelle tentative)
+
+                        settings["player_solutions"] = player_solutions
+                        game.settings = settings
+
+                        logger.info(f"🔄 Nouveau mastermind généré pour {username} (tentative {current_mastermind})")
+
+                        # DIFFUSION: Notifier la régénération
+                        try:
+                            await multiplayer_ws_manager.broadcast_mastermind_regenerated(room_code, {
+                                "user_id": str(user_id),
+                                "username": username,
+                                "mastermind_number": current_mastermind,
+                                "message": f"{username} a reçu un nouveau mastermind {current_mastermind} !",
+                                "new_solution_length": len(new_solution),
+                                "quantum_enabled": game.quantum_enabled
+                            })
+                        except Exception as ws_error:
+                            logger.warning(f"⚠️ Erreur diffusion régénération: {ws_error}")
+
+                    else:
+                        # Dernier mastermind échoué = joueur éliminé
+                        participation.status = "eliminated"
+                        player_eliminated = True
+                        logger.info(f"💀 {username} est éliminé")
+
+            await db.commit()
+
+            # DIFFUSION WEBSOCKET: Tentative soumise avec données quantiques
+            try:
+                attempt_data = {
+                    "user_id": str(user_id),
+                    "username": username,
+                    "attempt_number": attempt_number,
+                    "combination": combination,
+                    "exact_matches": result["correct_positions"],
+                    "position_matches": result["correct_colors"],
+                    "is_solution": result["is_winning"],
+                    "score": result["score"],
+                    "mastermind_number": mastermind_number,
+                    "game_finished": game_finished,
+                    "player_eliminated": player_eliminated,
+                    "quantum_enabled": game.quantum_enabled
+                }
+
+                # NOUVEAU: Ajouter les données quantiques si disponibles
+                if game.quantum_enabled and "quantum_data" in result:
+                    attempt_data["quantum_data"] = {
+                        "quantum_calculated": result["quantum_data"].get("quantum_calculated", False),
+                        "shots_used": result["quantum_data"].get("shots_used", 0),
+                        "position_probabilities": result["quantum_data"].get("position_probabilities", [])
+                    }
+
+                await multiplayer_ws_manager.broadcast_attempt(room_code, attempt_data)
+
+                # Si la partie est terminée
+                if game_finished:
+                    await multiplayer_ws_manager.broadcast_game_finished(room_code, {
+                        "room_code": room_code,
+                        "winner_id": str(user_id),
+                        "winner_username": username,
+                        "final_status": game.status.value,
+                        "quantum_enabled": game.quantum_enabled
+                    })
+
+            except Exception as ws_error:
+                logger.warning(f"⚠️ Erreur diffusion WebSocket: {ws_error}")
+
+            return {
+                "success": True,
+                "combination": combination,
+                "exact_matches": result["correct_positions"],
+                "position_matches": result["correct_colors"],
+                "is_solution": result["is_winning"],
+                "attempts_used": attempt_number,
+                "max_attempts": game.max_attempts,
+                "score": result["score"],
+                "game_finished": game_finished,
+                "mastermind_completed": result["is_winning"],
+                "mastermind_number": mastermind_number,
+                "new_mastermind_generated": not result["is_winning"] and attempt_number >= game.max_attempts,
+                "player_eliminated": player_eliminated,
+                "quantum_enabled": game.quantum_enabled,
+                "quantum_data": result.get("quantum_data") if game.quantum_enabled else None
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Erreur tentative {room_code}: {e}")
+            await db.rollback()
+            raise GameError(f"Erreur lors de la tentative: {str(e)}")
+
+    async def start_game(
+            self,
+            db: AsyncSession,
+            room_code: str,
+            user_id: UUID
+    ) -> Dict[str, Any]:
+        """
+        Démarre une partie multijoueur - VERSION CORRIGÉE avec WebSocket
+        """
+        try:
+            # Récupérer la partie
+            game_query = select(Game).where(Game.room_code == room_code)
+            game_result = await db.execute(game_query)
+            game = game_result.scalar_one_or_none()
+
+            if not game:
+                raise EntityNotFoundError(f"Room {room_code} non trouvée")
+
+            # Vérifier que l'utilisateur est le créateur
+            if game.creator_id != user_id:
+                raise GameError("Seul le créateur peut démarrer la partie")
+
+            if game.status != GameStatus.WAITING:
+                raise GameStateError(f"La partie ne peut pas être démarrée (statut: {game.status})")
+
+            # Compter les participants actifs
+            participants_query = select(func.count(GameParticipation.id)).where(
+                and_(
+                    GameParticipation.game_id == game.id,
+                    GameParticipation.status == "active"
+                )
+            )
+            participants_count = await db.execute(participants_query)
+            active_players = participants_count.scalar()
+
+            if active_players < 2:
+                raise GameError("Au moins 2 joueurs sont requis pour démarrer")
+
+            # Démarrer la partie
+            game.status = GameStatus.ACTIVE
+            game.started_at = datetime.now(timezone.utc)
+
+            # Générer les solutions initiales pour tous les joueurs
+            settings = game.settings or {}
+            settings["player_solutions"] = {}
+
+            participants_query = select(GameParticipation).where(
+                and_(
+                    GameParticipation.game_id == game.id,
+                    GameParticipation.status == "active"
+                )
+            )
+            participants_result = await db.execute(participants_query)
+            participants = participants_result.scalars().all()
+
+            for participation in participants:
+                solution = [
+                    random.randint(0, game.available_colors - 1)
+                    for _ in range(game.combination_length)
+                ]
+
+                settings["player_solutions"][str(participation.player_id)] = {
+                    "mastermind_number": 1,
+                    "solution": solution,
+                    "attempts": 0
+                }
+
+            game.settings = settings
+            await db.commit()
+
+            logger.info(f"🚀 Partie {room_code} démarrée avec {active_players} joueurs")
+
+            # DIFFUSION WEBSOCKET: Partie démarrée
+            try:
+                await multiplayer_ws_manager.broadcast_game_started(room_code, {
+                    "room_code": room_code,
+                    "status": "active",
+                    "players_count": active_players,
+                    "started_at": game.started_at.isoformat() if hasattr(game.started_at, "isoformat") and game.started_at else None,
+                    "total_masterminds": settings.get("total_masterminds", 3)
+                })
+            except Exception as ws_error:
+                logger.warning(f"⚠️ Erreur diffusion démarrage: {ws_error}")
+
+            return {
+                "success": True,
+                "message": "Partie démarrée avec succès",
+                "game_status": game.status,
+                "players_count": active_players,
+                "started_at": game.started_at.isoformat() if hasattr(game.started_at, "isoformat") and game.started_at else None
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Erreur démarrage {room_code}: {e}")
+            await db.rollback()
+            raise GameError(f"Erreur lors du démarrage: {str(e)}")
+
     async def submit_attempt(
             self,
             db: AsyncSession,
@@ -616,7 +966,7 @@ class MultiplayerService:
                             "type": "attempt_submitted",
                             "data": {
                                 "user_id": str(user_id),
-                                "username": participation.player.username if participation.player else "Joueur",
+                                "username": getattr(participation.player, "username", "Joueur") if participation.player else "Joueur",
                                 "attempt_number": attempt_number,
                                 "exact_matches": result["correct_positions"],
                                 "position_matches": result["correct_colors"],
@@ -1386,14 +1736,14 @@ class MultiplayerService:
             "total_duration": (mp_game.finished_at - mp_game.started_at).total_seconds() if mp_game.finished_at and mp_game.started_at else 0,
             "total_players": len(mp_game.player_progresses),
             "total_masterminds": mp_game.total_masterminds,
-            "difficulty": base_game.difficulty.value,
+            "difficulty": base_game.difficulty,
             "quantum_enabled": base_game.quantum_enabled
         }
 
         response_data = {
             "room_code": room_code,
             "game_id": str(base_game.id),
-            "status": base_game.status.value,
+            "status": base_game.status,
             "rankings": sorted(rankings, key=lambda x: x["position"]),
             "game_stats": game_stats,
             "finished_at": mp_game.finished_at.isoformat() if mp_game.finished_at else None

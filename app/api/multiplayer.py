@@ -7,13 +7,17 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_database, get_current_active_user, get_current_verified_user
+from app.models.game import Game
 from app.models.user import User
 from app.schemas.multiplayer import *
 from app.services.multiplayer import multiplayer_service
 from app.utils.exceptions import *
+
+from app.core.security import decode_access_token
 
 # Import conditionnel pour WebSocket
 try:
@@ -124,7 +128,7 @@ async def create_multiplayer_room(
             logger.warning(f"⚠️ Pas de parties actives à quitter: {leave_error}")
             # Ne pas bloquer la création pour cette erreur
 
-        result = await multiplayer_service.create_multiplayer_game(
+        result = await multiplayer_service.create_game(
             db, game_data, current_user.id
         )
         return {
@@ -405,7 +409,7 @@ async def make_attempt(
         attempt_obj = SimpleAttempt(attempt_data)
 
         # Appeler le service
-        result = await multiplayer_service.submit_attempt(
+        result = await multiplayer_service.make_attempt(
             db, room_code, current_user.id, attempt_obj
         )
 
@@ -539,6 +543,39 @@ async def cleanup_room_participations(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors du nettoyage: {str(e)}"
         )
+
+
+@router.get(
+    "/rooms/{room_code}/stats",
+    response_model=Dict[str, Any],
+    summary="Statistiques de la room",
+    description="Statistiques WebSocket de la room"
+)
+async def get_room_websocket_stats(
+        room_code: str,
+        current_user: User = Depends(get_current_active_user)
+) -> Dict[str, Any]:
+    """Statistiques WebSocket d'une room"""
+    try:
+        stats = multiplayer_ws_manager.get_room_stats(room_code)
+        global_stats = multiplayer_ws_manager.get_global_stats()
+
+        return {
+            "success": True,
+            "data": {
+                "room": stats,
+                "global": global_stats
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Erreur stats room {room_code}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur récupération stats: {str(e)}"
+        )
+
+
 @router.get(
     "/rooms/{room_code}/status",
     response_model=Dict[str, Any],
@@ -698,36 +735,115 @@ async def get_quantum_hint(
 # =====================================================
 
 @router.websocket("/rooms/{room_code}/ws")
-async def multiplayer_websocket_endpoint(
+async def websocket_multiplayer_endpoint(
         websocket: WebSocket,
         room_code: str,
-        token: str = Query(..., description="JWT Token")
+        token: str = Query(..., description="Token JWT pour l'authentification"),
+        db: AsyncSession = Depends(get_database)
 ):
-    """WebSocket endpoint pour la communication temps réel"""
-    if not WEBSOCKET_AVAILABLE:
-        await websocket.close(code=1000, reason="WebSocket indisponible")
-        return
+    """
+    Endpoint WebSocket pour la communication en temps réel - COMPLET
+    """
+    user_id = None
+    username = None
 
     try:
-        # TODO: Valider le token JWT
-        # Pour l'instant, accepter toutes les connexions
+        # Authentification via le token
+        try:
+            payload = decode_access_token(token)
+            user_id = payload.get("sub")
+            if not user_id:
+                await websocket.close(code=4001, reason="Token invalide")
+                return
+        except Exception as auth_error:
+            logger.warning(f"❌ Erreur authentification WebSocket: {auth_error}")
+            await websocket.close(code=4001, reason="Authentification échouée")
+            return
 
-        await multiplayer_ws_manager.connect(websocket, room_code, "user_id_placeholder")
+        # Récupérer les informations utilisateur
+        try:
+            user_query = select(User).where(User.id == user_id)
+            user_result = await db.execute(user_query)
+            user_obj = user_result.scalar_one_or_none()
 
+            if not user_obj:
+                await websocket.close(code=4002, reason="Utilisateur non trouvé")
+                return
+
+            username = user_obj.username
+
+        except Exception as user_error:
+            logger.warning(f"❌ Erreur récupération utilisateur: {user_error}")
+            await websocket.close(code=4003, reason="Erreur utilisateur")
+            return
+
+        # Vérifier que la room existe
+        try:
+            room_query = select(Game).where(Game.room_code == room_code)
+            room_result = await db.execute(room_query)
+            room = room_result.scalar_one_or_none()
+
+            if not room:
+                await websocket.close(code=4004, reason="Room non trouvée")
+                return
+
+        except Exception as room_error:
+            logger.warning(f"❌ Erreur vérification room: {room_error}")
+            await websocket.close(code=4005, reason="Erreur room")
+            return
+
+        # Connecter l'utilisateur
+        connection_success = await multiplayer_ws_manager.connect(
+            websocket, room_code, user_id, username
+        )
+
+        if not connection_success:
+            await websocket.close(code=4006, reason="Erreur connexion")
+            return
+
+        logger.info(f"✅ WebSocket connecté: {username} dans {room_code}")
+
+        # Boucle d'écoute des messages
         try:
             while True:
-                data = await websocket.receive_text()
-                message = json.loads(data)
+                # Attendre un message du client
+                message_raw = await websocket.receive_text()
 
-                # Traiter le message et le relayer aux autres clients
-                await multiplayer_ws_manager.handle_message(room_code, message)
+                try:
+                    message_data = json.loads(message_raw)
+                    await multiplayer_ws_manager.handle_message(websocket, message_data)
+
+                except json.JSONDecodeError:
+                    logger.warning(f"⚠️ Message JSON invalide de {username}: {message_raw[:100]}")
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "data": {"message": "Format de message invalide"}
+                    }))
+
+                except Exception as handler_error:
+                    logger.error(f"❌ Erreur traitement message de {username}: {handler_error}")
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "data": {"message": "Erreur traitement message"}
+                    }))
 
         except WebSocketDisconnect:
-            await multiplayer_ws_manager.disconnect(websocket, room_code)
+            logger.info(f"🔌 WebSocket déconnecté: {username} de {room_code}")
 
-    except Exception as e:
-        logger.error(f"Erreur WebSocket: {e}")
-        await websocket.close(code=1000, reason="Erreur serveur")
+        except Exception as loop_error:
+            logger.error(f"❌ Erreur boucle WebSocket {username}: {loop_error}")
+
+    except Exception as global_error:
+        logger.error(f"❌ Erreur globale WebSocket: {global_error}")
+
+    finally:
+        # Nettoyage final
+        try:
+            if user_id and websocket:
+                await multiplayer_ws_manager.disconnect(websocket)
+                logger.debug(f"🧹 Nettoyage WebSocket terminé pour {username or user_id}")
+        except Exception as cleanup_error:
+            logger.warning(f"⚠️ Erreur nettoyage final: {cleanup_error}")
 
 
 # =====================================================

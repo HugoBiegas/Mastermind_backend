@@ -541,6 +541,25 @@ def hash_file_content(content: bytes) -> str:
     import hashlib
     return hashlib.sha256(content).hexdigest()
 
+def decode_access_token():
+    """
+    Décoder le token d'accès JWT pour obtenir les données utilisateur
+
+    Returns:
+        Dict[str, Any]: Données utilisateur si le token est valide, None sinon
+    """
+    from fastapi import Request
+
+    async def _decode(request: Request) -> Optional[Dict[str, Any]]:
+        token = request.headers.get("Authorization")
+        if not token or not token.startswith("Bearer "):
+            return None
+
+        token = token.split(" ")[1]
+        return jwt_manager.verify_token(token)
+
+    return _decode
+
 
 def is_safe_redirect_url(url: str, allowed_hosts: list[str]) -> bool:
     """Vérifie si une URL de redirection est sûre"""
@@ -562,6 +581,7 @@ def is_safe_redirect_url(url: str, allowed_hosts: list[str]) -> bool:
 # === EXPORT ===
 __all__ = [
     "password_manager",
+    "decode_access_token",
     "jwt_manager",
     "input_validator",
     "security_auditor",
@@ -575,3 +595,6 @@ __all__ = [
     "hash_file_content",
     "is_safe_redirect_url"
 ]
+
+
+

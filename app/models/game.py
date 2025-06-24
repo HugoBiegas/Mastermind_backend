@@ -507,6 +507,20 @@ class GameAttempt(Base):
         index=True
     )
 
+    mastermind_number: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        default=1,
+        comment="Numéro du mastermind pour le multijoueur (1 si solo)"
+    )
+
+    mastermind_total: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        default=1,
+        comment="Nombre total de masterminds dans la partie (1 si solo)"
+    )
+
     # === DONNÉES DE TENTATIVE (selon init.sql) ===
     attempt_number: Mapped[int] = mapped_column(
         Integer,

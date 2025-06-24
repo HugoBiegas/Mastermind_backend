@@ -28,13 +28,18 @@ from app.core.config import settings
 from app.core.database import init_db, close_db
 from app.services.quantum import quantum_service
 
-# NOUVEAU: Import conditionnel des WebSockets multiplayer
+# CORRECTION: Import conditionnel des WebSockets multiplayer
 try:
-    from app.websocket.multiplayer import initialize_multiplayer_websocket, cleanup_task
+    from app.websocket.multiplayer import multiplayer_ws_manager, initialize_multiplayer_websocket, cleanup_multiplayer_websocket
     WEBSOCKET_MULTIPLAYER_AVAILABLE = True
 except ImportError:
     WEBSOCKET_MULTIPLAYER_AVAILABLE = False
     print("⚠️  WebSocket multiplayer non trouvé")
+    # Fonctions vides pour éviter les erreurs
+    async def initialize_multiplayer_websocket():
+        pass
+    async def cleanup_multiplayer_websocket():
+        pass
 
 from app.utils.exceptions import (
     BaseQuantumMastermindError, get_http_status_code,
@@ -118,7 +123,7 @@ async def lifespan(app: FastAPI):
     if websocket_initialized and WEBSOCKET_MULTIPLAYER_AVAILABLE:
         logger.info("🔌 Fermeture des WebSockets multijoueur...")
         try:
-            await cleanup_task()
+            await cleanup_multiplayer_websocket()
             logger.info("✅ WebSockets fermés proprement")
         except Exception as e:
             logger.error(f"❌ Erreur lors de la fermeture WebSocket: {e}")
