@@ -950,6 +950,7 @@ class GameService:
             }
 
         except Exception as e:
+            logger.exception(e)
             if isinstance(e, EntityNotFoundError):
                 raise
             raise GameError(f"Erreur lors de la récupération des détails de la partie: {str(e)}")

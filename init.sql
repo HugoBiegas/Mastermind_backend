@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS game_attempts (
     attempt_number INTEGER NOT NULL,
     combination JSONB NOT NULL,  -- La combinaison proposée [1,2,3,4]
     mastermind_number INTEGER NOT NULL DEFAULT 1,
-    mastermind_total INTEGER NOT NULL DEFAULT 1
+    mastermind_total INTEGER NOT NULL DEFAULT 1,
 
     -- Résultats
     correct_positions INTEGER NOT NULL DEFAULT 0,  -- Pegs noirs
