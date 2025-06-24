@@ -689,36 +689,18 @@ class WebSocketMessageHandler:
             message_data: Dict[str, Any],
             db: AsyncSession
     ) -> None:
-        """Traite les messages de chat avec broadcast correct"""
+        """CORRIGÉ: Chat qui marche vraiment"""
         try:
-            # Récupérer les infos de connexion
+            # Récupérer user et room comme avant...
             connection = websocket_manager.get_connection(connection_id)
-            if not connection or not connection.user_id:
-                logger.error(f"🚫 Chat: Connexion {connection_id} non authentifiée")
-                raise WebSocketAuthenticationError("Non authentifié")
-
-            # Récupérer l'utilisateur
             user = await auth_service.get_user_by_id(db, connection.user_id)
-            if not user:
-                logger.error(f"🚫 Chat: Utilisateur {connection.user_id} introuvable")
-                raise WebSocketAuthenticationError("Utilisateur introuvable")
-
             room_code = message_data.get("room_code")
-            if not room_code:
-                logger.error(f"🚫 Chat: Code de room manquant dans {message_data}")
-                raise WebSocketMessageError("Code de room manquant")
 
-            # Vérifier que l'utilisateur est dans la room
-            room = await multiplayer_service.get_room_by_code(db, room_code)
-            if not room:
-                logger.error(f"🚫 Chat: Room {room_code} introuvable")
-                raise WebSocketMessageError("Room introuvable")
-
-            # Créer le message formaté
-            chat_message = {
-                "type": "CHAT_MESSAGE",
-                "data": {
-                    "message_id": f"msg_{int(time.time() * 1000)}_{connection.user_id}",
+            # Message formaté
+            chat_message = WebSocketMessage(
+                type="chat_message",
+                data={
+                    "message_id": f"msg_{int(time.time() * 1000)}",
                     "user_id": str(connection.user_id),
                     "username": user.username,
                     "message": message_data["message"],
@@ -726,33 +708,25 @@ class WebSocketMessageHandler:
                     "room_code": room_code,
                     "type": "user"
                 }
-            }
+            )
 
-            # CORRECTION CRITIQUE : Récupérer toutes les connexions de la room
-            room_connections = websocket_manager.room_connections.get(room_code, set())
-            logger.info(f"💬 Broadcasting message dans room {room_code} vers {len(room_connections)} connexions")
+            # CORRECTION: Broadcast DIRECT à toutes les connexions de la room
+            if room_code in websocket_manager.game_rooms:
+                connections = websocket_manager.game_rooms[room_code]
+                logger.info(f"💬 Broadcasting à {len(connections)} connexions dans {room_code}")
 
-            # Broadcast à TOUTES les connexions de la room
-            successful_broadcasts = 0
-            for conn_id in room_connections:
-                try:
-                    await websocket_manager.send_to_connection(conn_id, chat_message)
-                    successful_broadcasts += 1
-                except Exception as e:
-                    logger.error(f"❌ Erreur broadcast vers {conn_id}: {e}")
-
-            logger.info(
-                f"✅ Message de chat diffusé avec succès vers {successful_broadcasts}/{len(room_connections)} connexions")
-
-            # Également utiliser la méthode broadcast_to_room si elle existe
-            try:
-                await websocket_manager.broadcast_to_room(room_code, chat_message)
-            except Exception as e:
-                logger.warning(f"⚠️  Erreur broadcast_to_room secondaire: {e}")
+                for conn_id in connections:
+                    try:
+                        await websocket_manager.send_to_connection(conn_id, chat_message)
+                        logger.info(f"✅ Message envoyé à {conn_id}")
+                    except Exception as e:
+                        logger.error(f"❌ Erreur envoi à {conn_id}: {e}")
+            else:
+                logger.error(f"❌ Room {room_code} non trouvée dans game_rooms")
 
         except Exception as e:
-            logger.error(f"❌ Erreur traitement message chat: {e}")
-            await websocket_manager.send_error(connection_id, str(e))
+            logger.error(f"❌ Erreur chat: {e}")
+            await self._send_error(connection_id, str(e))
 
     async def debug_room_connections(self, room_code: str) -> Dict[str, Any]:
         """Debug des connexions d'une room"""

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_database, get_current_active_user
+from app.api.deps import get_database, get_current_active_user, get_current_verified_user
 from app.models.user import User
 from app.schemas.multiplayer import *
 from app.services.multiplayer import multiplayer_service
@@ -380,43 +380,41 @@ async def start_multiplayer_game(
         )
 
 
-@router.post(
-    "/rooms/{room_code}/attempt",
-    response_model=Dict[str, Any],
-    summary="Soumettre une tentative",
-    description="Soumet une tentative dans une partie multijoueur"
-)
-async def submit_multiplayer_attempt(
+@router.post("/rooms/{room_code}/attempt")
+async def make_attempt(
         room_code: str,
-        attempt_data: MultiplayerAttemptRequest,
-        current_user: User = Depends(get_current_active_user),
+        attempt_data: dict,  # Simple dict, pas de type compliqué
+        current_user: User = Depends(get_current_verified_user),
         db: AsyncSession = Depends(get_database)
-) -> Dict[str, Any]:
-    """Route pour soumettre une tentative (attendue par le frontend)"""
+):
+    """Version simple qui marche"""
     try:
+        logger.info(f"🎯 Tentative: {attempt_data['combination']} dans {room_code}")
+
+        # Vérifier que la room existe (avec la nouvelle méthode)
+        room = await multiplayer_service.get_room_by_code(db, room_code)
+        if not room:
+            raise HTTPException(status_code=404, detail="Room non trouvée")
+
+        # Créer un objet simple pour le service
+        class SimpleAttempt:
+            def __init__(self, data):
+                self.combination = data['combination']
+                self.time_taken = data.get('time_taken', 0)
+
+        attempt_obj = SimpleAttempt(attempt_data)
+
+        # Appeler le service
         result = await multiplayer_service.submit_attempt(
-            db, room_code, current_user.id, attempt_data
+            db, room_code, current_user.id, attempt_obj
         )
-        return {
-            "success": True,
-            "data": result
-        }
-    except EntityNotFoundError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-    except GameError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+
+        logger.info(f"✅ Résultat: {result}")
+        return result
+
     except Exception as e:
-        logger.error(f"Erreur soumission tentative: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur lors de la soumission: {str(e)}"
-        )
+        logger.error(f"❌ Erreur tentative: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get(
