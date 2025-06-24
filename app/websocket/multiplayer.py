@@ -26,8 +26,11 @@ class MultiplayerWebSocketManager:
         # Mapping connexion -> user_id
         self.connection_users: Dict[WebSocket, str] = {}
 
-        # CORRECTION: Mapping user_id -> room_code pour éviter les doublons
+        # NOUVEAU: Mapping user_id -> room_code pour éviter les doublons
         self.user_room_mapping: Dict[str, str] = {}
+
+        # NOUVEAU: Mapping user_id -> websocket pour trouver les connexions existantes
+        self.user_websockets: Dict[str, WebSocket] = {}
 
         # Informations des rooms actives
         self.multiplayer_rooms: Dict[str, Dict[str, Any]] = {}
@@ -46,18 +49,12 @@ class MultiplayerWebSocketManager:
     # =====================================================
 
     async def connect(self, websocket: WebSocket, room_code: str, user_id: str):
-        """Connecte un client WebSocket à une room"""
+        """Connecte un client WebSocket à une room avec gestion des doublons"""
         try:
             await websocket.accept()
 
-            # Vérifier si l'utilisateur est déjà connecté ailleurs
-            if user_id in self.user_room_mapping:
-                existing_room = self.user_room_mapping[user_id]
-                if existing_room != room_code:
-                    await self._disconnect_user_from_room(user_id, existing_room)
-                    logger.info(f"🔄 Utilisateur {user_id} déplacé de {existing_room} vers {room_code}")
-                elif existing_room == room_code:
-                    await self._cleanup_duplicate_connection(user_id, room_code)
+            # NOUVEAU: Vérifier et nettoyer les connexions existantes de cet utilisateur
+            await self._cleanup_user_connections(user_id, room_code, websocket)
 
             # Ajouter la connexion à la room
             if room_code not in self.room_connections:
@@ -66,7 +63,10 @@ class MultiplayerWebSocketManager:
             self.room_connections[room_code].add(websocket)
             self.connection_rooms[websocket] = room_code
             self.connection_users[websocket] = user_id
+
+            # NOUVEAU: Mettre à jour les mappings pour détecter les doublons
             self.user_room_mapping[user_id] = room_code
+            self.user_websockets[user_id] = websocket
 
             # Initialiser la room si nécessaire
             if room_code not in self.multiplayer_rooms:
@@ -87,8 +87,13 @@ class MultiplayerWebSocketManager:
 
             logger.info(f"🔌 Utilisateur {user_id} connecté à la room {room_code}")
 
-            # CORRECTION: Utiliser la nouvelle méthode de notification
-            await self.notify_player_joined(room_code, user_id)
+            # Notifier les autres clients
+            await self.notify_room(room_code, {
+                "type": "player_connected",
+                "user_id": user_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "connections_count": len(self.room_connections[room_code])
+            }, exclude_websocket=websocket)
 
             # Envoyer l'état actuel au nouveau client
             await self.send_room_state(websocket, room_code)
@@ -99,6 +104,78 @@ class MultiplayerWebSocketManager:
                 await websocket.close()
             except:
                 pass
+
+    async def _cleanup_user_connections(self, user_id: str, new_room_code: str, new_websocket: WebSocket):
+        """Nettoie les connexions existantes d'un utilisateur"""
+        try:
+            # Vérifier si l'utilisateur a déjà une connexion active
+            existing_websocket = self.user_websockets.get(user_id)
+            if existing_websocket and existing_websocket != new_websocket:
+
+                # Obtenir l'ancienne room
+                old_room_code = self.connection_rooms.get(existing_websocket)
+
+                logger.info(f"🔄 Nettoyage connexion existante pour user {user_id}")
+
+                # Fermer l'ancienne connexion proprement
+                try:
+                    await existing_websocket.close(code=1000, reason="Nouvelle connexion")
+                except:
+                    pass
+
+                # Nettoyer les mappings de l'ancienne connexion
+                if old_room_code:
+                    await self._cleanup_connection_mappings(existing_websocket, old_room_code, user_id)
+
+            # Vérifier si l'utilisateur était dans une autre room
+            existing_room = self.user_room_mapping.get(user_id)
+            if existing_room and existing_room != new_room_code:
+                logger.info(f"🔄 Utilisateur {user_id} change de room: {existing_room} -> {new_room_code}")
+                await self._remove_user_from_room(user_id, existing_room)
+
+        except Exception as e:
+            logger.error(f"❌ Erreur nettoyage connexions utilisateur {user_id}: {e}")
+
+    async def _remove_user_from_room(self, user_id: str, room_code: str):
+        """Supprime un utilisateur d'une room spécifique"""
+        try:
+            if room_code in self.multiplayer_rooms:
+                # Supprimer le joueur de la room
+                self.multiplayer_rooms[room_code]["players"].pop(user_id, None)
+
+                # Notifier les autres clients
+                await self.notify_room(room_code, {
+                    "type": "player_disconnected",
+                    "user_id": user_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "connections_count": len(self.room_connections.get(room_code, []))
+                })
+
+        except Exception as e:
+            logger.error(f"❌ Erreur suppression utilisateur {user_id} de {room_code}: {e}")
+
+    async def _cleanup_connection_mappings(self, websocket: WebSocket, room_code: str, user_id: str):
+        """Nettoie tous les mappings pour une connexion"""
+        try:
+            # Supprimer de la room
+            if room_code in self.room_connections:
+                self.room_connections[room_code].discard(websocket)
+
+            # Nettoyer les mappings
+            self.connection_rooms.pop(websocket, None)
+            self.connection_users.pop(websocket, None)
+
+            # Nettoyer les mappings utilisateur seulement si c'est la bonne connexion
+            if self.user_websockets.get(user_id) == websocket:
+                self.user_websockets.pop(user_id, None)
+                self.user_room_mapping.pop(user_id, None)
+
+            # Supprimer le joueur de la room
+            if room_code in self.multiplayer_rooms and user_id in self.multiplayer_rooms[room_code]["players"]:
+                self.multiplayer_rooms[room_code]["players"].pop(user_id, None)
+
+        except Exception as e:
+            logger.error(f"❌ Erreur nettoyage mappings: {e}")
 
     async def _disconnect_user_from_room(self, user_id: str, room_code: str):
         """Déconnecte un utilisateur d'une room spécifique"""
@@ -136,38 +213,15 @@ class MultiplayerWebSocketManager:
         except Exception as e:
             logger.error(f"❌ Erreur nettoyage connexions dupliquées: {e}")
 
-    def _cleanup_connection_mappings(self, websocket: WebSocket, room_code: str):
-        """Nettoie les mappings pour une connexion"""
-        try:
-            # Supprimer de la room
-            if room_code in self.room_connections:
-                self.room_connections[room_code].discard(websocket)
-
-            # Nettoyer les mappings
-            user_id = self.connection_users.get(websocket)
-            self.connection_rooms.pop(websocket, None)
-            self.connection_users.pop(websocket, None)
-
-            # Nettoyer le mapping utilisateur si c'était sa seule connexion
-            if user_id and self.user_room_mapping.get(user_id) == room_code:
-                # Vérifier qu'il n'y a plus d'autres connexions pour cet utilisateur
-                has_other_connections = any(
-                    self.connection_users.get(ws) == user_id
-                    for ws in self.room_connections.get(room_code, set())
-                )
-                if not has_other_connections:
-                    self.user_room_mapping.pop(user_id, None)
-
-        except Exception as e:
-            logger.error(f"❌ Erreur nettoyage mappings: {e}")
-
     async def disconnect(self, websocket: WebSocket, room_code: str):
         """Déconnecte un client WebSocket"""
         try:
             user_id = self.connection_users.get(websocket)
 
+            logger.info(f"🔌 Déconnexion WebSocket user {user_id} de room {room_code}")
+
             # Nettoyer les mappings
-            self._cleanup_connection_mappings(websocket, room_code)
+            await self._cleanup_connection_mappings(websocket, room_code, user_id)
 
             # Supprimer la room si vide
             if room_code in self.room_connections and not self.room_connections[room_code]:
@@ -176,12 +230,6 @@ class MultiplayerWebSocketManager:
                     del self.multiplayer_rooms[room_code]
                 if room_code in self.active_effects:
                     del self.active_effects[room_code]
-
-            # Supprimer le joueur de la room
-            if room_code in self.multiplayer_rooms and user_id:
-                self.multiplayer_rooms[room_code]["players"].pop(user_id, None)
-
-            logger.info(f"🔌 Utilisateur {user_id} déconnecté de la room {room_code}")
 
             # Notifier les autres clients
             if room_code in self.room_connections and user_id:
@@ -194,6 +242,18 @@ class MultiplayerWebSocketManager:
 
         except Exception as e:
             logger.error(f"❌ Erreur lors de la déconnexion WebSocket: {e}")
+
+    def get_connection_debug_info(self, room_code: str) -> Dict[str, Any]:
+        """Retourne des informations de debug sur les connexions"""
+        return {
+            "room_code": room_code,
+            "room_connections_count": len(self.room_connections.get(room_code, set())),
+            "room_players_count": len(self.multiplayer_rooms.get(room_code, {}).get("players", {})),
+            "total_user_mappings": len(self.user_room_mapping),
+            "total_websocket_mappings": len(self.user_websockets),
+            "connection_rooms_count": len(self.connection_rooms),
+            "connection_users_count": len(self.connection_users)
+        }
 
     # =====================================================
     # COMMUNICATION BROADCAST

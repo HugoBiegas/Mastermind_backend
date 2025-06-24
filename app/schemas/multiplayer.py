@@ -20,7 +20,7 @@ class MultiplayerGameCreateRequest(BaseModel):
     name: str = Field(default="Ma Partie", description="Nom de la partie")
     game_type: str = Field(default="multi_mastermind", description="Type de partie")
     difficulty: str = Field(default="medium", description="Difficulté")
-    max_players: int = Field(default=4, ge=2, le=8, description="Nombre max de joueurs")
+    max_players: int = Field(default=4, ge=2, le=12, description="Nombre max de joueurs")
 
     # Configuration du mastermind (propriétés qui existent dans Game)
     combination_length: int = Field(default=4, ge=3, le=8, description="Longueur de la combinaison")

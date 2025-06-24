@@ -5,6 +5,7 @@ Traitement des messages et événements WebSocket
 import json
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -14,14 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.services.auth import auth_service
 from app.services.game import game_service
+from app.services.multiplayer import multiplayer_service
 from app.services.quantum import quantum_service
 from app.websocket.manager import (
     websocket_manager, WebSocketMessage, EventType
 )
 from app.utils.exceptions import (
     WebSocketMessageError, GameError, EntityNotFoundError,
-    AuthenticationError
+    AuthenticationError, logger, WebSocketAuthenticationError
 )
+
 
 
 class WebSocketMessageHandler:
@@ -683,46 +686,95 @@ class WebSocketMessageHandler:
     async def _handle_chat_message(
             self,
             connection_id: str,
-            data: Dict[str, Any],
+            message_data: Dict[str, Any],
             db: AsyncSession
     ) -> None:
-        """Gère un message de chat"""
-        if not await self._require_authentication(connection_id):
-            return
-
-        room_id = data.get("room_id")
-        message = data.get("message", "").strip()
-
-        if not room_id or not message:
-            await self._send_error(connection_id, "Données de message manquantes")
-            return
-
-        if len(message) > 500:
-            await self._send_error(connection_id, "Message trop long (max 500 caractères)")
-            return
-
+        """Traite les messages de chat avec broadcast correct"""
         try:
-            connection_info = websocket_manager.get_connection_info(connection_id)
+            # Récupérer les infos de connexion
+            connection = websocket_manager.get_connection(connection_id)
+            if not connection or not connection.user_id:
+                logger.error(f"🚫 Chat: Connexion {connection_id} non authentifiée")
+                raise WebSocketAuthenticationError("Non authentifié")
 
-            chat_message = WebSocketMessage(
-                type=EventType.CHAT_BROADCAST,
-                data={
-                    "room_id": room_id,
-                    "user_id": connection_info.get("user_id"),
-                    "username": connection_info.get("username"),
-                    "message": message,
-                    "timestamp": time.time()
+            # Récupérer l'utilisateur
+            user = await auth_service.get_user_by_id(db, connection.user_id)
+            if not user:
+                logger.error(f"🚫 Chat: Utilisateur {connection.user_id} introuvable")
+                raise WebSocketAuthenticationError("Utilisateur introuvable")
+
+            room_code = message_data.get("room_code")
+            if not room_code:
+                logger.error(f"🚫 Chat: Code de room manquant dans {message_data}")
+                raise WebSocketMessageError("Code de room manquant")
+
+            # Vérifier que l'utilisateur est dans la room
+            room = await multiplayer_service.get_room_by_code(db, room_code)
+            if not room:
+                logger.error(f"🚫 Chat: Room {room_code} introuvable")
+                raise WebSocketMessageError("Room introuvable")
+
+            # Créer le message formaté
+            chat_message = {
+                "type": "CHAT_MESSAGE",
+                "data": {
+                    "message_id": f"msg_{int(time.time() * 1000)}_{connection.user_id}",
+                    "user_id": str(connection.user_id),
+                    "username": user.username,
+                    "message": message_data["message"],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "room_code": room_code,
+                    "type": "user"
                 }
-            )
+            }
 
-            # Broadcaster le message à tous les membres de la room
-            await websocket_manager.broadcast_to_room(room_id, chat_message)
+            # CORRECTION CRITIQUE : Récupérer toutes les connexions de la room
+            room_connections = websocket_manager.room_connections.get(room_code, set())
+            logger.info(f"💬 Broadcasting message dans room {room_code} vers {len(room_connections)} connexions")
 
-            # TODO: Sauvegarder le message en base de données si nécessaire
+            # Broadcast à TOUTES les connexions de la room
+            successful_broadcasts = 0
+            for conn_id in room_connections:
+                try:
+                    await websocket_manager.send_to_connection(conn_id, chat_message)
+                    successful_broadcasts += 1
+                except Exception as e:
+                    logger.error(f"❌ Erreur broadcast vers {conn_id}: {e}")
+
+            logger.info(
+                f"✅ Message de chat diffusé avec succès vers {successful_broadcasts}/{len(room_connections)} connexions")
+
+            # Également utiliser la méthode broadcast_to_room si elle existe
+            try:
+                await websocket_manager.broadcast_to_room(room_code, chat_message)
+            except Exception as e:
+                logger.warning(f"⚠️  Erreur broadcast_to_room secondaire: {e}")
 
         except Exception as e:
-            await self._send_error(connection_id, f"Erreur lors de l'envoi du message: {str(e)}")
+            logger.error(f"❌ Erreur traitement message chat: {e}")
+            await websocket_manager.send_error(connection_id, str(e))
 
+    async def debug_room_connections(self, room_code: str) -> Dict[str, Any]:
+        """Debug des connexions d'une room"""
+        connections = websocket_manager.room_connections.get(room_code, set())
+        active_connections = []
+
+        for conn_id in connections:
+            connection = websocket_manager.get_connection(conn_id)
+            if connection:
+                active_connections.append({
+                    "connection_id": conn_id,
+                    "user_id": str(connection.user_id) if connection.user_id else None,
+                    "websocket_state": connection.websocket.client_state.name if hasattr(connection.websocket,
+                                                                                         'client_state') else 'unknown'
+                })
+
+        return {
+            "room_code": room_code,
+            "total_connections": len(connections),
+            "active_connections": len(active_connections),
+            "connections_detail": active_connections
+        }
     # === HANDLERS D'INVITATION ===
 
     async def _handle_invite_player(

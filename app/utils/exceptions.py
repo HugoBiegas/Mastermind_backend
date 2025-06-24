@@ -411,6 +411,13 @@ class WebSocketMessageError(WebSocketError):
         self.error_code = "WEBSOCKET_MESSAGE_ERROR"
         self.details.update({"message_type": message_type, "reason": reason})
 
+class WebSocketAuthenticationError(WebSocketError):
+    """Erreur d'authentification WebSocket"""
+
+    def __init__(self, reason: str):
+        super().__init__(f"Erreur d'authentification WebSocket: {reason}")
+        self.error_code = "WEBSOCKET_AUTHENTICATION_ERROR"
+        self.details["reason"] = reason
 
 # =====================================================
 # EXCEPTIONS QUANTIQUES
