@@ -26,6 +26,9 @@ class MultiplayerWebSocketManager:
         # Mapping connexion -> user_id
         self.connection_users: Dict[WebSocket, str] = {}
 
+        # CORRECTION: Mapping user_id -> room_code pour éviter les doublons
+        self.user_room_mapping: Dict[str, str] = {}
+
         # Informations des rooms actives
         self.multiplayer_rooms: Dict[str, Dict[str, Any]] = {}
 
@@ -37,6 +40,7 @@ class MultiplayerWebSocketManager:
 
         logger.info("🌐 MultiplayerWebSocketManager initialisé")
 
+
     # =====================================================
     # GESTION DES CONNEXIONS
     # =====================================================
@@ -46,6 +50,15 @@ class MultiplayerWebSocketManager:
         try:
             await websocket.accept()
 
+            # Vérifier si l'utilisateur est déjà connecté ailleurs
+            if user_id in self.user_room_mapping:
+                existing_room = self.user_room_mapping[user_id]
+                if existing_room != room_code:
+                    await self._disconnect_user_from_room(user_id, existing_room)
+                    logger.info(f"🔄 Utilisateur {user_id} déplacé de {existing_room} vers {room_code}")
+                elif existing_room == room_code:
+                    await self._cleanup_duplicate_connection(user_id, room_code)
+
             # Ajouter la connexion à la room
             if room_code not in self.room_connections:
                 self.room_connections[room_code] = set()
@@ -53,6 +66,7 @@ class MultiplayerWebSocketManager:
             self.room_connections[room_code].add(websocket)
             self.connection_rooms[websocket] = room_code
             self.connection_users[websocket] = user_id
+            self.user_room_mapping[user_id] = room_code
 
             # Initialiser la room si nécessaire
             if room_code not in self.multiplayer_rooms:
@@ -67,18 +81,14 @@ class MultiplayerWebSocketManager:
             self.multiplayer_rooms[room_code]["players"][user_id] = {
                 "connected_at": datetime.now(timezone.utc),
                 "last_activity": datetime.now(timezone.utc),
-                "websocket": websocket
+                "websocket": websocket,
+                "ready": False
             }
 
             logger.info(f"🔌 Utilisateur {user_id} connecté à la room {room_code}")
 
-            # Notifier les autres clients
-            await self.notify_room(room_code, {
-                "type": "player_connected",
-                "user_id": user_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "connections_count": len(self.room_connections[room_code])
-            }, exclude_websocket=websocket)
+            # CORRECTION: Utiliser la nouvelle méthode de notification
+            await self.notify_player_joined(room_code, user_id)
 
             # Envoyer l'état actuel au nouveau client
             await self.send_room_state(websocket, room_code)
@@ -90,26 +100,82 @@ class MultiplayerWebSocketManager:
             except:
                 pass
 
+    async def _disconnect_user_from_room(self, user_id: str, room_code: str):
+        """Déconnecte un utilisateur d'une room spécifique"""
+        try:
+            if room_code in self.room_connections:
+                # Trouver et fermer les connexions de cet utilisateur dans cette room
+                connections_to_remove = []
+                for websocket in self.room_connections[room_code]:
+                    if self.connection_users.get(websocket) == user_id:
+                        connections_to_remove.append(websocket)
+
+                for websocket in connections_to_remove:
+                    await self.disconnect(websocket, room_code)
+
+        except Exception as e:
+            logger.error(f"❌ Erreur déconnexion utilisateur {user_id} de {room_code}: {e}")
+
+    async def _cleanup_duplicate_connection(self, user_id: str, room_code: str):
+        """Nettoie les connexions dupliquées d'un utilisateur"""
+        try:
+            if room_code in self.room_connections:
+                connections_to_close = []
+                for websocket in self.room_connections[room_code]:
+                    if self.connection_users.get(websocket) == user_id:
+                        connections_to_close.append(websocket)
+
+                # Fermer toutes les connexions existantes sauf la plus récente
+                for websocket in connections_to_close[:-1]:  # Garder la dernière
+                    try:
+                        await websocket.close(1000, "Duplicate connection")
+                    except:
+                        pass
+                    self._cleanup_connection_mappings(websocket, room_code)
+
+        except Exception as e:
+            logger.error(f"❌ Erreur nettoyage connexions dupliquées: {e}")
+
+    def _cleanup_connection_mappings(self, websocket: WebSocket, room_code: str):
+        """Nettoie les mappings pour une connexion"""
+        try:
+            # Supprimer de la room
+            if room_code in self.room_connections:
+                self.room_connections[room_code].discard(websocket)
+
+            # Nettoyer les mappings
+            user_id = self.connection_users.get(websocket)
+            self.connection_rooms.pop(websocket, None)
+            self.connection_users.pop(websocket, None)
+
+            # Nettoyer le mapping utilisateur si c'était sa seule connexion
+            if user_id and self.user_room_mapping.get(user_id) == room_code:
+                # Vérifier qu'il n'y a plus d'autres connexions pour cet utilisateur
+                has_other_connections = any(
+                    self.connection_users.get(ws) == user_id
+                    for ws in self.room_connections.get(room_code, set())
+                )
+                if not has_other_connections:
+                    self.user_room_mapping.pop(user_id, None)
+
+        except Exception as e:
+            logger.error(f"❌ Erreur nettoyage mappings: {e}")
+
     async def disconnect(self, websocket: WebSocket, room_code: str):
         """Déconnecte un client WebSocket"""
         try:
             user_id = self.connection_users.get(websocket)
 
-            # Supprimer la connexion
-            if room_code in self.room_connections:
-                self.room_connections[room_code].discard(websocket)
-
-                # Supprimer la room si vide
-                if not self.room_connections[room_code]:
-                    del self.room_connections[room_code]
-                    if room_code in self.multiplayer_rooms:
-                        del self.multiplayer_rooms[room_code]
-                    if room_code in self.active_effects:
-                        del self.active_effects[room_code]
-
             # Nettoyer les mappings
-            self.connection_rooms.pop(websocket, None)
-            self.connection_users.pop(websocket, None)
+            self._cleanup_connection_mappings(websocket, room_code)
+
+            # Supprimer la room si vide
+            if room_code in self.room_connections and not self.room_connections[room_code]:
+                del self.room_connections[room_code]
+                if room_code in self.multiplayer_rooms:
+                    del self.multiplayer_rooms[room_code]
+                if room_code in self.active_effects:
+                    del self.active_effects[room_code]
 
             # Supprimer le joueur de la room
             if room_code in self.multiplayer_rooms and user_id:
@@ -134,23 +200,36 @@ class MultiplayerWebSocketManager:
     # =====================================================
 
     async def notify_room(
-        self,
-        room_code: str,
-        message: Dict[str, Any],
-        exclude_websocket: Optional[WebSocket] = None
+            self,
+            room_code: str,
+            message: Dict[str, Any],
+            exclude_websocket: Optional[WebSocket] = None
     ):
         """Envoie un message à tous les clients d'une room"""
         if room_code not in self.room_connections:
+            logger.warning(f"⚠️ No connections found for room {room_code}")
             return
 
-        # Ajouter timestamp et metadata
-        enhanced_message = {
-            **message,
+        # CORRECTION: Structure standardisée du message
+        message_type = message.get("type", "notification")
+        message_data = {k: v for k, v in message.items() if k != "type"}
+
+        # Ajouter metadata
+        message_data.update({
             "room_code": room_code,
             "server_timestamp": datetime.now(timezone.utc).isoformat()
+        })
+
+        # NOUVEAU: Message avec structure standardisée
+        standardized_message = {
+            "type": message_type,
+            "data": message_data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "room_code": room_code
         }
 
-        message_json = json.dumps(enhanced_message)
+        message_json = json.dumps(standardized_message)
+        logger.debug(f"📤 Broadcasting message type '{message_type}' to room {room_code}")
 
         # Liste des connexions à supprimer (fermées)
         dead_connections = set()
@@ -169,34 +248,51 @@ class MultiplayerWebSocketManager:
         for websocket in dead_connections:
             await self.disconnect(websocket, room_code)
 
+        logger.debug(
+            f"✅ Message broadcasted to {len(self.room_connections[room_code]) - len(dead_connections)} clients")
+
     async def send_personal_message(
-        self,
-        room_code: str,
-        user_id: str,
-        message: Dict[str, Any]
+            self,
+            room_code: str,
+            user_id: str,
+            message: Dict[str, Any]
     ):
         """Envoie un message personnel à un utilisateur spécifique"""
         if room_code not in self.multiplayer_rooms:
+            logger.warning(f"⚠️ Room {room_code} not found for personal message")
             return
 
         room_data = self.multiplayer_rooms[room_code]
         if user_id not in room_data["players"]:
+            logger.warning(f"⚠️ User {user_id} not found in room {room_code}")
             return
 
         websocket = room_data["players"][user_id].get("websocket")
         if not websocket:
+            logger.warning(f"⚠️ No websocket found for user {user_id}")
             return
 
-        enhanced_message = {
-            **message,
-            "type": "personal_message",
+        # CORRECTION: Structure standardisée du message personnel
+        message_type = message.get("type", "personal_message")
+        message_data = {k: v for k, v in message.items() if k != "type"}
+
+        message_data.update({
             "target_user_id": user_id,
             "room_code": room_code,
             "server_timestamp": datetime.now(timezone.utc).isoformat()
+        })
+
+        # NOUVEAU: Message avec structure standardisée
+        standardized_message = {
+            "type": message_type,
+            "data": message_data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "room_code": room_code
         }
 
         try:
-            await websocket.send_text(json.dumps(enhanced_message))
+            await websocket.send_text(json.dumps(standardized_message))
+            logger.debug(f"✅ Personal message sent to user {user_id}")
         except Exception as e:
             logger.warning(f"⚠️ Impossible d'envoyer message personnel: {e}")
 
@@ -242,13 +338,34 @@ class MultiplayerWebSocketManager:
         if not chat_content or len(chat_content) > 500:
             return
 
-        # Diffuser le message à tous les clients
+        # CORRECTION: Structure standardisée pour les messages de chat
         await self.notify_room(room_code, {
             "type": "chat_message",
             "user_id": user_id,
             "username": message.get("username", "Anonyme"),
             "message": chat_content,
             "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+
+    async def notify_player_joined(self, room_code: str, user_id: str, username: str = None):
+        """Notifie qu'un joueur a rejoint la room"""
+        await self.notify_room(room_code, {
+            "type": "player_connected",
+            "user_id": user_id,
+            "username": username or f"Joueur-{user_id[:8]}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "connections_count": len(self.room_connections.get(room_code, []))
+        })
+
+    # NOUVEAU: Méthode pour notifier le départ d'un joueur
+    async def notify_player_left(self, room_code: str, user_id: str, username: str = None):
+        """Notifie qu'un joueur a quitté la room"""
+        await self.notify_room(room_code, {
+            "type": "player_disconnected",
+            "user_id": user_id,
+            "username": username or f"Joueur-{user_id[:8]}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "connections_count": len(self.room_connections.get(room_code, []))
         })
 
     async def handle_player_ready(self, room_code: str, user_id: str, message: Dict[str, Any]):
@@ -403,6 +520,7 @@ class MultiplayerWebSocketManager:
     async def send_room_state(self, websocket: WebSocket, room_code: str):
         """Envoie l'état actuel de la room à un client"""
         if room_code not in self.multiplayer_rooms:
+            logger.warning(f"⚠️ Room {room_code} not found for room state")
             return
 
         room_data = self.multiplayer_rooms[room_code]
@@ -414,11 +532,12 @@ class MultiplayerWebSocketManager:
                 "user_id": user_id,
                 "connected_at": player_data.get("connected_at", datetime.now(timezone.utc)).isoformat(),
                 "ready": player_data.get("ready", False),
+                "is_ready": player_data.get("ready", False),  # CORRECTION: Alias pour compatibilité
                 "last_activity": player_data.get("last_activity", datetime.now(timezone.utc)).isoformat()
             })
 
-        state_message = {
-            "type": "room_state",
+        # CORRECTION: Structure standardisée du message WebSocket
+        state_data = {
             "room_code": room_code,
             "status": room_data.get("status", "waiting"),
             "current_mastermind": room_data.get("current_mastermind", 1),
@@ -428,8 +547,17 @@ class MultiplayerWebSocketManager:
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
+        # NOUVEAU: Message avec structure standardisée
+        message = {
+            "type": "room_state",
+            "data": state_data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "room_code": room_code
+        }
+
         try:
-            await websocket.send_text(json.dumps(state_message))
+            await websocket.send_text(json.dumps(message))
+            logger.debug(f"✅ Room state sent to client in room {room_code}")
         except Exception as e:
             logger.warning(f"⚠️ Impossible d'envoyer l'état de la room: {e}")
 

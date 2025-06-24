@@ -27,7 +27,7 @@ class GameCreate(BaseModel):
     available_colors: Optional[int] = Field(None, ge=3, le=15, description="Nombre de couleurs disponibles")
     max_attempts: Optional[int] = Field(None, ge=1, le=50, description="Tentatives maximales")
     time_limit: Optional[int] = Field(None, ge=60, le=3600, description="Limite de temps (secondes)")
-    max_players: int = Field(default=1, ge=1, le=8, description="Nombre maximum de joueurs")
+    max_players: int = Field(default=1, ge=1, le=50, description="Nombre maximum de joueurs")
 
     # Configuration
     is_private: bool = Field(default=False, description="Partie privée")
