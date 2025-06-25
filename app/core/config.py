@@ -81,13 +81,14 @@ class Settings(BaseSettings):
 
     # === CORS ET SÉCURITÉ ===
     CORS_ORIGINS: List[str] = [
+        "*",
         "http://54.36.101.158:3000",
         "http://localhost:3000",
         "http://localhost:4200",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:4200"
     ]
-    TRUSTED_HOSTS: List[str] = ["localhost", "127.0.0.1","54.36.101.158"]
+    TRUSTED_HOSTS: List[str] = ["localhost", "127.0.0.1","54.36.101.158","*"]
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
