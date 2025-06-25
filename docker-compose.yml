@@ -103,8 +103,8 @@ services:
       LOG_FORMAT: json
 
       # Security
-      CORS_ORIGINS: '*'
-      TRUSTED_HOSTS: '*'
+      CORS_ORIGINS: '["*"]'
+      TRUSTED_HOSTS: '["*"]'
 
     ports:
       - "9000:8000"
