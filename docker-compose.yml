@@ -103,8 +103,8 @@ services:
       LOG_FORMAT: json
 
       # Security
-      CORS_ORIGINS: '["http://localhost:3000","http://localhost:4200","https://yourdomain.com"]'
-      TRUSTED_HOSTS: '["localhost","127.0.0.1","yourdomain.com"]'
+      CORS_ORIGINS: '*'
+      TRUSTED_HOSTS: '*'
 
     ports:
       - "9000:8000"
