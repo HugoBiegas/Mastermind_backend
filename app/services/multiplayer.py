@@ -475,7 +475,7 @@ class MultiplayerService:
             if any(c < 1 or c > game.available_colors for c in combination):
                 raise ValidationError(f"Couleurs doivent être entre 1 et {game.available_colors}")
 
-            # NOUVEAU: Calculer le résultat avec support quantique
+            # Calculer le résultat avec support quantique
             if game.quantum_enabled:
                 try:
                     quantum_result = await quantum_service.calculate_quantum_hints_with_probabilities(
