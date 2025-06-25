@@ -119,6 +119,10 @@ async def create_multiplayer_room(
 ) -> Dict[str, Any]:
     """Route créée pour correspondre aux attentes du frontend avec auto-leave"""
     try:
+        # Vérification des types en entrée
+        logger.info(f"🔍 Route create_room - Type game_data: {type(game_data)}")
+        logger.info(f"🔍 Route create_room - User ID: {current_user.id}")
+
         # CORRECTION: Import correct de game_service
         try:
             from app.services.game import game_service
@@ -126,18 +130,20 @@ async def create_multiplayer_room(
             logger.info(f"✅ Parties actives quittées pour l'utilisateur {current_user.id}")
         except Exception as leave_error:
             logger.warning(f"⚠️ Pas de parties actives à quitter: {leave_error}")
-            # Ne pas bloquer la création pour cette erreur
 
+        # CORRECTION: Bon ordre des paramètres
         result = await multiplayer_service.create_game(
-            db, game_data, current_user.id
+            db, current_user.id, game_data  # ✅ CORRIGÉ: user_id avant game_data
         )
+
         return {
             "success": True,
             "data": result,
             "message": "Partie créée avec succès"
         }
     except Exception as e:
-        logger.error(f"Erreur création room: {e}")
+        logger.error(f"❌ Erreur création room: {e}")
+        logger.error(f"❌ Stack trace complet:", exc_info=True)  # Ajout du stack trace
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la création: {str(e)}"

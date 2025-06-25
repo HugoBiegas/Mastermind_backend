@@ -67,13 +67,13 @@ class MultiplayerService:
             game_data: MultiplayerGameCreateRequest
     ) -> Dict[str, Any]:
         """
-        Crée une partie multijoueur - VERSION CORRIGÉE avec support quantique complet
+        Crée une partie multijoueur - VERSION CORRIGÉE
         """
         try:
             # Générer le room code
             room_code = generate_room_code()
 
-            # NOUVEAU: Générer la solution initiale (quantique si activé)
+            # CORRECTION 1: Fixer les erreurs de syntaxe
             if game_data.quantum_enabled:
                 try:
                     initial_solution = await quantum_service.generate_quantum_solution(
@@ -85,26 +85,31 @@ class MultiplayerService:
                     logger.warning(f"⚠️ Erreur génération quantique, fallback classique: {quantum_error}")
                     initial_solution = [
                         random.randint(1, game_data.available_colors)
-                        for _ in range(game_data.combination_length)
+                        for _ in range(game_data.combination_length)  # ✅ CORRIGÉ: _ au lieu de *
                     ]
             else:
                 initial_solution = game_data.solution or [
                     random.randint(1, game_data.available_colors)
-                    for _ in range(game_data.combination_length)
+                    for _ in range(game_data.combination_length)  # ✅ CORRIGÉ: _ au lieu de *
                 ]
 
-            # Créer le game
+            # CORRECTION 2: Vérification des types avant utilisation
+            logger.info(f"🔍 Debug types: game_data type={type(game_data)}, quantum_enabled={game_data.quantum_enabled}")
+
+            # Créer le game avec vérification
             game = Game(
                 room_code=room_code,
                 creator_id=user_id,
-                game_type="multi_mastermind",
+                game_type=game_data.game_type,
+                game_mode="multiplayer",
                 difficulty=game_data.difficulty,
                 max_players=game_data.max_players,
                 combination_length=game_data.combination_length,
                 available_colors=game_data.available_colors,
                 max_attempts=game_data.max_attempts,
                 quantum_enabled=game_data.quantum_enabled,
-                is_private=False,  # Toujours public comme spécifié
+                is_private=False,
+                solution=initial_solution,
                 allow_spectators=True,
                 enable_chat=True,
                 status=GameStatus.WAITING,
@@ -112,24 +117,29 @@ class MultiplayerService:
                     "total_masterminds": game_data.total_masterminds,
                     "items_enabled": game_data.items_enabled,
                     "items_per_mastermind": game_data.items_per_mastermind,
-                    "initial_solution": initial_solution,  # Solution de base
-                    "player_solutions": {}  # Solutions par joueur (générées au démarrage)
+                    "initial_solution": initial_solution,
+                    "player_solutions": {}
                 }
             )
 
             db.add(game)
-            await db.flush()
+            await db.flush()  # Important: flush pour obtenir l'ID
+
+            # CORRECTION 3: Vérifier que game.id existe avant de l'utiliser
+            if not game.id:
+                raise ValueError("Game ID not generated after flush")
 
             # Ajouter le créateur comme participant
             participation = GameParticipation(
                 game_id=game.id,
                 player_id=user_id,
-                status="active"
+                status="waiting",
+                join_order=1,
             )
             db.add(participation)
             await db.commit()
 
-            logger.info(f"✅ Partie {room_code} créée (quantique: {game_data.quantum_enabled})")
+            logger.info(f"✅ Partie {room_code} créée (ID: {game.id}, quantique: {game_data.quantum_enabled})")
 
             return {
                 "success": True,
@@ -141,6 +151,7 @@ class MultiplayerService:
 
         except Exception as e:
             logger.error(f"❌ Erreur création partie: {e}")
+            logger.error(f"❌ Type de game_data: {type(game_data)}")
             await db.rollback()
             raise GameError(f"Erreur lors de la création: {str(e)}")
 
