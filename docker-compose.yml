@@ -107,7 +107,7 @@ services:
       TRUSTED_HOSTS: '["localhost","127.0.0.1","yourdomain.com"]'
 
     ports:
-      - "8000:8000"
+      - "9000:8000"
     volumes:
       # Code source pour développement (à retirer en production)
       - ./app:/app/app:ro
