@@ -29,11 +29,11 @@
 
 ### 🌐 **Application en Ligne**
 
-<a href="http://54.36.101.158:3000/modes" target="_blank">
+<a href="http://54.36.101.158:3000" target="_blank">
   <img src="https://img.shields.io/badge/🚀_JOUER_MAINTENANT-4CAF50?style=for-the-badge&logoColor=white" alt="Jouer Maintenant"/>
 </a>
 
-`🔗 http://54.36.101.158:3000/modes`
+`🔗 http://54.36.101.158:3000`
 
 </div>
 
@@ -214,43 +214,6 @@ Données d'Entrée → Construction Circuit → Exécution Quantique → Analyse
   "cache_efficiency": 0.873
 }
 ```
-
----
-
-## 🔧 API et Utilisation
-
-### 🎯 Interface Principale
-
-```python
-# Génération de solution
-solution = await quantum_service.generate_quantum_solution(4, 6)
-
-# Analyse de tentative
-hints = await quantum_service.calculate_quantum_hints_with_probabilities(
-    solution=[3, 1, 4, 2], 
-    attempt=[3, 4, 1, 5]
-)
-```
-
-### 📝 Schémas de Données
-
-```python
-# QuantumHintResponse
-{
-  "exact_matches": int,
-  "wrong_position": int,
-  "position_probabilities": List[QuantumPositionHint],
-  "quantum_calculated": bool
-}
-
-# QuantumPositionHint
-{
-  "position": int,
-  "exact_match_probability": float,
-  "match_type": str
-}
-```
-
 ---
 
 ## 🛠️ Technologies Utilisées
@@ -281,9 +244,9 @@ hints = await quantum_service.calculate_quantum_hints_with_probabilities(
 - [x] Tests unitaires
 
 ### 🔄 En Cours
-- [ ] Mode multijoueur
+- [~] Mode multijoueur
 - [ ] Métriques avancées
-- [ ] Documentation API
+- [~] Documentation API
 
 ### 🎯 Prévu
 - [ ] Algorithme de Grover pour recherche
