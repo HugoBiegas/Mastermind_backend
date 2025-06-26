@@ -6,16 +6,31 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.12-green?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Qiskit](https://img.shields.io/badge/Qiskit-2.0.2-purple?style=for-the-badge&logo=ibm&logoColor=white)](https://qiskit.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?style=for-the-badge&logo=postgresql&logoColor=white)](https://postgresql.org)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://docker.com)Add commentMore actions
+[![NumPy](https://img.shields.io/badge/NumPy-1.26.4-013243?style=for-the-badge&logo=numpy&logoColor=white)](https://numpy.org)
+[![Redis](https://img.shields.io/badge/Redis-7.2.0-DC382D?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io)
 
 ---
 
 ## 🎮 Démonstration
 
-### 🎥 **Vidéo de Présentation**
-[▶️ Voir la démonstration complète du Quantum Mastermind](https://drive.google.com/file/d/15gzItFGjoMERkVCXQL5qHvnzfeiFInCr/view?usp=sharing)
+<div align="center">
 
-### 🌐 **Jeu en Ligne**
-🔗 **Accès direct :** [http://54.36.101.158:3000/modes](http://54.36.101.158:3000/modes)
+### 🎥 **Vidéo de Présentation**
+
+[![Quantum Mastermind Demo](https://img.shields.io/badge/▶️_Voir_la_Démonstration-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://drive.google.com/file/d/15gzItFGjoMERkVCXQL5qHvnzfeiFInCr/view?usp=sharing)
+
+*Découvrez les algorithmes quantiques en action dans le gameplay*
+
+---
+
+### 🌐 **Application en Ligne**
+
+[![Jouer Maintenant](https://img.shields.io/badge/🚀_JOUER_MAINTENANT-4CAF50?style=for-the-badge&logoColor=white)](http://54.36.101.158:3000/modes)
+
+`🔗 http://54.36.101.158:3000/modes`
+
+</div>
 
 ---
 
@@ -129,11 +144,11 @@ elif att_color in solution:
 **Principe :** Ajustement automatique du nombre de mesures selon la complexité.
 
 ```python
- def _adaptive_shots(self, complexity: int) -> int:
-     """Calcul adaptatif du nombre de shots selon complexité"""
-     base_shots = max(1024, self.default_shots)
-     complexity_factor = min(complexity * 128, 2048)
-     return base_shots + complexity_factor
+    def _adaptive_shots(self, complexity: int) -> int:
+        """Calcul adaptatif du nombre de shots selon complexité"""
+        base_shots = max(1024, self.default_shots)
+        complexity_factor = min(complexity * 128, 2048)
+        return base_shots + complexity_factor
 ```
 
 ---
@@ -248,7 +263,7 @@ hints = await quantum_service.calculate_quantum_hints_with_probabilities(
 
 ### 🔧 DevOps
 - **Docker** : Conteneurisation
-
+- 
 ---
 
 ## 🔮 Roadmap Technique
@@ -261,9 +276,9 @@ hints = await quantum_service.calculate_quantum_hints_with_probabilities(
 - [x] Tests unitaires
 
 ### 🔄 En Cours
-- [~] Mode multijoueur
+- [ ] Mode multijoueur
 - [ ] Métriques avancées
-- [~] Documentation API
+- [ ] Documentation API
 
 ### 🎯 Prévu
 - [ ] Algorithme de Grover pour recherche
