@@ -231,7 +231,7 @@ Données d'Entrée → Construction Circuit → Exécution Quantique → Analyse
 
 ### 🔧 DevOps
 - **Docker** : Conteneurisation
-- 
+
 ---
 
 ## 🔮 Roadmap Technique
