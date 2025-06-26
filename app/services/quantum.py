@@ -520,7 +520,7 @@ async def _quantum_color_selection(
         return secrets.randbelow(available_colors) + 1
 
 
-async def quantum_fallback_generation(
+async def _quantum_fallback_generation(
         combination_length: int,
         available_colors: int
 ) -> List[int]:
