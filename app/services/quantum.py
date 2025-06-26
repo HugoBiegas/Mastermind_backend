@@ -16,7 +16,7 @@ from qiskit_aer import AerSimulator
 
 from app.utils.exceptions import QuantumExecutionError
 
-# CORRIGÉ: Import QFT avec fallback si non disponible
+# Import QFT avec fallback si non disponible
 try:
     from qiskit.circuit.library import QFT
     QFT_AVAILABLE = True
@@ -525,23 +525,11 @@ async def _quantum_fallback_generation(
         available_colors: int
 ) -> List[int]:
     """Fallback quantique avec distribution optimisée"""
-
-    # Calcul adaptatif du nombre de qubits
-    min_qubits = int(np.ceil(np.log2(available_colors)))
-
-    # Utiliser plus de qubits pour + de randomness quantique
-    n_qubits = max(min_qubits, 4)  # Minimum 4 qubits pour + d'entropie
-    max_states = 2 ** n_qubits
-
     solution = []
 
     for _ in range(combination_length):
-        # Génération sur une plage plus large pour + d'équité
-        random_decimal = secrets.randbelow(max_states)
-        binary_state = format(random_decimal, f'0{n_qubits}b')
-
-        # Conversion cohérente
-        color_value = int(binary_state, 2) % available_colors + 1
+        # Génération d'une couleur aléatoire entre 1 et available_colors inclus
+        color_value = np.random.randint(1, available_colors + 1)
         solution.append(color_value)
 
     return solution
