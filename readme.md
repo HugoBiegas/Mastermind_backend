@@ -6,29 +6,34 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115.12-green?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Qiskit](https://img.shields.io/badge/Qiskit-2.0.2-purple?style=for-the-badge&logo=ibm&logoColor=white)](https://qiskit.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?style=for-the-badge&logo=postgresql&logoColor=white)](https://postgresql.org)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://docker.com)Add commentMore actions
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://docker.com)
+[![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0.20-4B8BBE?style=for-the-badge&logo=sqlalchemy&logoColor=white)](https://sqlalchemy.org)
 [![NumPy](https://img.shields.io/badge/NumPy-1.26.4-013243?style=for-the-badge&logo=numpy&logoColor=white)](https://numpy.org)
 [![Redis](https://img.shields.io/badge/Redis-7.2.0-DC382D?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io)
 
 ---
 
-## 🎮 Démonstration
+## 🚀 **Démonstration Interactive**
 
-<div align="center">
+### 🎮 **Essayez maintenant !**
 
-### 🎥 **Vidéo de Présentation**
+<a href="http://54.36.101.158:3000/modes" target="_blank">
+  <img src="https://img.shields.io/badge/🎮_JOUER_MAINTENANT-FF6B35?style=for-the-badge&logoColor=white&labelColor=1a1a1a&fontSize=18" alt="Jouer Maintenant" width="300" height="60"/>
+</a>
 
-[![Quantum Mastermind Demo](https://img.shields.io/badge/▶️_Voir_la_Démonstration-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://drive.google.com/file/d/15gzItFGjoMERkVCXQL5qHvnzfeiFInCr/view?usp=sharing)
-
-*Découvrez les algorithmes quantiques en action dans le gameplay*
+*🔗 Application déployée : [http://54.36.101.158:3000/modes](http://54.36.101.158:3000/modes)*
 
 ---
 
-### 🌐 **Application en Ligne**
+### 🎥 **Vidéo de Présentation**
 
-[![Jouer Maintenant](https://img.shields.io/badge/🚀_JOUER_MAINTENANT-4CAF50?style=for-the-badge&logoColor=white)](http://54.36.101.158:3000/modes)
+<a href="https://drive.google.com/file/d/15gzItFGjoMERkVCXQL5qHvnzfeiFInCr/view?usp=sharing" target="_blank">
+  <img src="https://img.shields.io/badge/🎬_VOIR_LA_DÉMONSTRATION-DC2626?style=for-the-badge&logo=youtube&logoColor=white&labelColor=000000" alt="Voir la Démonstration" width="350"/>
+</a>
 
-`🔗 http://54.36.101.158:3000/modes`
+[![Quantum Mastermind Demo](https://img.shields.io/badge/Algorithmes_Quantiques_en_Action-8B5CF6?style=flat-square&logo=quantum&logoColor=white)](https://drive.google.com/file/d/15gzItFGjoMERkVCXQL5qHvnzfeiFInCr/view?usp=sharing)
+
+<div> *🌟 Découvrez comment les algorithmes quantiques révolutionnent le gameplay classique du Mastermind*
 
 </div>
 
