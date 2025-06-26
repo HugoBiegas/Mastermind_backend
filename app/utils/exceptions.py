@@ -505,6 +505,15 @@ class ItemNotFoundError(ItemError):
         super().__init__(f"Objet {item_type} introuvable", item_type)
         self.error_code = "ITEM_NOT_FOUND"
 
+class QuantumExecutionError(BaseQuantumMastermindError):
+    """Erreur d'exécution quantique"""
+
+    def __init__(self, message: str, quantum_job_id: Optional[str] = None):
+        super().__init__(
+            message,
+            error_code="QUANTUM_EXECUTION_ERROR",
+            details={"quantum_job_id": quantum_job_id} if quantum_job_id else {}
+        )
 
 class ItemNotAvailableError(ItemError):
     """Objet non disponible"""
@@ -785,6 +794,7 @@ __all__ = [
     "QuantumSimulationError",
     "QuantumHintError",
     "InsufficientQuantumResourcesError",
+    "QuantumExecutionError",
 
     # Exceptions objets/effets
     "ItemError",

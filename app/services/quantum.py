@@ -14,6 +14,8 @@ import numpy as np
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 
+from app.utils.exceptions import QuantumExecutionError
+
 # CORRIGÉ: Import QFT avec fallback si non disponible
 try:
     from qiskit.circuit.library import QFT
@@ -178,13 +180,13 @@ class QuantumService:
                     #  Angles inversés pour correspondre à la logique
                     if sol_color == att_color:
                         # Correspondance exacte = angle élevé = haute probabilité de mesurer '1'
-                        angle = 7 * np.pi / 8  # ~97% probabilité de '1'
+                        angle = 7 * np.pi / 8  # 157.5° - ~97% probabilité de '1'
                     elif att_color in solution:
                         # Couleur présente = angle moyen-faible = probabilité moyenne-faible de '1'
-                        angle = np.pi / 6      # ~25% probabilité de '1'
+                        angle = np.pi / 6      # 30° - ~25% probabilité de '1'
                     else:
                         # Couleur absente = angle très faible = très faible probabilité de '1'
-                        angle = np.pi / 16     # ~6% probabilité de '1'
+                        angle = np.pi / 16     # 11.25° - ~6% probabilité de '1'
 
                     circuit.ry(angle, i)
 
@@ -481,7 +483,7 @@ async def _quantum_extract_position_probability(
         "attempt_color": att_color,
         "quantum_measurements": total_ones,
         "total_shots": total_measurements,
-        "raw_quantum_probability": round(quantum_probability, 3)  # Pour debug
+        "raw_quantum_probability": round(quantum_probability, 3)
     }
 
 
@@ -491,9 +493,9 @@ async def _quantum_color_selection(
 ) -> int:
     """ Sélection quantique intelligente de couleur """
     if not counts:
-        # Fallback quantique
-        quantum_state = np.random.random()
-        return int(quantum_state * available_colors) + 1
+        raise QuantumExecutionError(
+            "Aucun résultat quantique disponible et impossible de régénérer"
+        )
 
     # Nettoyage des espaces dans les états quantiques
     cleaned_counts = {}
@@ -518,21 +520,31 @@ async def _quantum_color_selection(
         return secrets.randbelow(available_colors) + 1
 
 
-async def _quantum_fallback_generation(
+async def quantum_fallback_generation(
         combination_length: int,
-    available_colors: int
+        available_colors: int
 ) -> List[int]:
-    """Génération quantique de fallback (jamais classique !)"""
+    """Fallback quantique avec distribution optimisée"""
+
+    # Calcul adaptatif du nombre de qubits
+    min_qubits = int(np.ceil(np.log2(available_colors)))
+
+    # Utiliser plus de qubits pour + de randomness quantique
+    n_qubits = max(min_qubits, 4)  # Minimum 4 qubits pour + d'entropie
+    max_states = 2 ** n_qubits
+
     solution = []
 
     for _ in range(combination_length):
-        # Simulation quantique avec distribution
-        quantum_state = np.random.random()
-        color_value = int(quantum_state * available_colors) + 1
+        # Génération sur une plage plus large pour + d'équité
+        random_decimal = secrets.randbelow(max_states)
+        binary_state = format(random_decimal, f'0{n_qubits}b')
+
+        # Conversion cohérente
+        color_value = int(binary_state, 2) % available_colors + 1
         solution.append(color_value)
 
     return solution
-
 
 async def _quantum_simulate_probability(
         position: int,
